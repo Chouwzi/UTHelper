@@ -18,7 +18,7 @@ from core.academic_radar.models import (
 )
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.demo_sandbox import is_demo_account, normalize_demo_username
-from core.portal_client import PortalClient
+from core.portal_client import PortalAuthenticationError, PortalClient
 from core.safe_file_io import SafeFileIO
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,9 @@ class AcademicGradeService:
                 else []
             )
 
+        if not username or not password:
+            return []
+
         today_str = date.today().isoformat()
         cache = self._read_cache(username)
 
@@ -148,17 +151,18 @@ class AcademicGradeService:
                 logger.info("Using cached academic transcript for today (%s)", today_str)
                 return self._normalizer.normalize_transcript(transcript)
 
-        # Fetch from Portal if credentials are provided
-        if username and password:
-            try:
-                logger.info("Fetching full academic transcript from Portal...")
-                raw_transcript = self._portal_client.fetch_full_transcript(username, password)
-                if raw_transcript:
-                    logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
-                    self._write_cache(raw_transcript, username)
-                    return self._normalizer.normalize_transcript(raw_transcript)
-            except Exception as exc:
-                logger.warning("Portal academic fetch failed: %s; checking stale cache", exc)
+        try:
+            logger.info("Fetching full academic transcript from Portal...")
+            raw_transcript = self._portal_client.fetch_full_transcript(username, password)
+            if raw_transcript:
+                logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
+                self._write_cache(raw_transcript, username)
+                return self._normalizer.normalize_transcript(raw_transcript)
+        except PortalAuthenticationError:
+            self.clear_session()
+            raise
+        except Exception as exc:
+            logger.warning("Portal academic fetch failed: %s; checking stale cache", exc)
 
         # Fallback to stale cache if network failed
         if cache and isinstance(cache.get("transcript"), list):
@@ -179,6 +183,10 @@ class AcademicGradeService:
         if is_demo_account(username):
             body = self._portal_client.fetch_credit_progress(username, password)
             return parse_credit_progress(body)
+
+        if not username or not password:
+            return None
+
         _, progress_cache_file = self._cache_paths(username)
 
         cache: dict[str, Any] | None = None
@@ -194,22 +202,24 @@ class AcademicGradeService:
             if progress:
                 return progress
 
-        if username and password:
-            try:
-                body = self._portal_client.fetch_credit_progress(username, password)
-                progress = parse_credit_progress(body)
-                if progress:
-                    try:
-                        self._cache_dir.mkdir(parents=True, exist_ok=True)
-                        SafeFileIO.write_json_atomic(
-                            progress_cache_file,
-                            {"cached_date": date.today().isoformat(), "body": body},
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to write credit progress cache: %s", exc)
-                    return progress
-            except Exception as exc:
-                logger.warning("Portal credit progress fetch failed: %s", exc)
+        try:
+            body = self._portal_client.fetch_credit_progress(username, password)
+            progress = parse_credit_progress(body)
+            if progress:
+                try:
+                    self._cache_dir.mkdir(parents=True, exist_ok=True)
+                    SafeFileIO.write_json_atomic(
+                        progress_cache_file,
+                        {"cached_date": date.today().isoformat(), "body": body},
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to write credit progress cache: %s", exc)
+                return progress
+        except PortalAuthenticationError:
+            self.clear_session()
+            raise
+        except Exception as exc:
+            logger.warning("Portal credit progress fetch failed: %s", exc)
 
         if cache:
             return parse_credit_progress(cache.get("body"))

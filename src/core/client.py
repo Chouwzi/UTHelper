@@ -1,5 +1,4 @@
 import gzip
-import hashlib
 import http.client
 import io
 import json
@@ -7,7 +6,6 @@ import os
 import threading
 import time
 import zlib
-from collections import OrderedDict
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 import urllib.parse
@@ -23,15 +21,16 @@ from core.demo_sandbox import (
     handle_demo_ajax_call,
     handle_demo_ws_call,
     is_demo_account,
-    is_demo_credentials,
     normalize_demo_username,
     render_demo_grade_report_html,
     render_demo_session_html,
+    verify_demo_credentials_cached,
 )
 from core.moodle_sites import (
     COURSES_MOODLE_SITE,
     MoodleSite,
     moodle_site_from_origin,
+    moodle_site_from_url,
 )
 from core.quiz_player import (
     QuizSessionLease,
@@ -471,32 +470,40 @@ def _urlopen(req, timeout=15):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-_DEMO_CRED_CACHE_LOCK = threading.Lock()
-_DEMO_CRED_CACHE: OrderedDict[tuple[str, bytes], bool] = OrderedDict()
-_DEMO_CRED_CACHE_MAX = 4
-
-
 def _verify_demo_credentials_cached(
     username: str | None, password: str | None
 ) -> bool:
-    """Memoize PBKDF2 demo credential checks by `(normalized_user, sha256(pwd))` (no plaintext)."""
-    if not is_demo_account(username) or not isinstance(password, str) or not password:
-        return False
-    norm_user = normalize_demo_username(username)
-    pwd_digest = hashlib.sha256(password.encode("utf-8")).digest()
-    key = (norm_user, pwd_digest)
-    with _DEMO_CRED_CACHE_LOCK:
-        cached = _DEMO_CRED_CACHE.get(key)
-        if cached is not None:
-            _DEMO_CRED_CACHE.move_to_end(key)
-            return cached
-    valid = is_demo_credentials(norm_user, password)
-    with _DEMO_CRED_CACHE_LOCK:
-        _DEMO_CRED_CACHE[key] = valid
-        _DEMO_CRED_CACHE.move_to_end(key)
-        while len(_DEMO_CRED_CACHE) > _DEMO_CRED_CACHE_MAX:
-            _DEMO_CRED_CACHE.popitem(last=False)
-    return valid
+    """Delegate to the shared bounded PBKDF2 demo credential cache in `demo_sandbox`."""
+    return verify_demo_credentials_cached(username, password)
+
+
+def _validated_portal_api_base(raw_base: object) -> str:
+    """Return normalized HTTPS UTH Portal API base URL, or empty string if untrusted."""
+    if not isinstance(raw_base, str) or not raw_base or raw_base != raw_base.strip():
+        return ""
+    if "\\" in raw_base or any(
+        ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw_base
+    ):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(raw_base)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    host = (parsed.hostname or "").casefold()
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.netloc
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.query
+        or parsed.fragment
+        or not (host == "ut.edu.vn" or host.endswith(".ut.edu.vn"))
+    ):
+        return ""
+    return raw_base.rstrip("/")
 
 
 def _demo_mime_for_path(path: str) -> str:
@@ -678,7 +685,10 @@ class MoodleClient:
         )
         active_norm = active_user.strip().casefold()
         with self._get_lock("_session_lock", reentrant=True):
-            owner_changed = bool(self._session_owner and active_user != self._session_owner)
+            owner_changed = bool(
+                self._session_owner
+                and self._session_owner.strip().casefold() != active_norm
+            )
             portal_owner = getattr(self, "_portal_token_username", "")
             uid_owner = getattr(self, "_cached_user_id_username", None)
             if owner_changed:
@@ -697,6 +707,12 @@ class MoodleClient:
     @staticmethod
     def _is_demo_mode() -> bool:
         return is_demo_account(getattr(settings, "UTH_USERNAME", ""))
+
+    @property
+    def is_demo_mode(self) -> bool:
+        return self._is_demo_mode() or is_demo_account(
+            getattr(self, "_session_owner", "")
+        )
 
     @staticmethod
     def _has_valid_demo_credentials() -> bool:
@@ -1147,8 +1163,12 @@ class MoodleClient:
         require_sesskey: bool = True,
     ) -> bool:
         """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey (non-blocking w.r.t clear_session)."""
-        eff_user = settings.UTH_USERNAME if username is None else username
-        eff_pwd = settings.UTH_PASSWORD if password is None else password
+        eff_user = settings.UTH_USERNAME if not username else username
+        eff_pwd = (
+            settings.UTH_PASSWORD
+            if (password is None or (not username and password == ""))
+            else password
+        )
         if is_demo_account(eff_user):
             with self._get_lock("_session_lock", reentrant=True):
                 canonical = normalize_demo_username(eff_user)
@@ -1163,8 +1183,14 @@ class MoodleClient:
                     self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
                     self._last_login_error = "invalid_credentials"
                     return False
-                settings.MOODLE_WS_TOKEN = ""
-                settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                active_norm = (
+                    str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+                )
+                if not username or (
+                    bool(active_norm) and canonical.casefold() == active_norm
+                ):
+                    settings.MOODLE_WS_TOKEN = ""
+                    settings.MOODLE_WS_TOKEN_ORIGIN = ""
                 self._cookie_jar = CookieJar()
                 self._html_opener = None
                 self._sesskey = "demoSessKey2026"
@@ -1661,6 +1687,32 @@ class MoodleClient:
 
         with self._get_lock("_ws_token_lock"):
             credentials_are_explicit = username is not None or password is not None
+            probe_user = (
+                username
+                if credentials_are_explicit
+                else getattr(settings, "UTH_USERNAME", "")
+            )
+            probe_pwd = (
+                password
+                if credentials_are_explicit
+                else getattr(settings, "UTH_PASSWORD", "")
+            )
+            if is_demo_account(probe_user):
+                valid_demo = _verify_demo_credentials_cached(probe_user, probe_pwd)
+                self._last_login_error = "" if valid_demo else "invalid_credentials"
+                if persist:
+                    active_norm = (
+                        str(getattr(settings, "UTH_USERNAME", "") or "")
+                        .strip()
+                        .casefold()
+                    )
+                    target_norm = normalize_demo_username(probe_user).casefold()
+                    if not credentials_are_explicit or (
+                        bool(active_norm) and target_norm == active_norm
+                    ):
+                        settings.MOODLE_WS_TOKEN = ""
+                        settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                return ""
 
             # Reuse only a token whose issuing Moodle origin is recorded exactly.
             if (
@@ -2389,6 +2441,13 @@ class MoodleClient:
 
     def get_portal_token(self, username: str = None, password: str = None) -> str:
         """Lấy JWT token từ Portal UTH (dùng cho autologin deep-link), ràng buộc theo username."""
+        if moodle_site_from_origin(self.moodle_site_origin) is None:
+            return ""
+        portal_base = _validated_portal_api_base(
+            getattr(settings, "PORTAL_API_BASE", "")
+        )
+        if not portal_base:
+            return ""
         user = username if username is not None else settings.UTH_USERNAME
         if is_demo_account(user):
             return ""
@@ -2404,7 +2463,7 @@ class MoodleClient:
                 return cached_token
         try:
             status, data = self._post_json(
-                f"{settings.PORTAL_API_BASE}/user/login",
+                f"{portal_base}/user/login",
                 {"username": user, "password": pwd},
                 timeout=10,
             )
@@ -2424,17 +2483,35 @@ class MoodleClient:
 
     def build_autologin_url(self, activity_url: str = "", username: str = None, password: str = None) -> str:
         """Tạo URL autologin dẫn thẳng tới activity/course."""
+        configured_site = moodle_site_from_origin(
+            getattr(settings, "MOODLE_BASE_URL", "")
+        )
+        client_site = moodle_site_from_origin(self.moodle_site_origin)
+        if configured_site is None or client_site is None or configured_site != client_site:
+            return ""
+        if activity_url:
+            if (
+                not isinstance(activity_url, str)
+                or activity_url != activity_url.strip()
+                or "\\" in activity_url
+                or any(
+                    ch.isspace() or ord(ch) < 32 or ord(ch) == 127
+                    for ch in activity_url
+                )
+                or moodle_site_from_url(activity_url) != configured_site
+            ):
+                return ""
         token = self.get_portal_token(username, password)
         if not token:
             return activity_url
+        safe_token = urllib.parse.quote(token, safe="")
         if activity_url:
-            autologin = (
-                f"{settings.MOODLE_BASE_URL}/login/index.php"
-                f"?token={token}"
+            return (
+                f"{configured_site.origin}/login/index.php"
+                f"?token={safe_token}"
                 f"&wantsurl={urllib.parse.quote(activity_url, safe='')}"
             )
-            return autologin
-        return f"{settings.MOODLE_BASE_URL}/login/index.php?token={token}"
+        return f"{configured_site.origin}/login/index.php?token={safe_token}"
 
     @property
     def last_login_error(self) -> str:

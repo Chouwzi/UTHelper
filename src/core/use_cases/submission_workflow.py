@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlsplit
 
-from config import settings
+from core.client import MoodleClient
 from core.demo_sandbox import is_demo_account
 from core.moodle_service import MoodleService
 from core.moodle_sites import MoodleSite, moodle_site_from_origin, moodle_site_from_url
@@ -235,11 +235,13 @@ class SubmissionWorkflow:
         moodle_service: Optional[MoodleService] = None,
         *,
         site_origin: str | MoodleSite | None = None,
+        username_getter: Callable[[], str] | None = None,
     ):
         self.client = client
         self.moodle_service = moodle_service or MoodleService(
             client.call_ws_api, client=client
         )
+        self._username_getter = username_getter
         if isinstance(site_origin, MoodleSite):
             self.site = site_origin
         elif site_origin is not None:
@@ -248,6 +250,40 @@ class SubmissionWorkflow:
             self.site = moodle_site_from_origin(
                 getattr(client, "moodle_site_origin", None)
             )
+
+    def _is_demo_read_only(self) -> bool:
+        if callable(self._username_getter):
+            try:
+                resolved = self._username_getter()
+            except Exception:
+                resolved = None
+            if isinstance(resolved, str):
+                return is_demo_account(resolved)
+        candidates = (
+            self.client,
+            getattr(self.moodle_service, "client", None),
+            getattr(self.moodle_service, "_client", None),
+            self.moodle_service,
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            demo_prop = getattr(candidate, "is_demo_mode", None)
+            if isinstance(demo_prop, bool):
+                return demo_prop
+            demo_fn = getattr(candidate, "_is_demo_mode", None)
+            if callable(demo_fn):
+                try:
+                    demo_res = demo_fn()
+                except Exception:
+                    demo_res = None
+                if isinstance(demo_res, bool):
+                    return demo_res
+            for attr in ("username", "_username", "_session_owner"):
+                raw_user = getattr(candidate, attr, None)
+                if isinstance(raw_user, str) and raw_user.strip():
+                    return is_demo_account(raw_user)
+        return MoodleClient._is_demo_mode()
 
     def load_snapshot(
         self,
@@ -285,7 +321,7 @@ class SubmissionWorkflow:
         if isinstance(loaded, SubmissionError):
             return SubmissionMutationResult.failure(loaded, None)
         snapshot = loaded.snapshot
-        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+        if self._is_demo_read_only():
             return SubmissionMutationResult.failure(
                 _error(SubmissionErrorCode.DEMO_READ_ONLY), snapshot
             )
@@ -361,7 +397,7 @@ class SubmissionWorkflow:
         if isinstance(loaded, SubmissionError):
             return SubmissionMutationResult.failure(loaded, None)
         snapshot = loaded.snapshot
-        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+        if self._is_demo_read_only():
             return SubmissionMutationResult.failure(
                 _error(SubmissionErrorCode.DEMO_READ_ONLY), snapshot
             )

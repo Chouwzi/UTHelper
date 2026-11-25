@@ -18,7 +18,7 @@ from core.demo_sandbox import (
     get_demo_full_transcript,
     get_demo_week_schedule,
     is_demo_account,
-    is_demo_credentials,
+    verify_demo_credentials_cached,
 )
 from core.today_schedule import (
     ClassSession,
@@ -244,7 +244,7 @@ class PortalClient:
 
     @staticmethod
     def _verify_demo_credentials(username: str, password: str) -> None:
-        if not is_demo_credentials(username, password):
+        if not verify_demo_credentials_cached(username, password):
             raise PortalAuthError(401)
 
     def _request_json(
