@@ -919,12 +919,13 @@ $stageDir = $null
 $statusParent = $null
 $trustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18')
 function Assert-TrustedAdminDir([string]$Path, [System.Security.AccessControl.DirectorySecurity]$Acl, [System.Security.Principal.SecurityIdentifier]$OwnerSid) {
+  if ($null -eq $OwnerSid) { throw 'Missing OwnerSid' }
   if (Test-Path -LiteralPath $Path) {
     $existing = Get-Item -LiteralPath $Path -Force
     if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
       throw ('Refusing reparse point in ' + $Path)
     }
-    Set-Acl -LiteralPath $Path -AclObject $Acl
+    [System.IO.Directory]::SetAccessControl($Path, $Acl)
   } else {
     [void][System.IO.Directory]::CreateDirectory($Path, $Acl)
   }
@@ -933,6 +934,7 @@ function Assert-TrustedAdminDir([string]$Path, [System.Security.AccessControl.Di
     $dirOwnerAcl.SetOwner($OwnerSid)
     Set-Acl -LiteralPath $Path -AclObject $dirOwnerAcl
   } catch {}
+  [System.IO.Directory]::SetAccessControl($Path, $Acl)
   $verifiedItem = Get-Item -LiteralPath $Path -Force
   if ($verifiedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
     throw ('Refusing reparse point after lock in ' + $Path)
@@ -1021,7 +1023,7 @@ try {
   }
 
   $stageDir = Join-Path $stageParent ('stage-' + [guid]::NewGuid().ToString('N'))
-  Assert-TrustedAdminDir $stageDir $adminAcl
+  Assert-TrustedAdminDir $stageDir $adminAcl $adminOwnerSid
 
   $fileName = [System.IO.Path]::GetFileName($packagePath)
   if (-not $fileName) { throw 'Invalid installer filename' }
@@ -1116,12 +1118,13 @@ try {
             [System.Security.AccessControl.AccessControlType]::Allow
           )))
         }
-        Set-Acl -LiteralPath $statusTmp -AclObject $statusFileAcl
+        [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
         try {
           $ownerAcl = Get-Acl -LiteralPath $statusTmp
           $ownerAcl.SetOwner($adminOwnerSid)
           Set-Acl -LiteralPath $statusTmp -AclObject $ownerAcl
         } catch {}
+        [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
       }
       Move-Item -LiteralPath $statusTmp -Destination $safeStatusPath -Force
     }

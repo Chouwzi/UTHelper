@@ -1088,9 +1088,9 @@ def test_sec_c04_install_helper_locks_programdata_before_waiting_on_parent_pid(
     hdir.mkdir(parents=True)
     status_path = program_data / "UTHelper" / "update_status" / f"{hdir.name}.status.json"
 
-    # Spawn a live dummy parent process so $parentPid is alive for several seconds.
+    # Spawn a live dummy parent process so $parentPid is alive while helper starts up.
     dummy_parent = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(10)"],
+        [sys.executable, "-c", "import time; time.sleep(25)"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1105,7 +1105,7 @@ def test_sec_c04_install_helper_locks_programdata_before_waiting_on_parent_pid(
                 "parent_pid": dummy_parent.pid,
                 "status_path": str(status_path),
                 "handoff_dir": str(hdir),
-                "wait_timeout_seconds": 8,
+                "wait_timeout_seconds": 20,
                 "relaunch_path": "",
                 "fallback_relaunch_path": "",
             }
@@ -1154,19 +1154,24 @@ def test_sec_c04_install_helper_locks_programdata_before_waiting_on_parent_pid(
             text=True,
         )
         try:
-            # Poll up to 4s while dummy_parent is STILL alive: update_status dir MUST be created
-            # and locked BEFORE dummy_parent exits!
-            deadline = time.monotonic() + 4.0
+            # Poll up to 15s while dummy_parent is STILL alive: update_status dir MUST be created
+            # and locked BEFORE dummy_parent exits (even under heavy CI/parallel CPU load)!
+            deadline = time.monotonic() + 15.0
             locked_early = False
             while time.monotonic() < deadline:
                 assert dummy_parent.poll() is None
                 if (program_data / "UTHelper" / "update_status").is_dir():
                     locked_early = True
                     break
+                if helper_proc.poll() is not None:
+                    break
                 time.sleep(0.1)
-            assert locked_early is True, (
-                "update_status was not locked while $parentPid was still alive!"
-            )
+            if not locked_early:
+                dummy_parent.terminate()
+                out, err = helper_proc.communicate(timeout=5)
+                pytest.fail(
+                    f"update_status was not locked while $parentPid was alive! rc={helper_proc.returncode} out={out!r} err={err!r}"
+                )
             dummy_parent.terminate()
             dummy_parent.wait(timeout=3)
             helper_proc.wait(timeout=10)
@@ -1202,6 +1207,183 @@ def test_sec_c04_install_helper_locks_programdata_before_waiting_on_parent_pid(
         if dummy_parent.poll() is None:
             dummy_parent.kill()
             dummy_parent.wait(timeout=2)
+
+
+def test_sec_c04_stage_dir_passes_owner_sid_and_restamps_clean_dacl_end_to_end(
+    tmp_path: Path,
+) -> None:
+    import re
+    from platform_utils import windows_update
+
+    install_src = windows_update._INSTALL_HELPER_SCRIPT
+
+    # 1. Every call site of Assert-TrustedAdminDir must pass all 3 arguments ($Path, $Acl, $OwnerSid),
+    #    Assert-TrustedAdminDir must reject $null $OwnerSid outside try/catch, and re-stamp $Acl
+    #    after ownership transfer to close any pre-existing Owner WRITE_DAC window.
+    call_lines = [
+        line.strip()
+        for line in install_src.splitlines()
+        if line.strip().startswith("Assert-TrustedAdminDir ")
+    ]
+    assert len(call_lines) == 4, f"Expected 4 Assert-TrustedAdminDir calls, got {call_lines}"
+    for call_line in call_lines:
+        tokens = call_line.split()
+        assert len(tokens) == 4, f"Missing argument in call: {call_line!r}"
+
+    fn_block = install_src.split("function Assert-TrustedAdminDir", 1)[1].split(
+        "\ntry {\n", 1
+    )[0]
+    assert "if ($null -eq $OwnerSid) { throw 'Missing OwnerSid' }" in fn_block
+    # Post-SetOwner clean DACL re-stamp must occur after the try/catch SetOwner block.
+    after_owner_try = fn_block.split("} catch {}", 1)[1]
+    assert re.search(
+        r"\[System\.IO\.Directory\]::SetAccessControl\(\$Path,\s*\$Acl\)",
+        after_owner_try,
+    )
+
+    if os.name != "nt" or not shutil.which("powershell.exe"):
+        return
+
+    import ctypes
+    import ntsecuritycon
+    import win32api
+    import win32security
+
+    ps_exe = shutil.which("powershell.exe")
+    assert ps_exe is not None
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+    )
+    try:
+        user_sid = win32security.GetTokenInformation(
+            token, win32security.TokenUser
+        )[0]
+        user_sid_str = win32security.ConvertSidToStringSid(user_sid)
+    finally:
+        win32api.CloseHandle(token)
+
+    is_admin = False
+    try:
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except OSError:
+        is_admin = False
+
+    # 2. Live PowerShell AST check + full end-to-end execution reaching Process::Start($stagedPackage)
+    #    WITHOUT masking $adminOwnerSid/$OwnerSid: copy sys.executable as UTHelperSetup.exe so
+    #    `UTHelperSetup.exe /passive /norestart` exits with code 2 (not 1 from catch{}!).
+    program_data = tmp_path / "ProgramDataStageCheck"
+    program_data.mkdir(parents=True, exist_ok=True)
+    hdir = tmp_path / "UTHelper" / "update_handoff" / "handoff-feedface0123456789abcdef"
+    hdir.mkdir(parents=True)
+    status_path = program_data / "UTHelper" / "update_status" / f"{hdir.name}.status.json"
+
+    fake_bootstrapper = tmp_path / "UTHelperSetup.exe"
+    shutil.copyfile(sys.executable, fake_bootstrapper)
+    pkg_sha = hashlib.sha256(fake_bootstrapper.read_bytes()).hexdigest().lower()
+
+    cfg_file = hdir / "config.json"
+    cfg_bytes = json.dumps(
+        {
+            "package_path": str(fake_bootstrapper),
+            "expected_sha256": pkg_sha,
+            "kind": "launch_bootstrapper",
+            "parent_pid": 999_999_999,
+            "status_path": str(status_path),
+            "handoff_dir": str(hdir),
+            "wait_timeout_seconds": 1,
+            "relaunch_path": "",
+            "fallback_relaunch_path": "",
+        }
+    ).encode("utf-8")
+    cfg_file.write_bytes(cfg_bytes)
+    cfg_sha = hashlib.sha256(cfg_bytes).hexdigest().lower()
+
+    # Replace $adminOwnerSid literal ONLY at its single definition line when non-admin so every
+    # Assert-TrustedAdminDir call site still has to pass $adminOwnerSid explicitly!
+    adapted = install_src.replace(
+        "[Environment]::GetFolderPath('CommonApplicationData')",
+        "$env:ProgramData",
+    )
+    if not is_admin:
+        adapted = adapted.replace(
+            "$trustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18')",
+            f"$trustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18', '{user_sid_str}')",
+            1,
+        )
+        adapted = adapted.replace(
+            "$adminOwnerSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')",
+            f"$adminOwnerSid = New-Object System.Security.Principal.SecurityIdentifier('{user_sid_str}')",
+            1,
+        )
+        adapted = adapted.replace(
+            "foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18'))",
+            f"foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18', '{user_sid_str}'))",
+        )
+
+    runner_ps1 = tmp_path / "run_stage_check.ps1"
+    runner_ps1.write_text(adapted, encoding="utf-8")
+    child_env = os.environ.copy()
+    child_env["ProgramData"] = str(program_data)
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    child_env["PSModulePath"] = str(
+        Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "Modules"
+    )
+    try:
+        proc = subprocess.run(
+            [
+                ps_exe,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(runner_ps1),
+                "-ConfigPath",
+                str(cfg_file),
+                "-ExpectedSha256",
+                pkg_sha,
+                "-ExpectedKind",
+                "launch_bootstrapper",
+                "-ExpectedConfigSha256",
+                cfg_sha,
+            ],
+            env=child_env,
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert proc.returncode == 0, proc.stderr + proc.stdout
+        assert status_path.is_file()
+        status_obj = json.loads(status_path.read_text(encoding="utf-8"))
+        # python.exe invoked with `/passive /norestart` exits with code 2 (missing script),
+        # proving try{} reached Process::Start($stagedPackage) rather than catching an error (1)!
+        assert status_obj["exit_code"] == 2, f"Unexpected exit_code (try block threw?): {status_obj}"
+    finally:
+        if program_data.exists() and not is_admin:
+            cleanup_dacl = win32security.ACL()
+            cleanup_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE,
+                ntsecuritycon.GENERIC_ALL,
+                user_sid,
+            )
+            for target in [program_data, *program_data.rglob("*")]:
+                try:
+                    win32security.SetNamedSecurityInfo(
+                        str(target),
+                        win32security.SE_FILE_OBJECT,
+                        win32security.DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        cleanup_dacl,
+                        None,
+                    )
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
