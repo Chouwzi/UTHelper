@@ -239,10 +239,10 @@ def test_python_service_forwards_configuration(monkeypatch):
 
     updated = asyncio.run(
         service.install_update(
-            "/data/user/0/com.uthelper.uthelper/cache/UTHelper-2.2.0.apk",
+            "/data/user/0/io.github.chouwzi.uthelper/cache/UTHelper-2.2.0.apk",
             "ab" * 32,
             123,
-            "com.uthelper.uthelper",
+            "io.github.chouwzi.uthelper",
             2_002_000,
             "cd" * 32,
         )
@@ -252,11 +252,11 @@ def test_python_service_forwards_configuration(monkeypatch):
         "name": "install_update",
         "arguments": {
             "local_path": (
-                "/data/user/0/com.uthelper.uthelper/cache/UTHelper-2.2.0.apk"
+                "/data/user/0/io.github.chouwzi.uthelper/cache/UTHelper-2.2.0.apk"
             ),
             "sha256": "ab" * 32,
             "expected_size": 123,
-            "expected_package_id": "com.uthelper.uthelper",
+            "expected_package_id": "io.github.chouwzi.uthelper",
             "expected_version_code": 2_002_000,
             "expected_certificate_sha256": "cd" * 32,
         },
@@ -283,7 +283,7 @@ def test_python_service_forwards_android_update_download_identity_and_deadlines(
         "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper-2.5.1.apk",
         "ab" * 32,
         123,
-        "com.uthelper.uthelper",
+        "io.github.chouwzi.uthelper",
         2_005_001,
         "cd" * 32,
     )
@@ -443,4 +443,23 @@ def test_sec09_android_plugin_serializes_lifecycle_mutators_under_sync_mutex():
     assert "MoodleSyncWorker.syncMutex.withLock" in configure_block
     assert "MoodleSyncWorker.syncMutex.withLock" in set_creds_block
     assert "MoodleSyncWorker.syncMutex.withLock" in reconcile_block
+
+
+def test_external_intent_launcher_sanitizes_browsable_intents_and_blocks_redirection():
+    plugin = next(ANDROID.rglob("UthBackgroundSyncPlugin.kt")).read_text(encoding="utf-8")
+    swift = (IOS / "Classes/UthBackgroundSyncPlugin.swift").read_text(encoding="utf-8")
+
+    assert '"launch_external_intent" ->' in plugin
+    assert "ActivityAware" in plugin
+    assert "activity ?: context" in plugin
+    assert "buildSafeExternalIntent" in plugin
+    assert "ALLOWED_EXTERNAL_SCHEMES" in plugin
+    assert "isSafePublicHttpsUri" in plugin
+    assert "Intent.URI_INTENT_SCHEME" in plugin
+    assert "Intent.CATEGORY_BROWSABLE" in plugin
+    assert "parsed.component = null" in plugin
+    assert "parsed.selector = null" in plugin
+    assert "parsed.replaceExtras(null" in plugin
+    assert "VIEW_DYNAMIC_LINK" in plugin
+    assert 'case "launch_external_intent":' in swift
 

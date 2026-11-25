@@ -386,7 +386,7 @@ def test_portable_verifier_rechecks_size_hash_and_extension(tmp_path):
         url="https://github.com/Chouwzi/UTHelper/releases/download/v2.2.0/UTHelper-2.2.0.apk",
         sha256=hashlib.sha256(payload).hexdigest(),
         size=len(payload),
-        signer_identity="com.uthelper.uthelper",
+        signer_identity="io.github.chouwzi.uthelper",
         certificate_fingerprint="AB" * 32,
         install_strategy={"kind": "android_package_installer"},
     )

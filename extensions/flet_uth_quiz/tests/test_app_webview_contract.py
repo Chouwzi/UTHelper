@@ -221,3 +221,54 @@ def test_app_webview_oversized_cookie_payload_signals_abort_instead_of_hanging(
     assert sent == []
     assert invoked == [("bootstrap_cookies", {"channel_id": 7, "abort": True})]
 
+
+def test_app_webview_assigns_unique_default_key_and_resets_channel_on_unmount(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flet_uth_quiz import UthAppWebView
+
+    wv1 = UthAppWebView(url="https://courses.ut.edu.vn/mod/url/view.php?id=1")
+    wv2 = UthAppWebView(url="https://courses.ut.edu.vn/mod/url/view.php?id=2")
+    wv_custom = UthAppWebView(
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=3",
+        key="explicit-key",
+    )
+
+    assert isinstance(wv1.key, str) and wv1.key.startswith("uth-app-wv-")
+    assert isinstance(wv2.key, str) and wv2.key.startswith("uth-app-wv-")
+    assert wv1.key != wv2.key
+    assert wv_custom.key == "explicit-key"
+
+    fake_ch_1 = SimpleNamespace(send=lambda _b: None)
+    fake_ch_2 = SimpleNamespace(send=lambda _b: None)
+    monkeypatch.setattr(
+        wv1,
+        "get_data_channel",
+        lambda cid: {1: fake_ch_1, 2: fake_ch_2}.get(cid),
+    )
+    wv1.on_data_channel_open(
+        SimpleNamespace(channel_name="app_webview_cookies", channel_id=1)
+    )
+    assert wv1._cookie_channel_ready.is_set()
+    assert wv1._cookie_channel_id == 1
+
+    # Unmounting on tab switch must clear stale channel state so remount waits for channel 2
+    wv1.will_unmount()
+    assert not wv1._cookie_channel_ready.is_set()
+    assert wv1._cookie_channel_id is None
+    assert wv1._cookie_channel is None
+
+    invoked: list[tuple[str, object]] = []
+
+    async def _invoke(name: str, arguments=None, timeout=None):
+        invoked.append((name, arguments))
+        return True
+
+    monkeypatch.setattr(wv1, "_invoke_method", _invoke)
+    wv1.on_data_channel_open(
+        SimpleNamespace(channel_name="app_webview_cookies", channel_id=2)
+    )
+    assert asyncio.run(wv1.abort_cookie_bootstrap()) is True
+    assert invoked == [("bootstrap_cookies", {"channel_id": 2, "abort": True})]
+
+

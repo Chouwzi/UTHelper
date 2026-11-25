@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flet/flet.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import 'app_webview_settings.dart';
@@ -11,9 +12,12 @@ import 'mobile_session_queue.dart';
 
 const _cookiePayloadLimit = 32 * 1024;
 const _maxInjectedCookies = 64;
-const appWebViewCookieWaitTimeout = Duration(seconds: 10);
+const appWebViewCookieWaitTimeout = Duration(seconds: 4);
 const _cookieQueueTimeout = Duration(seconds: 5);
 const _popupSinkLifetime = Duration(seconds: 4);
+const _popupSinkResolveTimeout = Duration(milliseconds: 800);
+const _defaultSurfaceBgColor = Color(0xFF0F172A);
+const _backgroundSyncChannel = MethodChannel('com.uthelper/background_sync');
 
 /// Serializes host-only cookie installation through [MobileSessionQueue] so
 /// writes never interleave with logout cleanup or quiz origin purges, and pins
@@ -83,10 +87,15 @@ Future<int> installAppWebViewCookies({
 }
 
 class _PopupSinkEntry {
-  const _PopupSinkEntry({required this.windowId, required this.key});
+  const _PopupSinkEntry({
+    required this.windowId,
+    required this.key,
+    required this.allowInPlaceRedirect,
+  });
 
   final int windowId;
   final int key;
+  final bool allowInPlaceRedirect;
 }
 
 class UthAppWebViewControl extends StatefulWidget {
@@ -99,17 +108,24 @@ class UthAppWebViewControl extends StatefulWidget {
 }
 
 class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
-  final GlobalKey _webViewKey = GlobalKey();
+  GlobalKey _webViewKey = GlobalKey();
   InAppWebViewController? _controller;
   String _initialUrl = '';
+  String _currentLoadedUrl = '';
   String? _initialHtml;
   String? _initialBaseUrl;
   bool _viewerLocked = false;
   String? _viewerPrefix;
   Set<int> _allowedLoopbackPorts = const <int>{};
   bool _requireInitialCookies = false;
+  bool _blockUthLms = false;
+  Color _bgColor = _defaultSurfaceBgColor;
   String? _normalizedUserAgent;
   bool _prepared = false;
+  bool _surfaceRevealed = false;
+  bool _hasCommittedPage = false;
+  bool _hasReceivedDocumentTitle = false;
+  bool _suppressCommitUntilNextLoadStart = false;
   bool _disposed = false;
   bool _cookieBootstrapStarted = false;
   bool _initialNavDispatched = false;
@@ -120,21 +136,23 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   StreamSubscription<Uint8List>? _cookieSubscription;
   Uint8List? _pendingCookiePayload;
   Completer<Uint8List>? _cookiePayloadWaiter;
-  final Completer<void> _cookieBootstrapDone = Completer<void>();
+  Completer<void> _cookieBootstrapDone = Completer<void>();
 
   int _nextPopupSinkKey = 0;
   final List<_PopupSinkEntry> _popupSinks = [];
   final Map<int, Timer> _popupSinkTimers = {};
+  final Set<int> _consumedPopupSinkKeys = <int>{};
 
-  @override
-  void initState() {
-    super.initState();
+  void _readControlProperties() {
     _initialUrl = widget.control.getString('url', '') ?? '';
     _initialHtml = widget.control.getString('html');
     _initialBaseUrl = widget.control.getString('base_url');
     _viewerLocked = widget.control.getBool('viewer_locked', false) ?? false;
     _requireInitialCookies =
         widget.control.getBool('require_initial_cookies', false) ?? false;
+    _blockUthLms = widget.control.getBool('block_uth_lms', false) ?? false;
+    _bgColor = parseAppWebViewColor(widget.control.getString('bgcolor')) ??
+        _defaultSurfaceBgColor;
 
     final ports = <int>{};
     final rawPorts = widget.control.get('allowed_loopback_ports');
@@ -156,17 +174,12 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     }
     _allowedLoopbackPorts = ports;
     _viewerPrefix = extractViewerLockPrefix(_initialUrl);
-    if (_viewerPrefix != null) {
+    if (_viewerPrefix != null || _initialHtml != null) {
       _viewerLocked = true;
     }
-
-    widget.control.addInvokeMethodListener(_invokeMethod);
-    unawaited(_prepare());
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
+  void _openCookieChannelIfNeeded() {
     if (_viewerLocked || !_requireInitialCookies || _cookieChannel != null) return;
     final channel = FletBackend.of(context).openDataChannel();
     _cookieChannel = channel;
@@ -177,12 +190,129 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     });
   }
 
+  @override
+  void initState() {
+    super.initState();
+    _readControlProperties();
+    widget.control.addInvokeMethodListener(_invokeMethod);
+    unawaited(_prepare());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _openCookieChannelIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(covariant UthAppWebViewControl oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_disposed) return;
+    if (oldWidget.control.id != widget.control.id) {
+      oldWidget.control.removeInvokeMethodListener(_invokeMethod);
+      widget.control.addInvokeMethodListener(_invokeMethod);
+      _cookieSubscription?.cancel();
+      _cookieSubscription = null;
+      _cookieChannel?.close();
+      _cookieChannel = null;
+      _pendingCookiePayload?.fillRange(0, _pendingCookiePayload!.length, 0);
+      _pendingCookiePayload = null;
+      final waiter = _cookiePayloadWaiter;
+      if (waiter != null && !waiter.isCompleted) {
+        waiter.completeError(StateError('replaced'));
+      }
+      if (!_cookieBootstrapDone.isCompleted) {
+        _cookieBootstrapDone.complete();
+      }
+      _cookieBootstrapDone = Completer<void>();
+      _controller = null;
+      _currentLoadedUrl = '';
+      _surfaceRevealed = false;
+      _hasCommittedPage = false;
+      _hasReceivedDocumentTitle = false;
+      _suppressCommitUntilNextLoadStart = false;
+      _cookieBootstrapStarted = false;
+      _initialNavDispatched = false;
+      _lateCookieReloaded = false;
+      _webViewKey = GlobalKey();
+      _readControlProperties();
+      _openCookieChannelIfNeeded();
+      return;
+    }
+
+    final nextBg = parseAppWebViewColor(widget.control.getString('bgcolor'));
+    if (nextBg != null && nextBg != _bgColor) {
+      setState(() => _bgColor = nextBg);
+    }
+
+    _requireInitialCookies =
+        widget.control.getBool('require_initial_cookies', false) ?? false;
+    _blockUthLms = widget.control.getBool('block_uth_lms', false) ?? false;
+    final nextHtml = widget.control.getString('html');
+    final nextBaseUrl = widget.control.getString('base_url');
+    if (nextHtml != null && nextHtml != _initialHtml) {
+      _initialHtml = nextHtml;
+      _initialBaseUrl = nextBaseUrl;
+      final ctrl = _controller;
+      if (ctrl != null) {
+        unawaited(_loadHtmlInternal(ctrl, nextHtml, baseUrl: nextBaseUrl));
+      }
+      return;
+    }
+
+    final nextUrl = widget.control.getString('url', '') ?? '';
+    if (shouldNavigateOnWidgetUrlSync(
+      nextUrl: nextUrl,
+      previousInitialUrl: _initialUrl,
+      currentLoadedUrl: _currentLoadedUrl,
+    )) {
+      _initialUrl = nextUrl;
+      final nextPrefix = extractViewerLockPrefix(nextUrl);
+      if (nextPrefix != null) {
+        _viewerPrefix = nextPrefix;
+        _viewerLocked = true;
+      }
+      final uri = Uri.tryParse(nextUrl);
+      if (uri != null &&
+          uri.scheme.toLowerCase() == 'http' &&
+          (uri.host == '127.0.0.1' || uri.host.toLowerCase() == 'localhost') &&
+          uri.hasPort) {
+        _allowedLoopbackPorts = {..._allowedLoopbackPorts, uri.port};
+      }
+      final ctrl = _controller;
+      if (ctrl != null) {
+        unawaited(_navigateInternal(ctrl, nextUrl));
+      }
+    } else if (nextUrl.isNotEmpty) {
+      _initialUrl = nextUrl;
+    }
+  }
+
+  bool _detectIsTablet() {
+    if (mounted) {
+      final media = context.getInheritedWidgetOfExactType<MediaQuery>();
+      if (media != null && media.data.size.shortestSide > 0) {
+        return media.data.size.shortestSide >= 600.0;
+      }
+    }
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isNotEmpty) {
+      final view = views.first;
+      final dpr = view.devicePixelRatio > 0 ? view.devicePixelRatio : 1.0;
+      return (view.physicalSize / dpr).shortestSide >= 600.0;
+    }
+    return false;
+  }
+
   Future<void> _prepare() async {
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       try {
         final defaultUa = await InAppWebViewController.getDefaultUserAgent()
             .timeout(const Duration(seconds: 3));
-        _normalizedUserAgent = normalizeEmbeddedUserAgent(defaultUa);
+        _normalizedUserAgent = normalizeEmbeddedUserAgent(
+          defaultUa,
+          isTablet: _detectIsTablet(),
+        );
       } catch (_) {
         _normalizedUserAgent = null;
       }
@@ -271,6 +401,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         disposed: _disposed,
         hasController: _controller != null,
         initialUrl: _initialUrl,
+        currentLoadedUrl: _currentLoadedUrl,
       )) {
         _lateCookieReloaded = true;
         unawaited(_navigateInternal(_controller!, _initialUrl));
@@ -313,6 +444,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       viewerLocked: _viewerLocked,
       viewerPrefix: _viewerPrefix,
       allowedLoopbackPorts: _allowedLoopbackPorts,
+      blockUthLms: _blockUthLms,
     );
     final resolved = switch (decision.kind) {
       AppNavigationKind.allow => targetUrl.trim(),
@@ -320,8 +452,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       AppNavigationKind.cancel => null,
     };
     if (resolved == null || resolved.isEmpty) return false;
+    _currentLoadedUrl = resolved;
     try {
-      await controller.loadUrl(urlRequest: URLRequest(url: WebUri(resolved)));
+      await controller.loadUrl(
+        urlRequest: URLRequest(
+          url: WebUri(resolved, forceToStringRawValue: true),
+        ),
+      );
       return true;
     } catch (_) {
       return false;
@@ -337,12 +474,14 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     if (baseUrl != null && baseUrl.trim().isNotEmpty) {
       safeBase = WebUri(baseUrl.trim());
     }
+    final effectiveBase = safeBase ?? WebUri('about:blank');
     try {
       await controller.loadData(
         data: html,
         mimeType: 'text/html',
         encoding: 'utf-8',
-        baseUrl: safeBase,
+        baseUrl: effectiveBase,
+        historyUrl: effectiveBase,
       );
       return true;
     } catch (_) {
@@ -462,6 +601,21 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         final ctrl = _controller;
         if (ctrl == null) return false;
         try {
+          final activeUrl = (await ctrl.getUrl())?.toString();
+          if (shouldReloadViaInitialUrl(
+            activeControllerUrl: activeUrl,
+            initialUrl: _initialUrl,
+            hasInitialHtml: _initialHtml != null,
+          )) {
+            return await _navigateInternal(ctrl, _initialUrl);
+          }
+          if (_initialHtml != null && (activeUrl == null || activeUrl.isEmpty)) {
+            return await _loadHtmlInternal(
+              ctrl,
+              _initialHtml!,
+              baseUrl: _initialBaseUrl,
+            );
+          }
           await ctrl.reload();
           return true;
         } catch (_) {
@@ -471,29 +625,144 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     return false;
   }
 
+  void _revealSurfaceIfReady(String? url) {
+    if (_disposed) return;
+    if (shouldRevealAppWebViewSurface(
+      url: url,
+      hasInitialHtml: _initialHtml != null,
+      suppressAbortedRedirectCommit: _suppressCommitUntilNextLoadStart,
+    )) {
+      _hasCommittedPage = true;
+      if (!_surfaceRevealed && mounted) {
+        setState(() => _surfaceRevealed = true);
+      }
+    }
+  }
+
+  Future<bool> _launchNativeExternalUri(String uri) async {
+    if (kIsWeb ||
+        (defaultTargetPlatform != TargetPlatform.android &&
+            defaultTargetPlatform != TargetPlatform.iOS)) {
+      return false;
+    }
+    try {
+      final ok = await _backgroundSyncChannel
+          .invokeMethod<bool>('launch_external_intent', {'uri': uri})
+          .timeout(const Duration(seconds: 3));
+      return ok == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _executeExternalAppPlan(
+    InAppWebViewController controller,
+    ExternalAppNavigationPlan plan, {
+    required bool hasGesture,
+    required bool hadCommittedBeforeHandoff,
+  }) async {
+    final launched = await _launchNativeExternalUri(plan.launchUri);
+    if (_disposed) return;
+    if (launched) {
+      if (!hadCommittedBeforeHandoff) {
+        widget.control.triggerEvent(
+          'web_error',
+          '$appWebViewExternalLaunchedPrefix${plan.scheme}',
+        );
+      } else if (_hasCommittedPage) {
+        widget.control.triggerEvent('page_ended', _currentLoadedUrl);
+      }
+      return;
+    }
+
+    if (hasGesture && plan.marketFallbackUri != null) {
+      final storeOpened = await _launchNativeExternalUri(plan.marketFallbackUri!);
+      if (_disposed) return;
+      if (storeOpened) {
+        if (!hadCommittedBeforeHandoff) {
+          widget.control.triggerEvent(
+            'web_error',
+            '$appWebViewExternalLaunchedPrefix${plan.scheme}',
+          );
+        } else if (_hasCommittedPage) {
+          widget.control.triggerEvent('page_ended', _currentLoadedUrl);
+        }
+        return;
+      }
+    }
+
+    if (plan.httpsFallbackUrl != null && !plan.isStoreFallback) {
+      final fallback = plan.httpsFallbackUrl!;
+      _currentLoadedUrl = fallback;
+      unawaited(
+        controller
+            .loadUrl(
+              urlRequest: URLRequest(
+                url: WebUri(fallback, forceToStringRawValue: true),
+              ),
+            )
+            .catchError((_) {}),
+      );
+      return;
+    }
+
+    if (!hadCommittedBeforeHandoff) {
+      widget.control.triggerEvent(
+        'web_error',
+        '$appWebViewExternalMissingPrefix${plan.scheme}',
+      );
+    } else if (_hasCommittedPage) {
+      widget.control.triggerEvent('page_ended', _currentLoadedUrl);
+    }
+  }
+
   Future<bool> _handleCreateWindow(
     InAppWebViewController controller,
     CreateWindowAction action,
   ) async {
     if (_disposed) return false;
+    final rawPopupUri = action.request.url;
+    final rawPopupUrl = rawPopupUri?.rawValue.isNotEmpty == true
+        ? rawPopupUri!.rawValue
+        : rawPopupUri?.toString();
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      final extPlan = resolveExternalAppNavigation(
+        rawPopupUrl,
+        isForMainFrame: true,
+        viewerLocked: _viewerLocked,
+        currentUrl: _currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl,
+        blockUthLms: _blockUthLms,
+        platform: defaultTargetPlatform,
+      );
+      if (extPlan != null) {
+        unawaited(
+          _executeExternalAppPlan(
+            controller,
+            extPlan,
+            hasGesture: true,
+            hadCommittedBeforeHandoff: true,
+          ),
+        );
+        return false;
+      }
+    }
     final target = resolveCreateWindowInPlaceTarget(
-      action.request.url?.toString(),
+      rawPopupUrl,
       viewerLocked: _viewerLocked,
       allowedLoopbackPorts: _allowedLoopbackPorts,
+      blockUthLms: _blockUthLms,
     );
     if (target != null) {
-      unawaited(
-        controller
-            .loadUrl(urlRequest: URLRequest(url: WebUri(target)))
-            .catchError((_) {}),
-      );
+      unawaited(_navigateInternal(controller, target));
     }
-    // On iOS/Windows returning false from onCreateWindow would otherwise navigate
-    // the main frame to even blocked URLs; sink the child windowId cleanly.
-    if (!kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.iOS ||
-            defaultTargetPlatform == TargetPlatform.windows)) {
+    // On Android, JS `window.open(url, '_blank')` arrives with `request.url == null`
+    // and holds a pending `WebViewTransport` (`resultMsg`) until a child WebView
+    // attaches; on iOS/Windows returning false navigates the main frame to blocked URLs.
+    if (!kIsWeb && shouldAdoptAppPopupWindowSink(defaultTargetPlatform)) {
       final sinkKey = _nextPopupSinkKey++;
+      final allowDeferredRedirect = target == null && !_viewerLocked;
       _popupSinkTimers[sinkKey] = Timer(
         _popupSinkLifetime,
         () => _removePopupSink(sinkKey),
@@ -502,10 +771,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         trimPopupSinksToCap(
           _popupSinks,
           maxCount: maxAppPopupSinks,
-          onEvict: (oldest) => _popupSinkTimers.remove(oldest.key)?.cancel(),
+          onEvict: (oldest) {
+            _popupSinkTimers.remove(oldest.key)?.cancel();
+            _consumedPopupSinkKeys.remove(oldest.key);
+          },
         );
         _popupSinks.add(
-          _PopupSinkEntry(windowId: action.windowId, key: sinkKey),
+          _PopupSinkEntry(
+            windowId: action.windowId,
+            key: sinkKey,
+            allowInPlaceRedirect: allowDeferredRedirect,
+          ),
         );
       });
       return true;
@@ -515,8 +791,59 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
 
   void _removePopupSink(int key) {
     _popupSinkTimers.remove(key)?.cancel();
+    _consumedPopupSinkKeys.remove(key);
     if (_disposed || !mounted) return;
     setState(() => _popupSinks.removeWhere((item) => item.key == key));
+  }
+
+  void _handlePopupSinkTarget(_PopupSinkEntry sink, String? rawUrl) {
+    if (_disposed ||
+        !sink.allowInPlaceRedirect ||
+        _consumedPopupSinkKeys.contains(sink.key) ||
+        isTransientPopupSinkBootstrapUrl(rawUrl)) {
+      return;
+    }
+    if (!kIsWeb &&
+        _controller != null &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      final extPlan = resolveExternalAppNavigation(
+        rawUrl,
+        isForMainFrame: true,
+        viewerLocked: _viewerLocked,
+        currentUrl: _currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl,
+        blockUthLms: _blockUthLms,
+        platform: defaultTargetPlatform,
+      );
+      if (extPlan != null) {
+        _consumedPopupSinkKeys.add(sink.key);
+        unawaited(
+          _executeExternalAppPlan(
+            _controller!,
+            extPlan,
+            hasGesture: true,
+            hadCommittedBeforeHandoff: true,
+          ),
+        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _removePopupSink(sink.key);
+        });
+        return;
+      }
+    }
+    final deferredTarget = resolveCreateWindowInPlaceTarget(
+      rawUrl,
+      viewerLocked: _viewerLocked,
+      allowedLoopbackPorts: _allowedLoopbackPorts,
+      blockUthLms: _blockUthLms,
+    );
+    if (deferredTarget != null && _controller != null) {
+      _consumedPopupSinkKeys.add(sink.key);
+      unawaited(_navigateInternal(_controller!, deferredTarget));
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _removePopupSink(sink.key);
+    });
   }
 
   Widget _buildPopupSink(_PopupSinkEntry sink) {
@@ -533,15 +860,35 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             javaScriptEnabled: false,
           ),
           onWebViewCreated: (ctrl) {
-            unawaited(ctrl.stopLoading().catchError((_) {}));
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              _removePopupSink(sink.key);
-            });
+            if (!sink.allowInPlaceRedirect) {
+              unawaited(ctrl.stopLoading().catchError((_) {}));
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _removePopupSink(sink.key);
+              });
+            } else {
+              _popupSinkTimers[sink.key]?.cancel();
+              _popupSinkTimers[sink.key] = Timer(
+                _popupSinkResolveTimeout,
+                () => _removePopupSink(sink.key),
+              );
+            }
           },
-          onLoadStart: (ctrl, _u) =>
-              unawaited(ctrl.stopLoading().catchError((_) {})),
-          shouldOverrideUrlLoading: (_c, _a) async =>
-              NavigationActionPolicy.CANCEL,
+          onLoadStart: (ctrl, url) {
+            final urlStr = url?.toString();
+            if (sink.allowInPlaceRedirect &&
+                !_consumedPopupSinkKeys.contains(sink.key) &&
+                isTransientPopupSinkBootstrapUrl(urlStr)) {
+              return;
+            }
+            _handlePopupSinkTarget(sink, urlStr);
+            unawaited(ctrl.stopLoading().catchError((_) {}));
+          },
+          shouldOverrideUrlLoading: (_c, action) async {
+            if (action.isForMainFrame) {
+              _handlePopupSinkTarget(sink, action.request.url?.toString());
+            }
+            return NavigationActionPolicy.CANCEL;
+          },
           onCreateWindow: (_c, _a) async => false,
         ),
       ),
@@ -550,10 +897,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
 
   @override
   Widget build(BuildContext context) {
+    final effectiveBgColor = widget.control.getColor('bgcolor', context) ??
+        parseAppWebViewColor(widget.control.getString('bgcolor')) ??
+        Theme.of(context).scaffoldBackgroundColor;
+
     if (!_prepared) {
       return LayoutControl(
         control: widget.control,
-        child: const SizedBox.expand(),
+        child: ColoredBox(
+          color: effectiveBgColor,
+          child: const SizedBox.expand(),
+        ),
       );
     }
 
@@ -568,26 +922,111 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               viewerLocked: _viewerLocked,
               viewerPrefix: _viewerPrefix,
               userAgent: _normalizedUserAgent,
+              isInspectable: kDebugMode && !_viewerLocked,
             ),
             onWebViewCreated: _onWebViewCreated,
             shouldOverrideUrlLoading: (controller, action) async {
               if (_disposed) return NavigationActionPolicy.CANCEL;
+              final rawActionUri = action.request.url;
+              final actionUrl =
+                  rawActionUri?.rawValue.isNotEmpty == true
+                      ? rawActionUri!.rawValue
+                      : rawActionUri?.toString();
+              final effectiveCurrentUrl =
+                  _currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl;
+
+              if (!kIsWeb &&
+                  (defaultTargetPlatform == TargetPlatform.android ||
+                      defaultTargetPlatform == TargetPlatform.iOS)) {
+                final externalPlan = resolveExternalAppNavigation(
+                  actionUrl,
+                  isForMainFrame: action.isForMainFrame,
+                  viewerLocked: _viewerLocked,
+                  currentUrl: effectiveCurrentUrl,
+                  blockUthLms: _blockUthLms,
+                  platform: defaultTargetPlatform,
+                );
+                if (externalPlan != null) {
+                  final preDocumentRedirect =
+                      isUncommittedPreDocumentExternalRedirect(
+                    hasCommittedPage: _hasCommittedPage,
+                    hasDocumentTitle: _hasReceivedDocumentTitle,
+                    isRedirect: action.isRedirect,
+                  );
+                  if (preDocumentRedirect) {
+                    _suppressCommitUntilNextLoadStart = true;
+                  }
+                  unawaited(
+                    _executeExternalAppPlan(
+                      controller,
+                      externalPlan,
+                      hasGesture: action.hasGesture ?? false,
+                      hadCommittedBeforeHandoff: !preDocumentRedirect,
+                    ),
+                  );
+                  return NavigationActionPolicy.CANCEL;
+                }
+              }
+
               final decision = decideAppWebViewNavigation(
-                action.request.url?.toString(),
+                actionUrl,
                 isForMainFrame: action.isForMainFrame,
                 viewerLocked: _viewerLocked,
                 viewerPrefix: _viewerPrefix,
                 allowedLoopbackPorts: _allowedLoopbackPorts,
+                blockUthLms: _blockUthLms,
               );
               if (decision.kind == AppNavigationKind.redirectInPlace &&
                   decision.targetUrl != null) {
-                unawaited(
-                  controller
-                      .loadUrl(
-                        urlRequest: URLRequest(url: WebUri(decision.targetUrl!)),
-                      )
-                      .catchError((_) {}),
-                );
+                final redirectTarget = decision.targetUrl!;
+                if (!_hasCommittedPage) {
+                  _suppressCommitUntilNextLoadStart = true;
+                }
+                _currentLoadedUrl = redirectTarget;
+                Future<void>.delayed(Duration.zero, () {
+                  if (_disposed) return;
+                  unawaited(
+                    controller
+                        .loadUrl(
+                          urlRequest: URLRequest(
+                            url: WebUri(
+                              redirectTarget,
+                              forceToStringRawValue: true,
+                            ),
+                          ),
+                        )
+                        .catchError((_) {}),
+                  );
+                });
+                return NavigationActionPolicy.CANCEL;
+              }
+              if (!kIsWeb &&
+                  shouldUseCleanAndroidMainFrameLoad(
+                    platform: defaultTargetPlatform,
+                    viewerLocked: _viewerLocked,
+                    isForMainFrame: action.isForMainFrame,
+                    decisionKind: decision.kind,
+                    rawUrl: actionUrl,
+                    method: action.request.method,
+                    currentUrl: effectiveCurrentUrl,
+                  )) {
+                final cleanUrl = actionUrl!.trim();
+                if (!_hasCommittedPage) {
+                  _suppressCommitUntilNextLoadStart = true;
+                }
+                _currentLoadedUrl = cleanUrl;
+                Future<void>.delayed(Duration.zero, () {
+                  if (_disposed) return;
+                  unawaited(
+                    controller
+                        .loadUrl(
+                          urlRequest: URLRequest(
+                            url: WebUri(cleanUrl, forceToStringRawValue: true),
+                          ),
+                        )
+                        .catchError((_) {}),
+                  );
+                });
                 return NavigationActionPolicy.CANCEL;
               }
               return decision.kind == AppNavigationKind.allow
@@ -595,28 +1034,75 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                   : NavigationActionPolicy.CANCEL;
             },
             onCreateWindow: _handleCreateWindow,
+            onDownloadStartRequest: (_controller, downloadStartRequest) {
+              if (_disposed) return;
+              final extUrl = resolveDownloadExternalUrl(
+                downloadStartRequest.url.toString(),
+                viewerLocked: _viewerLocked,
+                blockUthLms: _blockUthLms,
+              );
+              if (extUrl != null) {
+                widget.control.triggerEvent('external_url', extUrl);
+              }
+            },
             onLoadStart: (controller, url) {
               if (_disposed) return;
               final urlStr = url?.toString() ?? '';
-              if (urlStr.isNotEmpty && urlStr.toLowerCase() != 'about:blank') {
+              final urlLower = urlStr.toLowerCase();
+              final isTransientAbout = urlLower == 'about:blank' ||
+                  urlLower.startsWith('about:blank?') ||
+                  urlLower.startsWith('about:blank#') ||
+                  (!_viewerLocked &&
+                      (urlLower == 'about:srcdoc' ||
+                          urlLower.startsWith('about:srcdoc?') ||
+                          urlLower.startsWith('about:srcdoc#')));
+              if (urlStr.isNotEmpty && !isTransientAbout) {
                 final decision = decideAppWebViewNavigation(
                   urlStr,
                   isForMainFrame: true,
                   viewerLocked: _viewerLocked,
                   viewerPrefix: _viewerPrefix,
                   allowedLoopbackPorts: _allowedLoopbackPorts,
+                  blockUthLms: _blockUthLms,
                 );
+                if (decision.kind == AppNavigationKind.redirectInPlace &&
+                    decision.targetUrl != null) {
+                  unawaited(controller.stopLoading().catchError((_) {}));
+                  _currentLoadedUrl = decision.targetUrl!;
+                  unawaited(
+                    controller
+                        .loadUrl(
+                          urlRequest: URLRequest(
+                            url: WebUri(
+                              decision.targetUrl!,
+                              forceToStringRawValue: true,
+                            ),
+                          ),
+                        )
+                        .catchError((_) {}),
+                  );
+                  return;
+                }
                 if (decision.kind != AppNavigationKind.allow) {
                   unawaited(controller.stopLoading().catchError((_) {}));
                   return;
                 }
+                if (!urlLower.startsWith('blob:')) {
+                  _currentLoadedUrl = urlStr;
+                }
+                _suppressCommitUntilNextLoadStart = false;
               }
               widget.control.triggerEvent('page_started', urlStr);
               unawaited(_emitHistoryState(controller));
             },
+            onPageCommitVisible: (_controller, url) {
+              if (_suppressCommitUntilNextLoadStart) return;
+              _revealSurfaceIfReady(url?.toString());
+            },
             onLoadStop: (controller, url) async {
-              if (_disposed) return;
+              if (_disposed || _suppressCommitUntilNextLoadStart) return;
               final urlStr = url?.toString() ?? '';
+              _revealSurfaceIfReady(urlStr);
               widget.control.triggerEvent('page_ended', urlStr);
               await _emitHistoryState(controller);
               try {
@@ -630,13 +1116,30 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               if (_disposed) return;
               final urlStr = url?.toString() ?? '';
               if (urlStr.isNotEmpty) {
+                final urlLower = urlStr.toLowerCase();
+                if (!urlLower.startsWith('about:') &&
+                    !urlLower.startsWith('blob:')) {
+                  _currentLoadedUrl = urlStr;
+                }
                 widget.control.triggerEvent('url_change', urlStr);
               }
               unawaited(_emitHistoryState(controller));
             },
             onTitleChanged: (_controller, title) {
-              if (_disposed || title == null || title.isEmpty) return;
-              widget.control.triggerEvent('title_change', title);
+              if (_disposed || title == null) return;
+              final trimmedTitle = title.trim();
+              if (trimmedTitle.isEmpty) return;
+              final lowerTitle = trimmedTitle.toLowerCase();
+              final activeLower =
+                  (_currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl)
+                      .toLowerCase();
+              if (lowerTitle != 'about:blank' &&
+                  !lowerTitle.startsWith('http://') &&
+                  !lowerTitle.startsWith('https://') &&
+                  (activeLower.isEmpty || !activeLower.contains(lowerTitle))) {
+                _hasReceivedDocumentTitle = true;
+              }
+              widget.control.triggerEvent('title_change', trimmedTitle);
             },
             onReceivedError: (_controller, request, error) {
               if (_disposed) return;
@@ -664,6 +1167,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               }
             },
           ),
+          if (!_surfaceRevealed)
+            IgnorePointer(
+              child: ColoredBox(
+                color: effectiveBgColor,
+                child: const SizedBox.expand(),
+              ),
+            ),
           for (final sink in _popupSinks) _buildPopupSink(sink),
         ],
       ),

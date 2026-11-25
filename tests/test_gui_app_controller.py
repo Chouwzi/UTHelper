@@ -1014,7 +1014,7 @@ def test_android_launcher_forwards_verified_local_path_identity_version_and_sign
         url="https://github.com/Chouwzi/UTHelper/releases/download/v2.2.3/UTHelper-2.2.3.apk",
         sha256="a" * 64,
         size=123,
-        signer_identity="com.uthelper.uthelper",
+        signer_identity="io.github.chouwzi.uthelper",
         certificate_fingerprint="b" * 64,
         install_strategy={"kind": "android_package_installer"},
     )
@@ -1026,7 +1026,7 @@ def test_android_launcher_forwards_verified_local_path_identity_version_and_sign
             str(Path("UTHelper.apk")),
             package.sha256,
             package.size,
-            "com.uthelper.uthelper",
+            "io.github.chouwzi.uthelper",
             2_002_003,
             package.certificate_fingerprint,
         )
@@ -1337,14 +1337,14 @@ def test_open_store_url_uses_external_launch_and_https_fallback(monkeypatch):
     )
 
     ok = controller._open_store_url(
-        "market://details?id=com.uthelper.uthelper",
-        "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+        "market://details?id=io.github.chouwzi.uthelper",
+        "https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
     )
     assert ok is True
     assert calls == [
-        ("market://details?id=com.uthelper.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
+        ("market://details?id=io.github.chouwzi.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
         (
-            "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+            "https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
             ft.LaunchMode.EXTERNAL_APPLICATION,
         ),
     ]
@@ -1438,7 +1438,7 @@ def test_create_update_coordinator_android_uses_run_page_task_verifier_and_safe_
         "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
         "a" * 64,
         10,
-        "com.uthelper.uthelper",
+        "io.github.chouwzi.uthelper",
         "b" * 64,
         {"kind": "android_package_installer"},
     )
@@ -2035,7 +2035,7 @@ def test_app_controller_retry_after_sha256_mismatch_redownloads_with_real_coordi
         url="https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
         sha256="a" * 64,
         size=7,
-        signer_identity="com.uthelper.uthelper",
+        signer_identity="io.github.chouwzi.uthelper",
         certificate_fingerprint="b" * 64,
         install_strategy={"kind": "android_package_installer"},
     )

@@ -7,6 +7,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from typing import Any, Optional
 
@@ -14,6 +15,7 @@ import flet as ft
 from bs4 import BeautifulSoup
 
 from core.url_validation import validate_https_url, validate_public_https_url
+from gui.core import utils as _gui_utils
 from gui.core.theme import C
 from gui.core.utils import html_to_markdown
 
@@ -25,6 +27,35 @@ except ImportError:  # pragma: no cover - optional on non-mobile CI environments
 logger = logging.getLogger(__name__)
 
 _MAX_PREVIEW_BYTES = 2 * 1024 * 1024
+_DEFAULT_DEMO_LMS_WEBVIEW_GUARD_MESSAGE = (
+    "Phiên xem thử (Demo) sử dụng dữ liệu mẫu ngoại tuyến. "
+    "Đăng nhập bằng tài khoản sinh viên UTH để mở cổng LMS trực tuyến."
+)
+
+
+def _is_demo_lms_blocked(url: object) -> bool:
+    if not url:
+        return False
+    try:
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+    except ImportError:
+        return False
+    if not is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+        return False
+    is_uth_lms_fn = getattr(_gui_utils, "is_uth_lms_url", None)
+    return bool(callable(is_uth_lms_fn) and is_uth_lms_fn(url))
+
+
+def _set_modal_webview_occlusion(occluded: bool, *, token: str) -> None:
+    from gui.components.courses.embedded_webview_host import (
+        set_global_webview_occlusion,
+    )
+
+    try:
+        set_global_webview_occlusion("modal_dialog", occluded, token=token)
+    except TypeError:
+        set_global_webview_occlusion("modal_dialog", occluded)
 
 
 class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -32,7 +63,10 @@ class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is None:
             return None
-        if validate_public_https_url(redirected.full_url, resolve_dns=True) is None:
+        if (
+            validate_public_https_url(redirected.full_url, resolve_dns=True) is None
+            or _is_demo_lms_blocked(redirected.full_url)
+        ):
             raise urllib.error.HTTPError(
                 redirected.full_url,
                 code,
@@ -60,7 +94,7 @@ def supports_native_webview(page: Optional[ft.Page]) -> bool:
 def _fetch_https_preview(url: str) -> tuple[str, str]:
     """Fetch bounded HTTPS HTML and convert it into a readable preview."""
     validated = validate_public_https_url(url, resolve_dns=True)
-    if validated is None:
+    if validated is None or _is_demo_lms_blocked(validated):
         return "", ""
     opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
     req = urllib.request.Request(
@@ -73,7 +107,10 @@ def _fetch_https_preview(url: str) -> tuple[str, str]:
     )
     with opener.open(req, timeout=10) as resp:
         final_url = getattr(resp, "geturl", lambda: validated)()
-        if validate_public_https_url(final_url, resolve_dns=True) is None:
+        if (
+            validate_public_https_url(final_url, resolve_dns=True) is None
+            or _is_demo_lms_blocked(final_url)
+        ):
             return "", ""
         raw = resp.read(_MAX_PREVIEW_BYTES + 1)
     if len(raw) > _MAX_PREVIEW_BYTES:
@@ -143,10 +180,40 @@ class InAppWebViewDialog:
         self._on_open_external = on_open_external
         self._dialog: Optional[ft.AlertDialog] = None
         self._webview = None
+        self._embedded_host = None
         self._closed = False
+        self._occlusion_token = f"in_app_webview_dlg_{uuid.uuid4().hex}"
+        self._occlusion_active = False
+
+    def _show_demo_guard_snackbar(self) -> None:
+        overlay = getattr(self._page, "overlay", None)
+        if not isinstance(overlay, list):
+            return
+        guard_msg = getattr(
+            _gui_utils,
+            "DEMO_LMS_WEBVIEW_GUARD_MESSAGE",
+            _DEFAULT_DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+        )
+        sb = ft.SnackBar(
+            content=ft.Text(guard_msg, size=13, color=C.TEXT_PRIMARY),
+            bgcolor=C.SURFACE,
+            duration=3000,
+        )
+        overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
+        overlay.append(sb)
+        sb.open = True
+        update_fn = getattr(self._page, "update", None)
+        if callable(update_fn):
+            try:
+                update_fn()
+            except Exception:
+                pass
 
     def show(self) -> bool:
         if not self._url or self._page is None:
+            return False
+        if _is_demo_lms_blocked(self._url):
+            self._show_demo_guard_snackbar()
             return False
 
         host = urllib.parse.urlsplit(self._url).hostname or self._url
@@ -199,33 +266,47 @@ class InAppWebViewDialog:
             ),
         )
 
+        from gui.components.courses.embedded_webview_host import (
+            _is_inappwebview_mobile_platform,
+            build_embedded_webview_host,
+        )
+
+        is_inapp_mobile = _is_inappwebview_mobile_platform(self._page)
+        back_icon_btn: Optional[ft.IconButton] = None
+        forward_icon_btn: Optional[ft.IconButton] = None
         toolbar_actions: list[ft.Control] = []
-        if supports_native_webview(self._page):
+        if is_inapp_mobile or supports_native_webview(self._page):
+            back_icon_btn = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                disabled_color=C.TEXT_SECONDARY,
+                disabled=is_inapp_mobile,
+                icon_size=19,
+                tooltip="Trang trước",
+                padding=0,
+                size_constraints=btn_constraints,
+                on_click=self._go_back,
+            )
             back_btn = ft.Semantics(
                 label="Trang trước",
                 button=True,
-                content=ft.IconButton(
-                    icon=ft.Icons.ARROW_BACK_ROUNDED,
-                    icon_color=C.TEXT_SECONDARY,
-                    icon_size=19,
-                    tooltip="Trang trước",
-                    padding=0,
-                    size_constraints=btn_constraints,
-                    on_click=self._go_back,
-                ),
+                content=back_icon_btn,
+            )
+            forward_icon_btn = ft.IconButton(
+                icon=ft.Icons.ARROW_FORWARD_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                disabled_color=C.TEXT_SECONDARY,
+                disabled=is_inapp_mobile,
+                icon_size=19,
+                tooltip="Trang sau",
+                padding=0,
+                size_constraints=btn_constraints,
+                on_click=self._go_forward,
             )
             forward_btn = ft.Semantics(
                 label="Trang sau",
                 button=True,
-                content=ft.IconButton(
-                    icon=ft.Icons.ARROW_FORWARD_ROUNDED,
-                    icon_color=C.TEXT_SECONDARY,
-                    icon_size=19,
-                    tooltip="Trang sau",
-                    padding=0,
-                    size_constraints=btn_constraints,
-                    on_click=self._go_forward,
-                ),
+                content=forward_icon_btn,
             )
             reload_btn = ft.Semantics(
                 label="Tải lại trang",
@@ -259,8 +340,138 @@ class InAppWebViewDialog:
         )
 
         body_host = ft.Container(expand=True, bgcolor=C.BG, border_radius=10)
-        if supports_native_webview(self._page):
-            status_bar = ft.ProgressBar(value=0, height=2, color=C.ACCENT, bgcolor=C.BORDER)
+        committed_state = {"done": False}
+
+        def _on_embedded_url_changed(nav_url: str) -> None:
+            if _is_demo_lms_blocked(nav_url):
+                self._show_demo_guard_snackbar()
+                self.close()
+                return
+            validated_nav = validate_public_https_url(nav_url, resolve_dns=False)
+            if validated_nav:
+                self._url = validated_nav
+                subtitle_label.value = (
+                    urllib.parse.urlsplit(validated_nav).hostname or host
+                )
+                self._safe_update(subtitle_label)
+
+        def _on_embedded_history_changed(can_back: bool, can_fwd: bool) -> None:
+            if back_icon_btn is not None:
+                back_icon_btn.disabled = not bool(can_back)
+                self._safe_update(back_icon_btn)
+            if forward_icon_btn is not None:
+                forward_icon_btn.disabled = not bool(can_fwd)
+                self._safe_update(forward_icon_btn)
+
+        def _on_embedded_error(reason: str) -> None:
+            if self._closed:
+                return
+            if str(reason or "").startswith("Blocked disallowed WebView URL:"):
+                self.close()
+                return
+            if committed_state["done"]:
+                return
+            host_ref = self._embedded_host
+            if host_ref is not None:
+                self._embedded_host = None
+                self._webview = None
+                try:
+                    host_ref.dispose()
+                except Exception:
+                    pass
+            reason_str = str(reason or "")
+            if reason_str.startswith("__UTH_EXTERNAL_APP_LAUNCHED__:"):
+                msg = "Đã mở liên kết trong ứng dụng ngoài trên thiết bị."
+            elif reason_str.startswith("__UTH_EXTERNAL_APP_MISSING__:"):
+                msg = "Thiết bị chưa cài đặt ứng dụng hỗ trợ trực tiếp liên kết này. Bạn có thể mở bằng trình duyệt ngoài."
+            else:
+                msg = "Không thể hiển thị trực tiếp liên kết này trong ứng dụng. Bạn có thể mở bằng trình duyệt ngoài."
+            body_host.padding = ft.Padding.all(14)
+            body_host.border = ft.Border.all(1, C.BORDER)
+            body_host.content = ft.Column(
+                controls=[
+                    ft.Text(self._url, size=11, color=C.ACCENT, selectable=True),
+                    ft.Text(msg, size=12, color=C.TEXT_SECONDARY),
+                    ft.Button(
+                        "Mở bằng trình duyệt ngoài",
+                        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                        bgcolor=C.ACCENT,
+                        color=C.ON_ACCENT,
+                        height=44,
+                        on_click=self._handle_open_external,
+                    ),
+                ],
+                spacing=10,
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+            )
+            self._safe_update(body_host)
+
+        embedded_host = (
+            build_embedded_webview_host(
+                self._url,
+                page=self._page,
+                bgcolor=C.BG,
+                on_ready=lambda: committed_state.__setitem__("done", True),
+                on_error=_on_embedded_error,
+                on_title_changed=lambda title: (
+                    committed_state.__setitem__("done", True),
+                    setattr(title_label, "value", title),
+                    self._safe_update(title_label),
+                )
+                if title
+                else None,
+                on_url_changed=_on_embedded_url_changed,
+                on_history_changed=_on_embedded_history_changed,
+                on_external_url=lambda ext: self._on_open_external(ext)
+                if callable(self._on_open_external)
+                else None,
+            )
+            if is_inapp_mobile
+            else None
+        )
+        if embedded_host is not None:
+            self._embedded_host = embedded_host
+            slot_ctrl = embedded_host.control()
+            self._webview = getattr(slot_ctrl, "content", slot_ctrl)
+            status_bar = ft.ProgressBar(
+                value=None, bar_height=2, color=C.ACCENT, bgcolor=C.BORDER, visible=True
+            )
+            status_host = ft.Container(
+                left=0,
+                top=0,
+                right=0,
+                height=2,
+                opacity=1.0,
+                ignore_interactions=True,
+                content=status_bar,
+            )
+
+            def _on_inapp_loading(loading: bool) -> None:
+                is_loading = bool(loading)
+                status_bar.visible = is_loading
+                status_host.opacity = 1.0 if is_loading else 0.0
+                self._safe_update(status_host)
+
+            embedded_host._on_loading_changed = _on_inapp_loading
+            body_host.content = ft.Stack(
+                expand=True,
+                fit=ft.StackFit.EXPAND,
+                controls=[slot_ctrl, status_host],
+            )
+        elif supports_native_webview(self._page):
+            status_bar = ft.ProgressBar(
+                value=0, bar_height=2, color=C.ACCENT, bgcolor=C.BORDER, visible=True
+            )
+            status_host = ft.Container(
+                left=0,
+                top=0,
+                right=0,
+                height=2,
+                opacity=1.0,
+                ignore_interactions=True,
+                content=status_bar,
+            )
 
             def _extract_nav_url(e) -> str:
                 raw = getattr(e, "data", None)
@@ -271,6 +482,8 @@ class InAppWebViewDialog:
             def _is_safe_native_url(nav_url: str) -> bool:
                 if not nav_url:
                     return True
+                if _is_demo_lms_blocked(nav_url):
+                    return False
                 # Case-insensitive validation: block non-HTTPS schemes and local/private targets.
                 return (
                     validate_https_url(nav_url) is not None
@@ -284,7 +497,8 @@ class InAppWebViewDialog:
                     return
                 status_bar.value = None
                 status_bar.visible = True
-                self._safe_update(status_bar)
+                status_host.opacity = 1.0
+                self._safe_update(status_host)
 
             def _on_url_change(e):
                 nav_url = _extract_nav_url(e)
@@ -297,13 +511,14 @@ class InAppWebViewDialog:
 
             def _on_ended(e):
                 status_bar.visible = False
+                status_host.opacity = 0.0
                 nav_url = _extract_nav_url(e)
                 if nav_url and not _is_safe_native_url(nav_url):
                     self.close()
                     return
                 if validate_https_url(nav_url):
                     subtitle_label.value = urllib.parse.urlsplit(nav_url).hostname or host
-                self._safe_update(status_bar)
+                self._safe_update(status_host)
                 self._safe_update(subtitle_label)
 
             self._webview = flet_webview.WebView(
@@ -320,10 +535,10 @@ class InAppWebViewDialog:
                 expand=True,
                 bgcolor=C.BG,
                 border_radius=10,
-                content=ft.Column(
-                    controls=[status_bar, self._webview],
-                    spacing=0,
+                content=ft.Stack(
                     expand=True,
+                    fit=ft.StackFit.EXPAND,
+                    controls=[self._webview, status_host],
                 ),
             )
         else:
@@ -399,17 +614,36 @@ class InAppWebViewDialog:
             title_padding=ft.Padding.only(left=16, right=8, top=10, bottom=4),
             bgcolor=C.SURFACE,
             shape=ft.RoundedRectangleBorder(radius=14),
-            on_dismiss=lambda _e: setattr(self, "_closed", True),
+            on_dismiss=lambda _e: self._cleanup_on_close(),
         )
+        self._occlusion_active = True
+        _set_modal_webview_occlusion(True, token=self._occlusion_token)
         try:
             self._page.show_dialog(self._dialog)
             return True
         except Exception:
+            self._cleanup_on_close()
             logger.debug("Could not present InAppWebViewDialog", exc_info=True)
             return False
 
-    def close(self) -> None:
+    def _cleanup_on_close(self) -> None:
         self._closed = True
+        if self._occlusion_active:
+            self._occlusion_active = False
+            _set_modal_webview_occlusion(False, token=self._occlusion_token)
+        if self._embedded_host is not None:
+            host_ref = self._embedded_host
+            self._embedded_host = None
+            self._webview = None
+            try:
+                host_ref.dispose()
+            except Exception:
+                pass
+        else:
+            self._webview = None
+
+    def close(self) -> None:
+        self._cleanup_on_close()
         try:
             self._page.pop_dialog()
         except Exception:
@@ -481,6 +715,9 @@ class InAppWebViewDialog:
             logger.debug("Could not schedule in-app HTML preview", exc_info=True)
 
     def _handle_open_external(self, _event=None) -> None:
+        if not self._url or _is_demo_lms_blocked(self._url):
+            self._show_demo_guard_snackbar()
+            return
         if callable(self._on_open_external):
             self._on_open_external(self._url)
             return
@@ -496,13 +733,22 @@ class InAppWebViewDialog:
             logger.debug("Could not schedule external browser launch", exc_info=True)
 
     async def _go_back(self, _event=None) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.go_back()
+            return
         if self._webview is not None and await self._webview.can_go_back():
             await self._webview.go_back()
 
     async def _go_forward(self, _event=None) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.go_forward()
+            return
         if self._webview is not None and await self._webview.can_go_forward():
             await self._webview.go_forward()
 
     async def _reload(self, _event=None) -> None:
+        if self._embedded_host is not None:
+            self._embedded_host.reload()
+            return
         if self._webview is not None:
             await self._webview.reload()

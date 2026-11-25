@@ -18,10 +18,14 @@ _UI_PLATFORM_ENV = "UTHELPER_UI_PLATFORM"
 _VALID_UI_PLATFORMS = frozenset({"android", "ios", "desktop"})
 
 
+def _detect_is_ios(sys_mod=sys) -> bool:
+    return bool(getattr(sys_mod, "_IOS_", False)) or sys_mod.platform == "ios"
+
+
 # Runtime capability flags. These must never be changed by the UI override.
 IS_WINDOWS = sys.platform == "win32"
 IS_ANDROID = hasattr(sys, "_ANDROID_") or "android" in sys.platform.lower()
-IS_IOS = hasattr(sys, "_IOS_") or sys.platform.lower() == "ios"
+IS_IOS = _detect_is_ios(sys)
 IS_MOBILE = IS_ANDROID or IS_IOS
 IS_DESKTOP = not IS_MOBILE
 

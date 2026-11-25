@@ -24,10 +24,13 @@ from gui.components.courses._shared import (
 from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     WindowsWebView2Dock,
+    _is_demo_lms_blocked,
+    _is_demo_mode_active,
     _is_flet_webview_platform,
     _is_inappwebview_mobile_platform,
     _webview2_runtime_available,
     build_embedded_webview_host,
+    is_embedded_webview_supported,
     set_global_webview_occlusion,
 )
 from gui.core.theme import C
@@ -53,6 +56,31 @@ _EXTERNAL_MEETING_HOSTS = (
 )
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_EXTERNAL_APP_LAUNCHED_PREFIX = "__UTH_EXTERNAL_APP_LAUNCHED__:"
+_EXTERNAL_APP_MISSING_PREFIX = "__UTH_EXTERNAL_APP_MISSING__:"
+_INITIAL_COMMIT_WATCHDOG_SECONDS = 18.0
+
+_SCHEME_DISPLAY_LABELS: dict[str, str] = {
+    "zalo": "Zalo",
+    "zoom": "Zoom",
+    "zoomus": "Zoom",
+    "zoomphonecall": "Zoom",
+    "msteams": "Microsoft Teams",
+    "googlemeet": "Google Meet",
+    "googlesheets": "Google Sheets",
+    "googledocs": "Google Docs",
+    "googleslides": "Google Slides",
+    "googledrive": "Google Drive",
+    "googleclassroom": "Google Classroom",
+    "ms-excel": "Microsoft Excel",
+    "ms-word": "Microsoft Word",
+    "ms-powerpoint": "Microsoft PowerPoint",
+    "onedrive": "OneDrive",
+    "mailto": "Email",
+    "tel": "Điện thoại",
+    "sms": "Tin nhắn",
+    "tg": "Telegram",
+}
 
 _NON_READABLE_HTML_TAGS = (
     "script",
@@ -167,6 +195,10 @@ class CoursesWebViewPane(ft.Container):
         self._host: Optional[EmbeddedWebViewHost] = None
         self._dock: Optional[WindowsWebView2Dock] = None
         self._fallback_html_loaded = False
+        self._initial_page_committed = False
+        self._blocked_navigation = False
+        self._host_load_error = ""
+        self._commit_watchdog: Optional[threading.Timer] = None
         self._disposed = False
 
         touch_constraints = ft.BoxConstraints(min_width=44, min_height=44)
@@ -176,6 +208,7 @@ class CoursesWebViewPane(ft.Container):
             tooltip="Trang trước",
             icon_color=C.TEXT_PRIMARY,
             disabled_color=C.TEXT_SECONDARY,
+            disabled=True,
             size_constraints=touch_constraints,
             on_click=self._on_webview_back,
         )
@@ -185,6 +218,7 @@ class CoursesWebViewPane(ft.Container):
             tooltip="Trang kế",
             icon_color=C.TEXT_PRIMARY,
             disabled_color=C.TEXT_SECONDARY,
+            disabled=True,
             size_constraints=touch_constraints,
             on_click=self._on_webview_forward,
         )
@@ -285,14 +319,31 @@ class CoursesWebViewPane(ft.Container):
             bgcolor=C.BORDER,
             visible=True,
         )
+        self._nav_progress_host = ft.Container(
+            left=0,
+            top=0,
+            right=0,
+            height=2,
+            opacity=1.0,
+            ignore_interactions=True,
+            content=self._nav_progress,
+        )
         self._body_host = ft.Container(expand=True, bgcolor=C.BG)
+        self._body_stack = ft.Stack(
+            expand=True,
+            fit=ft.StackFit.EXPAND,
+            controls=[
+                self._body_host,
+                self._nav_progress_host,
+            ],
+        )
         self.content = ft.Column(
             expand=True,
             spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[
                 self._header_container,
-                self._nav_progress,
-                self._body_host,
+                self._body_stack,
                 self._mobile_nav_bar,
             ],
         )
@@ -357,6 +408,11 @@ class CoursesWebViewPane(ft.Container):
         return self._url
 
     def _mount_engine(self) -> None:
+        if _is_demo_lms_blocked(self._url):
+            self._blocked_navigation = True
+            self._set_nav_loading(False)
+            self._show_blocked_url_card()
+            return
         use_bridge = _is_flet_webview_platform(
             self._page
         ) and not _is_inappwebview_mobile_platform(self._page)
@@ -369,11 +425,13 @@ class CoursesWebViewPane(ft.Container):
                     self._host = custom
                     self._dock = custom.dock
                     self._nav_progress.visible = False
+                    self._nav_progress_host.opacity = 0.0
                     self._body_host.content = ft.Container(
                         expand=True, content=custom.control()
                     )
                     return
                 self._nav_progress.visible = False
+                self._nav_progress_host.opacity = 0.0
                 self._body_host.content = ft.Container(expand=True, content=custom)
                 return
 
@@ -382,6 +440,7 @@ class CoursesWebViewPane(ft.Container):
         cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
         if (
             is_uth_site
+            and not _is_demo_mode_active()
             and self._session_client is not None
             and hasattr(self._session_client, "get_session_cookies")
         ):
@@ -398,6 +457,7 @@ class CoursesWebViewPane(ft.Container):
             bgcolor=C.BG,
             account_namespace=self._account_namespace,
             cookie_provider=cookie_provider,
+            on_ready=self._on_host_ready,
             on_title_changed=self._on_native_title,
             on_url_changed=self._on_native_url_or_bridge,
             on_loading_changed=self._on_host_loading_changed,
@@ -420,10 +480,51 @@ class CoursesWebViewPane(ft.Container):
                 self._show_html_fallback_or_card()
                 return
             self._nav_progress.visible = True
+            self._nav_progress_host.opacity = 1.0
             self._body_host.content = host.control()
+            self._arm_initial_commit_watchdog()
             return
 
         self._show_html_fallback_or_card()
+
+    def _cancel_commit_watchdog(self) -> None:
+        timer = self._commit_watchdog
+        self._commit_watchdog = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _arm_initial_commit_watchdog(self) -> None:
+        self._cancel_commit_watchdog()
+        if (
+            self._disposed
+            or self._initial_page_committed
+            or not isinstance(self._page, ft.Page)
+        ):
+            return
+
+        def _on_timeout() -> None:
+            if (
+                self._disposed
+                or self._initial_page_committed
+                or self._host is None
+            ):
+                return
+            self._on_host_error("Initial WebView load timed out")
+
+        timer = threading.Timer(_INITIAL_COMMIT_WATCHDOG_SECONDS, _on_timeout)
+        timer.daemon = True
+        self._commit_watchdog = timer
+        timer.start()
+
+    def _mark_initial_page_committed(self) -> None:
+        self._initial_page_committed = True
+        self._cancel_commit_watchdog()
+
+    def _on_host_ready(self) -> None:
+        self._mark_initial_page_committed()
 
     def _marshal_ui(self, fn: Callable[[], None]) -> None:
         if self._disposed:
@@ -438,13 +539,14 @@ class CoursesWebViewPane(ft.Container):
     def _set_nav_loading(self, loading: bool) -> None:
         if self._disposed:
             return
-        self._nav_progress.visible = bool(loading)
-        safe_control_update(self._nav_progress)
+        is_loading = bool(loading)
+        self._nav_progress.visible = is_loading
+        self._nav_progress_host.opacity = 1.0 if is_loading else 0.0
+        safe_control_update(self._nav_progress_host)
 
     def _on_host_loading_changed(self, loading: bool) -> None:
         def _apply() -> None:
-            self._nav_progress.visible = bool(loading)
-            safe_control_update(self._nav_progress)
+            self._set_nav_loading(loading)
 
         self._marshal_ui(_apply)
 
@@ -460,6 +562,7 @@ class CoursesWebViewPane(ft.Container):
     def _on_native_title(self, title: str) -> None:
         if not title:
             return
+        self._mark_initial_page_committed()
 
         def _apply() -> None:
             self._title_text.value = title
@@ -469,6 +572,9 @@ class CoursesWebViewPane(ft.Container):
 
     def _on_native_url_or_bridge(self, url: str) -> None:
         if not url or "/session/" in url:
+            return
+        if _is_demo_lms_blocked(url):
+            self._on_host_error(f"Blocked disallowed WebView URL: {url}")
             return
 
         def _apply() -> None:
@@ -489,6 +595,8 @@ class CoursesWebViewPane(ft.Container):
         return bool(safe_http_url(url, allow_loopback=True)) and bool(checker(url))
 
     def _is_allowed_navigation_url(self, url: str) -> bool:
+        if _is_demo_lms_blocked(url):
+            return False
         if bool(safe_http_url(url)):
             return True
         return self._is_allowed_preview_url(url)
@@ -527,12 +635,86 @@ class CoursesWebViewPane(ft.Container):
         )
         safe_control_update(self._body_host)
 
+    def _show_external_app_card(self, *, launched: bool, scheme: str = "") -> None:
+        norm_scheme = (scheme or "").strip().lower()
+        app_label = _SCHEME_DISPLAY_LABELS.get(norm_scheme, "")
+        if launched:
+            icon_ctrl = ft.Icon(ft.Icons.OPEN_IN_NEW_ROUNDED, size=44, color=C.ACCENT)
+            detail_msg = (
+                f"Đã mở liên kết trong ứng dụng {app_label} trên thiết bị."
+                if app_label
+                else "Đã mở liên kết trong ứng dụng ngoài trên thiết bị."
+            )
+        else:
+            icon_ctrl = ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT)
+            detail_msg = (
+                f"Thiết bị chưa cài đặt ứng dụng {app_label} để mở trực tiếp liên kết này. "
+                "Bạn có thể mở bằng trình duyệt ngoài."
+                if app_label
+                else "Liên kết này yêu cầu ứng dụng ngoài chưa được cài đặt trên thiết bị. "
+                "Bạn có thể mở bằng trình duyệt ngoài."
+            )
+
+        action_controls: list[ft.Control] = []
+        if safe_http_url(self._url) and not _is_loopback_url(self._url):
+            action_controls.append(
+                ft.FilledButton(
+                    "Mở bằng trình duyệt ngoài",
+                    icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                    on_click=lambda _e: self._on_open_external(self._url),
+                )
+            )
+        action_controls.append(
+            ft.OutlinedButton(
+                "Quay lại",
+                icon=ft.Icons.ARROW_BACK_ROUNDED,
+                on_click=lambda _e: self._handle_back(),
+            )
+        )
+
+        self._body_host.content = ft.Container(
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+            padding=24,
+            content=ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=12,
+                controls=[
+                    icon_ctrl,
+                    ft.Text(
+                        self._title,
+                        size=16,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        detail_msg,
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        wrap=True,
+                        spacing=10,
+                        run_spacing=8,
+                        controls=action_controls,
+                    ),
+                ],
+            ),
+        )
+        safe_control_update(self._body_host)
+
     def _on_host_error(self, reason: str) -> None:
         def _apply() -> None:
             self._set_nav_loading(False)
             host = self._host
             reason_str = str(reason or "")
             if reason_str.startswith("Blocked disallowed WebView URL:"):
+                self._blocked_navigation = True
+                self._cancel_commit_watchdog()
                 if host is not None:
                     self._host = None
                     self._dock = None
@@ -545,17 +727,53 @@ class CoursesWebViewPane(ft.Container):
                     reason_str,
                 )
                 return
-            if host is not None and host.backend == "webview2":
-                dock = host.dock
-                if dock is None or not getattr(dock, "_ready", False):
+            if reason_str.startswith(_EXTERNAL_APP_LAUNCHED_PREFIX):
+                self._cancel_commit_watchdog()
+                scheme = reason_str[len(_EXTERNAL_APP_LAUNCHED_PREFIX) :]
+                if host is not None:
+                    self._host = None
+                    self._dock = None
+                    host.dispose()
+                if not self._disposed:
+                    self._show_external_app_card(launched=True, scheme=scheme)
+                    safe_control_update(self)
+                return
+            if reason_str.startswith(_EXTERNAL_APP_MISSING_PREFIX):
+                self._cancel_commit_watchdog()
+                scheme = reason_str[len(_EXTERNAL_APP_MISSING_PREFIX) :]
+                if host is not None:
+                    self._host = None
+                    self._dock = None
+                    host.dispose()
+                if not self._disposed:
+                    self._show_external_app_card(launched=False, scheme=scheme)
+                    safe_control_update(self)
+                return
+            if host is not None:
+                pre_commit_failure = (
+                    host.backend == "webview2"
+                    and (host.dock is None or not getattr(host.dock, "_ready", False))
+                ) or (
+                    host.backend in ("inappwebview", "flet_webview")
+                    and not self._initial_page_committed
+                )
+                if pre_commit_failure:
+                    self._cancel_commit_watchdog()
                     self._host = None
                     self._dock = None
                     host.dispose()
                     if not self._disposed:
+                        self._host_load_error = reason_str or "WebView load error"
+                        self._fallback_html_loaded = False
                         self._show_html_fallback_or_card()
                         safe_control_update(self)
+                    logger.warning(
+                        "EmbeddedWebViewHost initial load failed (%s): %s",
+                        host.backend,
+                        reason,
+                    )
                     return
-            logger.debug("EmbeddedWebViewHost error: %s", reason)
+            logger.warning("EmbeddedWebViewHost error: %s", reason)
 
         self._marshal_ui(_apply)
 
@@ -624,9 +842,15 @@ class CoursesWebViewPane(ft.Container):
                     raw_bytes = resp.read(512 * 1024)
                     html_text = raw_bytes.decode("utf-8", errors="replace")
             elif not is_uth_site:
-                error_text = (
-                    "Liên kết ngoài hệ thống yêu cầu trình duyệt tương tác trực tiếp (WebView2 / trình duyệt)."
-                )
+                if self._host_load_error:
+                    error_text = (
+                        "Không thể tải trang web lúc này. Vui lòng kiểm tra kết nối mạng "
+                        "rồi tải lại hoặc mở bằng trình duyệt ngoài."
+                    )
+                else:
+                    error_text = (
+                        "Liên kết ngoài hệ thống yêu cầu trình duyệt tương tác trực tiếp trên thiết bị."
+                    )
 
             if html_text and not error_text:
                 from core.courses.activity_service import _html_to_readable_markdown
@@ -661,10 +885,25 @@ class CoursesWebViewPane(ft.Container):
         def _apply_fallback() -> None:
             if self._disposed:
                 return
-            self._nav_progress.visible = False
-            safe_control_update(self._nav_progress)
+            self._set_nav_loading(False)
 
             if error_text or not markdown_text:
+                action_controls: list[ft.Control] = []
+                if safe_http_url(self._url) and not _is_loopback_url(self._url):
+                    action_controls.append(
+                        ft.FilledButton(
+                            "Mở bằng trình duyệt ngoài",
+                            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                            on_click=lambda _e: self._on_open_external(self._url),
+                        )
+                    )
+                action_controls.append(
+                    ft.OutlinedButton(
+                        "Quay lại",
+                        icon=ft.Icons.ARROW_BACK_ROUNDED,
+                        on_click=lambda _e: self._handle_back(),
+                    )
+                )
                 card_controls: list[ft.Control] = [
                     ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
                     ft.Text(
@@ -681,15 +920,14 @@ class CoursesWebViewPane(ft.Container):
                         color=C.TEXT_SECONDARY,
                         text_align=ft.TextAlign.CENTER,
                     ),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        wrap=True,
+                        spacing=10,
+                        run_spacing=8,
+                        controls=action_controls,
+                    ),
                 ]
-                if safe_http_url(self._url) and not _is_loopback_url(self._url):
-                    card_controls.append(
-                        ft.FilledButton(
-                            "Mở bằng trình duyệt ngoài",
-                            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                            on_click=lambda _e: self._on_open_external(self._url),
-                        )
-                    )
                 self._body_host.content = ft.Container(
                     expand=True,
                     alignment=ft.Alignment.CENTER,
@@ -752,6 +990,8 @@ class CoursesWebViewPane(ft.Container):
         if not clean or not self._is_allowed_navigation_url(clean):
             logger.warning("Blocked disallowed navigation link in CoursesWebViewPane")
             return
+        self._blocked_navigation = False
+        self._host_load_error = ""
         self._url = clean
         self._subtitle_text.value = self._short_subtitle(clean)
         self._sync_external_visibility()
@@ -767,6 +1007,13 @@ class CoursesWebViewPane(ft.Container):
         elif self._dock is not None:
             self._set_nav_loading(True)
             self._dock.navigate(clean)
+        elif self._embedded_factory is None and is_embedded_webview_supported(self._page):
+            self._initial_page_committed = False
+            self._fallback_html_loaded = False
+            self._wv_back_btn.disabled = True
+            self._wv_fwd_btn.disabled = True
+            self._mount_engine()
+            safe_control_update(self)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
@@ -785,11 +1032,23 @@ class CoursesWebViewPane(ft.Container):
             self._dock.go_forward()
 
     def _on_webview_reload(self, _e: Any) -> None:
+        if self._blocked_navigation:
+            self._show_blocked_url_card()
+            safe_control_update(self._body_host)
+            return
         if self._host is not None:
             self._set_nav_loading(True)
             self._host.reload()
         elif self._dock is not None:
             self._dock.reload()
+        elif self._embedded_factory is None and is_embedded_webview_supported(self._page):
+            self._initial_page_committed = False
+            self._fallback_html_loaded = False
+            self._host_load_error = ""
+            self._wv_back_btn.disabled = True
+            self._wv_fwd_btn.disabled = True
+            self._mount_engine()
+            safe_control_update(self)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
@@ -877,6 +1136,7 @@ class CoursesWebViewPane(ft.Container):
 
     def dispose(self) -> None:
         self._disposed = True
+        self._cancel_commit_watchdog()
         set_global_webview_occlusion("webview_menu", False)
         if self._host is not None:
             self._host.dispose()

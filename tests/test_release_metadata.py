@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from scripts.release_metadata import (
+    DEFAULT_ANDROID_PACKAGE_ID,
     ReleaseMetadata,
     ReleaseMetadataError,
     read_project_version,
@@ -68,9 +69,10 @@ def test_distribution_channel_asset_contract_is_deterministic(tmp_path):
         write_distribution_channel,
     )
 
+    assert DEFAULT_ANDROID_PACKAGE_ID == "io.github.chouwzi.uthelper"
     target = write_distribution_channel(tmp_path / "assets" / "distribution-channel.json", "apk_lts")
     assert target.read_text(encoding="utf-8") == (
-        '{\n  "android_package_id": "com.uthelper.uthelper",\n'
+        '{\n  "android_package_id": "io.github.chouwzi.uthelper",\n'
         '  "channel": "apk_lts",\n  "schema_version": 1\n}\n'
     )
     assert build_distribution_channel_payload("EXE_LTS") == {

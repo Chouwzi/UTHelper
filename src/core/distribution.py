@@ -17,7 +17,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 DISTRIBUTION_CHANNEL_FILENAME = "distribution-channel.json"
-DEFAULT_ANDROID_PACKAGE_ID = "com.uthelper.uthelper"
+DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"
 _SOURCE_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 _PROJECT_PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
 _MAX_CONFIG_BYTES = 4096

@@ -38,7 +38,7 @@ on:
           - debug-test
           - unsigned-diagnostic
       apk_namespace:
-        description: Package ID for debug-test APK (isolated=com.uthelper.qa installs side-by-side with Release; original=com.uthelper.uthelper)
+        description: Package ID for debug-test APK (isolated=com.uthelper.qa installs side-by-side with Release; original=io.github.chouwzi.uthelper)
         required: false
         type: choice
         default: isolated
@@ -116,7 +116,7 @@ jobs:
           APK_ARCH="universal"
           APK_INSTALLABLE_TEST="false"
           APK_NAMESPACE="original"
-          APK_PACKAGE_ID="com.uthelper.uthelper"
+          APK_PACKAGE_ID="io.github.chouwzi.uthelper"
 
           if [ "$CHANNEL" = "apk_lts" ] && [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ]; then
             case "${APK_ARCH_INPUT:-arm64-v8a}" in
@@ -136,7 +136,7 @@ jobs:
                   ;;
                 original)
                   APK_NAMESPACE="original"
-                  APK_PACKAGE_ID="com.uthelper.uthelper"
+                  APK_PACKAGE_ID="io.github.chouwzi.uthelper"
                   ;;
                 *) echo "Unsupported apk_namespace: ${APK_NAMESPACE_INPUT:-}"; exit 1 ;;
               esac
@@ -160,7 +160,7 @@ jobs:
             if [ "$APK_ARCH" = "arm64-v8a" ]; then
               EXTRA_ARGS+=(--arch arm64-v8a)
             fi
-            if [ "$APK_PACKAGE_ID" != "com.uthelper.uthelper" ]; then
+            if [ "$APK_PACKAGE_ID" != "io.github.chouwzi.uthelper" ]; then
               EXTRA_ARGS+=(--bundle-id "$APK_PACKAGE_ID")
             fi
           elif [ "$CHANNEL" = "chplay" ]; then
@@ -285,8 +285,8 @@ jobs:
           APK="${APK_CANDIDATES[0]}"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          if [ "${APK_PACKAGE_ID:-com.uthelper.uthelper}" = "com.uthelper.uthelper" ]; then
-            test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
+          if [ "${APK_PACKAGE_ID:-io.github.chouwzi.uthelper}" = "io.github.chouwzi.uthelper" ]; then
+            test "$($APKANALYZER manifest application-id "$APK")" = "io.github.chouwzi.uthelper"
           else
             test "$($APKANALYZER manifest application-id "$APK")" = "$APK_PACKAGE_ID"
           fi
@@ -344,7 +344,7 @@ jobs:
               "Architecture: ${APK_ARCH}" \
               "Package ID: ${APK_PACKAGE_ID}" \
               "Namespace mode: ${APK_NAMESPACE}" \
-              "Note: Signed with Gradle's ephemeral debug keystore. If package ID is com.uthelper.uthelper, uninstall any production Release build before installing." \
+              "Note: Signed with Gradle's ephemeral debug keystore. If package ID is io.github.chouwzi.uthelper, uninstall any production Release build before installing." \
               > DEBUG_TEST_ONLY.txt
             {
               echo "APK_TEST_FILENAME=$TEST_APK"
@@ -385,7 +385,7 @@ jobs:
             --allow-unsigned \
             --version "$PROJECT_VERSION" \
             --build-number "$BUILD_NUMBER" \
-            --package-id com.uthelper.uthelper \
+            --package-id io.github.chouwzi.uthelper \
             --commit-sha "${{ github.sha }}" \
             --workflow-run-id "${{ github.run_id }}" \
             --architecture universal \
@@ -528,7 +528,7 @@ jobs:
             --channel chplay \
             --version "$PROJECT_VERSION" \
             --build-number "$BUILD_NUMBER" \
-            --package-id com.uthelper.uthelper \
+            --package-id io.github.chouwzi.uthelper \
             --certificate-sha256 "$PLAY_UPLOAD_CERT_SHA256" \
             --commit-sha "${{ github.sha }}" \
             --workflow-run-id "${{ github.run_id }}" \

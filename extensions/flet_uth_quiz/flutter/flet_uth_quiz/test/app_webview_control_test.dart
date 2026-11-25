@@ -1,12 +1,12 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flet_uth_quiz/src/app_webview_control.dart';
 import 'package:flet_uth_quiz/src/app_webview_settings.dart';
 import 'package:flet_uth_quiz/src/mobile_session_queue.dart';
-import 'package:flet_uth_quiz/src/quiz_webview_settings.dart';
 
 void main() {
   test('normalizeEmbeddedUserAgent strips Android wv markers while preserving Chrome and iOS Safari UAs', () {
@@ -43,13 +43,14 @@ void main() {
     expect(browser.useHybridComposition, isTrue);
     expect(browser.hardwareAcceleration, isTrue);
     expect(browser.useShouldOverrideUrlLoading, isTrue);
+    expect(browser.useOnDownloadStart, isTrue);
     expect(browser.allowFileAccess, isFalse);
     expect(browser.allowContentAccess, isFalse);
     expect(browser.allowFileAccessFromFileURLs, isFalse);
     expect(browser.allowUniversalAccessFromFileURLs, isFalse);
     expect(browser.isInspectable, isFalse);
     expect(browser.mixedContentMode, MixedContentMode.MIXED_CONTENT_NEVER_ALLOW);
-    expect(browser.regexToCancelSubFramesLoading, quizSubframeCancelRegex);
+    expect(browser.regexToCancelSubFramesLoading, appBrowserSubframeCancelRegex);
     expect(browser.userAgent, 'Mozilla/5.0 Chrome/131.0 Mobile Safari/537.36');
 
     final viewer = createAppWebViewSettings(
@@ -60,6 +61,7 @@ void main() {
     expect(viewer.thirdPartyCookiesEnabled, isFalse);
     expect(viewer.supportMultipleWindows, isFalse);
     expect(viewer.javaScriptCanOpenWindowsAutomatically, isFalse);
+    expect(viewer.useOnDownloadStart, isFalse);
     expect(viewer.cacheEnabled, isFalse);
     expect(viewer.cacheMode, CacheMode.LOAD_NO_CACHE);
     expect(viewer.regexToCancelSubFramesLoading, isNotNull);
@@ -226,12 +228,15 @@ void main() {
       AppNavigationKind.cancel,
     );
 
-    // Browser mode allows SharePoint, Microsoft login, Moodle, and allowed loopback
+    // Browser mode allows SharePoint, Microsoft login, Moodle, Google Sheets #gid fragments, and allowed loopback
     for (final safeUrl in [
       'https://courses.ut.edu.vn/mod/url/view.php?id=12',
+      'https://courses.ut.edu.vn/course/view.php?id=12#section-3',
+      'https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=1012692952#gid=1012692952',
+      'https://docs.google.com/spreadsheets/d/1y5syAENL/htmlview#gid=1012692952',
       'https://uteduvn-my.sharepoint.com/:x:/g/personal/abc?e=rs8b4a',
-      'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-      'http://127.0.0.1:59001/page?token=abc',
+      'https://login.microsoftonline.com/common/oauth2/v2.0/authorize#state=1',
+      'http://127.0.0.1:59001/page?token=abc#anchor',
     ]) {
       expect(
         decideAppWebViewNavigation(
@@ -584,8 +589,8 @@ void main() {
     expect(installed, isEmpty);
   });
 
-  test('appWebViewCookieWaitTimeout is 10s and late-cookie reload fires once after initial nav (WV-06)', () {
-    expect(appWebViewCookieWaitTimeout, const Duration(seconds: 10));
+  test('appWebViewCookieWaitTimeout is bounded to 4s and late-cookie reload skips cross-host redirects (WV-06)', () {
+    expect(appWebViewCookieWaitTimeout, const Duration(seconds: 4));
     expect(
       shouldReloadAfterLateCookies(
         appliedCount: 1,
@@ -594,8 +599,22 @@ void main() {
         disposed: false,
         hasController: true,
         initialUrl: 'https://courses.ut.edu.vn/course/view.php?id=9',
+        currentLoadedUrl: 'https://courses.ut.edu.vn/login/index.php',
       ),
       isTrue,
+    );
+    // Must NOT yank user back to Moodle if 302 redirect already landed on SharePoint/Microsoft SSO!
+    expect(
+      shouldReloadAfterLateCookies(
+        appliedCount: 1,
+        initialNavDispatched: true,
+        alreadyReloaded: false,
+        disposed: false,
+        hasController: true,
+        initialUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+        currentLoadedUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isFalse,
     );
     expect(
       shouldReloadAfterLateCookies(
@@ -658,6 +677,690 @@ void main() {
         description: 'net::ERR_NAME_NOT_RESOLVED',
       ),
       isTrue,
+    );
+  });
+
+  test('decideAppWebViewNavigation preserves case-sensitive token_urlsafe viewer prefixes while lowercasing scheme and host', () {
+    const mixedTokenUrl =
+        'http://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn-OpQrStUvWxYz0123/pdf_host.html?src=%2F1a25f20417cab3d2%3Ftoken%3DxYz_987';
+    final mixedPrefix = extractViewerLockPrefix(mixedTokenUrl);
+    expect(
+      mixedPrefix,
+      'http://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn-OpQrStUvWxYz0123/',
+    );
+    expect(
+      decideAppWebViewNavigation(
+        mixedTokenUrl,
+        isForMainFrame: true,
+        viewerLocked: true,
+        viewerPrefix: mixedPrefix,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+    expect(
+      decideAppWebViewNavigation(
+        'HTTP://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn-OpQrStUvWxYz0123/pdf.worker.min.mjs',
+        isForMainFrame: false,
+        viewerLocked: true,
+        viewerPrefix: mixedPrefix,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+
+    const docxUrl =
+        'http://LOCALHOST:51234/viewer/ZxYwVuTsRqPoNmLkJiHgFeDcBa987654/docx_host.html?src=%2Fdeadbeefcafebabe%3Ftoken%3DT0k';
+    final docxPrefix = extractViewerLockPrefix(docxUrl);
+    expect(
+      docxPrefix,
+      'http://localhost:51234/viewer/ZxYwVuTsRqPoNmLkJiHgFeDcBa987654/',
+    );
+    expect(
+      decideAppWebViewNavigation(
+        docxUrl,
+        isForMainFrame: true,
+        viewerLocked: true,
+        viewerPrefix: docxPrefix,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+
+    // Wrong-case token must still be rejected
+    expect(
+      decideAppWebViewNavigation(
+        'http://127.0.0.1:51234/pdf-viewer/abcdefgh_ijklmn-opqrstuvwxyz0123/pdf_host.html',
+        isForMainFrame: true,
+        viewerLocked: true,
+        viewerPrefix: mixedPrefix,
+      ).kind,
+      AppNavigationKind.cancel,
+    );
+  });
+
+  test('appBrowserSubframeCancelRegex allows SharePoint/Office Online about:srcdoc and blob:https subframes while cancelling unsafe schemes', () {
+    expect(appBrowserSubframeCancelRegex.startsWith('(?is)'), isTrue);
+    final regex = RegExp(
+      appBrowserSubframeCancelRegex.substring('(?is)'.length),
+      caseSensitive: false,
+      dotAll: true,
+    );
+
+    for (final allowed in [
+      'https://excel.officeapps.live.com/x/_layouts/xlviewerinternal.aspx?ui=vi-VN',
+      'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+      'about:blank',
+      'about:blank#wac',
+      'about:srcdoc',
+      'about:srcdoc#frame1',
+      'blob:https://excel.officeapps.live.com/550e8400-e29b-41d4-a716-446655440000',
+      'blob:https://docs.google.com/12345678-90ab-cdef',
+    ]) {
+      expect(regex.hasMatch(allowed), isFalse, reason: allowed);
+    }
+
+    for (final cancelled in [
+      'javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'file:///etc/hosts',
+      'intent://uteduvn-my.sharepoint.com/#Intent;scheme=https;end',
+      'http://evil.example/frame',
+      'http://127.0.0.1:51234/pdf-viewer/tok/pdf_host.html',
+      'blob:http://127.0.0.1:51234/550e8400-e29b',
+      'blob:http://evil.example/550e8400-e29b',
+      'https://user:pass@courses.ut.edu.vn/',
+      'https://127.0.0.1/admin',
+      'https://localhost:8443/',
+      'https://10.0.0.1/internal',
+      'https://192.168.1.1/',
+      'https://169.254.169.254/latest',
+      'https://[::1]/',
+      'blob:https://127.0.0.1/uuid',
+      'blob:https://localhost/uuid',
+    ]) {
+      expect(regex.hasMatch(cancelled), isTrue, reason: cancelled);
+    }
+
+    expect(
+      decideAppWebViewNavigation(
+        'about:srcdoc',
+        isForMainFrame: false,
+        viewerLocked: false,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+    expect(
+      resolveCreateWindowInPlaceTarget('about:srcdoc', viewerLocked: false),
+      isNull,
+    );
+  });
+
+  test('resolveAndroidIntentFallbackUrl synthesizes HTTPS URL when scheme=https and S.browser_fallback_url is absent', () {
+    const driveIntent =
+        'intent://docs.google.com/spreadsheets/d/1AbC_dEf/edit?usp=sharing#Intent;'
+        'scheme=https;package=com.google.android.apps.docs.editors.sheets;end';
+    expect(
+      resolveAndroidIntentFallbackUrl(driveIntent),
+      'https://docs.google.com/spreadsheets/d/1AbC_dEf/edit?usp=sharing',
+    );
+
+    const sharePointHttpsIntent =
+        'intent://uteduvn-my.sharepoint.com/:x:/g/personal/user_ut_edu_vn/Doc1?e=rs8b4a#Intent;'
+        'package=com.microsoft.office.excel;scheme=HTTPS;end';
+    expect(
+      resolveAndroidIntentFallbackUrl(sharePointHttpsIntent),
+      'https://uteduvn-my.sharepoint.com/:x:/g/personal/user_ut_edu_vn/Doc1?e=rs8b4a',
+    );
+
+    // Custom non-https scheme without S.browser_fallback_url must return null
+    const customSchemeOnly =
+        'intent://uteduvn-my.sharepoint.com/doc#Intent;scheme=ms-excel;package=com.microsoft.office.excel;end';
+    expect(resolveAndroidIntentFallbackUrl(customSchemeOnly), isNull);
+
+    // Explicit unsafe S.browser_fallback_url must NOT fall back to scheme=https
+    const explicitUnsafeFallback =
+        'intent://docs.google.com/doc#Intent;scheme=https;S.browser_fallback_url=javascript%3Aalert(1);end';
+    expect(resolveAndroidIntentFallbackUrl(explicitUnsafeFallback), isNull);
+
+    // SSRF / userinfo targets in scheme=https intent must be rejected
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        'intent://127.0.0.1/admin#Intent;scheme=https;end',
+      ),
+      isNull,
+    );
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        'intent://user:pass@docs.google.com/doc#Intent;scheme=https;end',
+      ),
+      isNull,
+    );
+  });
+
+  test('resolveDownloadExternalUrl allows only public HTTPS downloads in browser mode', () {
+    expect(
+      resolveDownloadExternalUrl(
+        'https://uteduvn-my.sharepoint.com/:x:/g/personal/u/file.xlsx?download=1',
+        viewerLocked: false,
+      ),
+      'https://uteduvn-my.sharepoint.com/:x:/g/personal/u/file.xlsx?download=1',
+    );
+    expect(
+      resolveDownloadExternalUrl(
+        'https://uteduvn-my.sharepoint.com/:x:/g/personal/u/file.xlsx?download=1',
+        viewerLocked: true,
+      ),
+      isNull,
+    );
+    for (final blocked in [
+      null,
+      '',
+      'blob:https://excel.officeapps.live.com/uuid',
+      'data:application/pdf;base64,JVBERi0=',
+      'http://127.0.0.1:51234/1a25f20417cab3d2?token=abc',
+      'https://127.0.0.1/file.pdf',
+      'https://192.168.1.1/file.pdf',
+    ]) {
+      expect(
+        resolveDownloadExternalUrl(blocked, viewerLocked: false),
+        isNull,
+        reason: '$blocked',
+      );
+    }
+  });
+
+  test('shouldNavigateOnWidgetUrlSync avoids echo reloads while navigating on genuine URL changes', () {
+    // Echo of URL already loaded in WebView must NOT trigger reload
+    expect(
+      shouldNavigateOnWidgetUrlSync(
+        nextUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+        previousInitialUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+        currentLoadedUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isFalse,
+    );
+    // Genuine new URL must navigate
+    expect(
+      shouldNavigateOnWidgetUrlSync(
+        nextUrl: 'https://docs.google.com/document/d/2',
+        previousInitialUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+        currentLoadedUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isTrue,
+    );
+    expect(
+      shouldNavigateOnWidgetUrlSync(
+        nextUrl: '',
+        previousInitialUrl: 'https://courses.ut.edu.vn/',
+        currentLoadedUrl: 'https://courses.ut.edu.vn/',
+      ),
+      isFalse,
+    );
+  });
+
+  test('shouldAdoptAppPopupWindowSink adopts Android, iOS, and Windows popup windowIds so JS window.open resolves cleanly', () {
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.android), isTrue);
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.iOS), isTrue);
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.windows), isTrue);
+    expect(shouldAdoptAppPopupWindowSink(TargetPlatform.linux), isFalse);
+  });
+
+  test('shouldUseCleanAndroidMainFrameLoad strips stale redirect headers ONLY on cross-origin Android GET HTTPS navigations and never on initial or same-origin redirects', () {
+    // Cross-origin Android main-frame GET HTTPS in browser mode must reload cleanly without
+    // forwarding InAppWebViewClientCompat's stale cross-origin request headers.
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://www.office.com/login',
+        method: 'GET',
+        currentUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+      ),
+      isTrue,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+        method: null,
+        currentUrl: 'https://courses.ut.edu.vn/mod/url/view.php?id=99',
+      ),
+      isTrue,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+        method: 'GET',
+        currentUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isTrue,
+    );
+    // Initial load (empty/null currentUrl) and same-origin redirects (e.g. Google Docs
+    // /edit?gid=...#gid=... -> 302 -> /htmlview#gid=...) MUST NOT cancel and re-issue loadUrl!
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=1012692952#gid=1012692952',
+        method: 'GET',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://docs.google.com/spreadsheets/d/1y5syAENL/htmlview#gid=1012692952',
+        method: 'GET',
+        currentUrl: 'https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=1012692952#gid=1012692952',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://courses.ut.edu.vn/course/view.php?id=12',
+        method: 'GET',
+        currentUrl: 'https://courses.ut.edu.vn/my/',
+      ),
+      isFalse,
+    );
+    // POST, subframes, locked viewers, non-HTTPS (about:/blob:), and non-Android
+    // platforms must NOT intercept via clean loadUrl.
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://uteduvn-my.sharepoint.com/_forms/default.aspx',
+        method: 'POST',
+        currentUrl: 'https://login.microsoftonline.com/common/login',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: false,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://ffc-excel.officeapps.live.com/wv/wordviewerframe.aspx',
+        method: 'GET',
+        currentUrl: 'https://uteduvn-my.sharepoint.com/:x:/g/personal/doc',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: true,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'http://127.0.0.1:43125/viewer/Token/pdf_host.html',
+        method: 'GET',
+        currentUrl: 'http://127.0.0.1:43125/other',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.android,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'about:blank',
+        method: 'GET',
+        currentUrl: 'https://docs.google.com/spreadsheets/d/1/edit',
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseCleanAndroidMainFrameLoad(
+        platform: TargetPlatform.iOS,
+        viewerLocked: false,
+        isForMainFrame: true,
+        decisionKind: AppNavigationKind.allow,
+        rawUrl: 'https://www.office.com/login',
+        method: 'GET',
+        currentUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+      ),
+      isFalse,
+    );
+  });
+
+  test('normalizeEmbeddedUserAgent omits Mobile token on Android tablets while keeping Mobile on phones', () {
+    const tabletWvUa =
+        'Mozilla/5.0 (Linux; Android 15; SM-X826B Build/AP3A.240905.015.A2; wv) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 '
+        'Chrome/157.0.8103.50 Mobile Safari/537.36';
+    expect(
+      normalizeEmbeddedUserAgent(tabletWvUa, isTablet: true),
+      'Mozilla/5.0 (Linux; Android 15; SM-X826B Build/AP3A.240905.015.A2) '
+      'AppleWebKit/537.36 (KHTML, like Gecko) '
+      'Chrome/157.0.8103.50 Safari/537.36',
+    );
+    expect(
+      normalizeEmbeddedUserAgent(tabletWvUa, isTablet: false),
+      'Mozilla/5.0 (Linux; Android 15; SM-X826B Build/AP3A.240905.015.A2) '
+      'AppleWebKit/537.36 (KHTML, like Gecko) '
+      'Chrome/157.0.8103.50 Mobile Safari/537.36',
+    );
+  });
+
+  test('resolveAndroidIntentFallbackUrl handles market:// fallback with scheme=https and prevents self-redirect loops', () {
+    // Google Docs /htmlview "Sử dụng ứng dụng" banner includes S.browser_fallback_url=market://... AND scheme=https
+    const docsBannerIntent =
+        'intent://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=10#Intent;'
+        'S.browser_fallback_url=market%3A%2F%2Fdetails%3Fid%3Dcom.google.android.apps.docs.editors.sheets;'
+        'package=com.google.android.apps.docs.editors.sheets;scheme=https;end';
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        docsBannerIntent,
+        currentUrl: 'https://docs.google.com/spreadsheets/d/1y5syAENL/htmlview',
+      ),
+      'https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=10',
+    );
+
+    // Must return null if synthesized or fallback URL equals currentUrl (ignoring #fragment) to prevent infinite redirect loops!
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        docsBannerIntent,
+        currentUrl: 'https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=10#gid=10',
+      ),
+      isNull,
+    );
+    expect(
+      resolveAndroidIntentFallbackUrl(
+        'intent://zalo.me/g/abc#Intent;scheme=zalo;S.browser_fallback_url=https%3A%2F%2Fzalo.me%2Fg%2Fabc;end',
+        currentUrl: 'https://zalo.me/g/abc',
+      ),
+      isNull,
+    );
+  });
+
+  test('resolveExternalAppNavigation plans native launch for zalo://, zoomus://, msteams://, mailto:, tel:, and intent:// while blocking viewerLocked and subframes', () {
+    final zaloPlan = resolveExternalAppNavigation(
+      'zalo://zaloapp.com/qr/g/nhom_hoc_tap',
+      isForMainFrame: true,
+      viewerLocked: false,
+    );
+    expect(zaloPlan, isNotNull);
+    expect(zaloPlan!.scheme, 'zalo');
+    expect(zaloPlan.launchUri, 'zalo://zaloapp.com/qr/g/nhom_hoc_tap');
+    expect(zaloPlan.httpsFallbackUrl, isNull);
+
+    final meetIntent =
+        'intent://meet.app.goo.gl/?link=https://meet.google.com/abc-defg-hij&apn=com.google.android.apps.tachyon#Intent;'
+        'package=com.google.android.gms;action=com.google.firebase.dynamiclinks.VIEW_DYNAMIC_LINK;scheme=https;'
+        'S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dcom.google.android.apps.tachyon;end;';
+    final meetPlan = resolveExternalAppNavigation(
+      meetIntent,
+      isForMainFrame: true,
+      viewerLocked: false,
+      currentUrl: 'https://meet.google.com/abc-defg-hij',
+    );
+    expect(meetPlan, isNotNull);
+    expect(meetPlan!.scheme, 'intent');
+    expect(meetPlan.isStoreFallback, isTrue);
+    expect(
+      meetPlan.httpsFallbackUrl,
+      'https://play.google.com/store/apps/details?id=com.google.android.apps.tachyon',
+    );
+
+    // Intent with market:// fallback AND scheme=https must keep isStoreFallback=false
+    // so synthesized httpsFallbackUrl (e.g. docs.google.com) is NOT suppressed!
+    const docsMarketAndHttpsIntent =
+        'intent://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=10#Intent;'
+        'S.browser_fallback_url=market%3A%2F%2Fdetails%3Fid%3Dcom.google.android.apps.docs.editors.sheets;'
+        'package=com.google.android.apps.docs.editors.sheets;scheme=https;end';
+    final docsPlan = resolveExternalAppNavigation(
+      docsMarketAndHttpsIntent,
+      isForMainFrame: true,
+      viewerLocked: false,
+      currentUrl: 'https://docs.google.com/spreadsheets/d/1y5syAENL/htmlview',
+    );
+    expect(docsPlan, isNotNull);
+    expect(
+      docsPlan!.marketFallbackUri,
+      'market://details?id=com.google.android.apps.docs.editors.sheets',
+    );
+    expect(
+      docsPlan.httpsFallbackUrl,
+      'https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=10',
+    );
+    expect(docsPlan.isStoreFallback, isFalse);
+
+    for (final allowedSchemeUrl in [
+      'zoomus://zoom.us/join?confno=123456789',
+      'msteams://teams.microsoft.com/l/meetup-join/19',
+      'mailto:teacher@ut.edu.vn',
+      'tel:+842838992862',
+      'market://details?id=com.zing.zalo',
+    ]) {
+      expect(
+        resolveExternalAppNavigation(
+          allowedSchemeUrl,
+          isForMainFrame: true,
+          viewerLocked: false,
+        ),
+        isNotNull,
+        reason: allowedSchemeUrl,
+      );
+    }
+
+    // Must block subframes, viewerLocked, standard web URLs, and unsafe/unknown schemes
+    expect(
+      resolveExternalAppNavigation(
+        'zalo://zaloapp.com/qr/g/abc',
+        isForMainFrame: false,
+        viewerLocked: false,
+      ),
+      isNull,
+    );
+    expect(
+      resolveExternalAppNavigation(
+        'zalo://zaloapp.com/qr/g/abc',
+        isForMainFrame: true,
+        viewerLocked: true,
+      ),
+      isNull,
+    );
+    for (final nonExternal in [
+      'https://docs.google.com/spreadsheets/d/1/edit',
+      'http://127.0.0.1:51234/pdf-viewer/tok/pdf_host.html',
+      'about:blank',
+      'javascript:alert(1)',
+      'data:text/html,<h1>x</h1>',
+      'file:///sdcard/Download/a.pdf',
+      'content://media/external/file/1',
+      'oem-internal-debug://secret',
+      'intent://127.0.0.1:54321/pdf-viewer/tok/#Intent;scheme=http;package=com.android.chrome;end',
+      'intent://example.com/#Intent;scheme=http;end',
+      'intent://pay#Intent;scheme=momo;end',
+      'intent://example.com/#Intent;package=com.android.chrome;end',
+      'intent://127.0.0.1/admin#Intent;scheme=https;end',
+      'intent://user@docs.google.com/doc#Intent;scheme=https;end',
+    ]) {
+      expect(
+        resolveExternalAppNavigation(
+          nonExternal,
+          isForMainFrame: true,
+          viewerLocked: false,
+        ),
+        isNull,
+        reason: nonExternal,
+      );
+    }
+
+    // Demo Mode blockUthLms must cancel live *.ut.edu.vn navigations and intent:// handoffs
+    expect(
+      decideAppWebViewNavigation(
+        'https://courses.ut.edu.vn/course/view.php?id=101',
+        isForMainFrame: true,
+        viewerLocked: false,
+        blockUthLms: true,
+      ).kind,
+      AppNavigationKind.cancel,
+    );
+    expect(
+      decideAppWebViewNavigation(
+        'https://docs.google.com/spreadsheets/d/1/edit',
+        isForMainFrame: true,
+        viewerLocked: false,
+        blockUthLms: true,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+    expect(
+      resolveExternalAppNavigation(
+        'intent://courses.ut.edu.vn/my/#Intent;scheme=https;package=com.android.chrome;end',
+        isForMainFrame: true,
+        viewerLocked: false,
+        blockUthLms: true,
+      ),
+      isNull,
+    );
+    // On iOS, Android-only intent:// URIs must NOT dispatch to launch_external_intent
+    expect(
+      resolveExternalAppNavigation(
+        docsMarketAndHttpsIntent,
+        isForMainFrame: true,
+        viewerLocked: false,
+        platform: TargetPlatform.iOS,
+      ),
+      isNull,
+    );
+    // Deferred popup sink bootstrap ignores transient empty / about:blank loads (TAB-POPUP-04)
+    expect(isTransientPopupSinkBootstrapUrl(null), isTrue);
+    expect(isTransientPopupSinkBootstrapUrl(''), isTrue);
+    expect(isTransientPopupSinkBootstrapUrl('about:blank'), isTrue);
+    expect(isTransientPopupSinkBootstrapUrl('about:blank#popup'), isTrue);
+    expect(
+      isTransientPopupSinkBootstrapUrl('https://docs.google.com/document/d/1/edit'),
+      isFalse,
+    );
+  });
+
+  test('parseAppWebViewColor, shouldRevealAppWebViewSurface, shouldReloadViaInitialUrl, and debug isInspectable work cleanly', () {
+    expect(parseAppWebViewColor('#0F172A')?.toARGB32(), 0xFF0F172A);
+    expect(parseAppWebViewColor('#F8FAFC')?.toARGB32(), 0xFFF8FAFC);
+    expect(parseAppWebViewColor('#800F172A')?.toARGB32(), 0x800F172A);
+    expect(parseAppWebViewColor(''), isNull);
+    expect(parseAppWebViewColor('not-a-color'), isNull);
+
+    // Surface cover stays over #000000 SurfaceView on empty/about:blank unless inline HTML was loaded
+    expect(
+      shouldRevealAppWebViewSurface(url: '', hasInitialHtml: false),
+      isFalse,
+    );
+    expect(
+      shouldRevealAppWebViewSurface(url: 'about:blank', hasInitialHtml: false),
+      isFalse,
+    );
+    expect(
+      shouldRevealAppWebViewSurface(url: 'about:blank', hasInitialHtml: true),
+      isTrue,
+    );
+    expect(
+      shouldRevealAppWebViewSurface(
+        url: 'https://docs.google.com/spreadsheets/d/1/htmlview',
+        hasInitialHtml: false,
+      ),
+      isTrue,
+    );
+    // Aborted uncommitted 302 redirect (e.g. zalo.me -> zalo://) must NOT reveal #000000 surface on spurious onLoadStop!
+    expect(
+      shouldRevealAppWebViewSurface(
+        url: 'https://zalo.me/g/tbbrfqyyvys9qfe20z67',
+        hasInitialHtml: false,
+        suppressAbortedRedirectCommit: true,
+      ),
+      isFalse,
+    );
+
+    // Reload falls back to _initialUrl when uncommitted (null/empty/about:blank)
+    expect(
+      shouldReloadViaInitialUrl(
+        activeControllerUrl: null,
+        initialUrl: 'https://docs.google.com/spreadsheets/d/1/edit',
+        hasInitialHtml: false,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldReloadViaInitialUrl(
+        activeControllerUrl: 'about:blank',
+        initialUrl: 'https://docs.google.com/spreadsheets/d/1/edit',
+        hasInitialHtml: false,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldReloadViaInitialUrl(
+        activeControllerUrl: 'https://docs.google.com/spreadsheets/d/1/htmlview',
+        initialUrl: 'https://docs.google.com/spreadsheets/d/1/edit',
+        hasInitialHtml: false,
+      ),
+      isFalse,
+    );
+
+    final debugBrowser = createAppWebViewSettings(
+      viewerLocked: false,
+      isInspectable: true,
+    );
+    expect(debugBrowser.isInspectable, isTrue);
+    final releaseBrowser = createAppWebViewSettings(viewerLocked: false);
+    expect(releaseBrowser.isInspectable, isFalse);
+
+    // Pre-document HTTP 302 redirects (zalo.me -> zalo://, meet.google.com -> intent://)
+    // must show external handoff/fallback card, whereas 200 OK HTML pages probing custom
+    // schemes via inline JS (zoom.us/j/... -> zoomus://) must keep the live web page!
+    expect(
+      isUncommittedPreDocumentExternalRedirect(
+        hasCommittedPage: false,
+        hasDocumentTitle: false,
+        isRedirect: true,
+      ),
+      isTrue,
+    );
+    expect(
+      isUncommittedPreDocumentExternalRedirect(
+        hasCommittedPage: false,
+        hasDocumentTitle: false,
+        isRedirect: false,
+      ),
+      isFalse,
+    );
+    expect(
+      isUncommittedPreDocumentExternalRedirect(
+        hasCommittedPage: false,
+        hasDocumentTitle: true,
+        isRedirect: true,
+      ),
+      isFalse,
+    );
+    expect(
+      isUncommittedPreDocumentExternalRedirect(
+        hasCommittedPage: true,
+        hasDocumentTitle: false,
+        isRedirect: true,
+      ),
+      isFalse,
     );
   });
 }

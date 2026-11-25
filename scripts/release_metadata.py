@@ -13,7 +13,7 @@ import tomllib
 
 
 _NUMERIC_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-DEFAULT_ANDROID_PACKAGE_ID = "com.uthelper.uthelper"
+DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"
 VALID_DISTRIBUTION_CHANNELS = frozenset(
     {
         "chplay",

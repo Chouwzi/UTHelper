@@ -1,6 +1,7 @@
 import logging
 import html
 import smtplib
+import ssl
 from datetime import datetime
 from email.message import EmailMessage
 from typing import List
@@ -229,12 +230,23 @@ class EmailNotifier(BaseNotifier):
         msg.set_content("\n".join(plain_lines))
         msg.add_alternative(html_content, subtype='html')
 
+        tls_context = ssl.create_default_context()
         try:
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as server:
+            with smtplib.SMTP_SSL(
+                "smtp.gmail.com",
+                465,
+                timeout=30,
+                context=tls_context,
+            ) as server:
                 server.login(email_address, app_password)
                 server.send_message(msg)
             logger.info(f"[Email] Đã gửi {len(tasks)} bài tập tới {email_address}")
             return True
         except Exception as e:
-            logger.error(f"[Email] Lỗi gửi email: {e}")
+            err_text = (
+                str(e).replace(app_password, "[REDACTED]")
+                if app_password
+                else str(e)
+            )
+            logger.error(f"[Email] Lỗi gửi email: {err_text}")
             return False

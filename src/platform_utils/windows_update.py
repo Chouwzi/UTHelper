@@ -910,20 +910,31 @@ if ($ExpectedConfigSha256) {
   }
 }
 $config = [System.Text.Encoding]::UTF8.GetString($cfgBytes) | ConvertFrom-Json
+$handoffOwnerSid = $null
+try {
+  $handoffOwnerSid = (Get-Acl -LiteralPath $ConfigPath).GetOwner([System.Security.Principal.SecurityIdentifier])
+} catch {}
 $exitCode = 1
 $stageDir = $null
 $statusParent = $null
 $trustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18')
-function Assert-TrustedAdminDir([string]$Path, [System.Security.AccessControl.DirectorySecurity]$Acl) {
+function Assert-TrustedAdminDir([string]$Path, [System.Security.AccessControl.DirectorySecurity]$Acl, [System.Security.Principal.SecurityIdentifier]$OwnerSid) {
+  if ($null -eq $OwnerSid) { throw 'Missing OwnerSid' }
   if (Test-Path -LiteralPath $Path) {
     $existing = Get-Item -LiteralPath $Path -Force
     if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
       throw ('Refusing reparse point in ' + $Path)
     }
-    Set-Acl -LiteralPath $Path -AclObject $Acl
+    [System.IO.Directory]::SetAccessControl($Path, $Acl)
   } else {
     [void][System.IO.Directory]::CreateDirectory($Path, $Acl)
   }
+  try {
+    $dirOwnerAcl = Get-Acl -LiteralPath $Path
+    $dirOwnerAcl.SetOwner($OwnerSid)
+    Set-Acl -LiteralPath $Path -AclObject $dirOwnerAcl
+  } catch {}
+  [System.IO.Directory]::SetAccessControl($Path, $Acl)
   $verifiedItem = Get-Item -LiteralPath $Path -Force
   if ($verifiedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
     throw ('Refusing reparse point after lock in ' + $Path)
@@ -943,33 +954,18 @@ try {
     throw 'Installer kind command-line pin mismatch'
   }
 
-  $parentPid = [int]$config.parent_pid
-  $waitSeconds = [double]$config.wait_timeout_seconds
-  if ($waitSeconds -le 0) { $waitSeconds = 30 }
-  $deadline = (Get-Date).AddSeconds($waitSeconds)
-  while ((Get-Date) -lt $deadline) {
-    if (-not (Get-Process -Id $parentPid -ErrorAction SilentlyContinue)) { break }
-    Start-Sleep -Milliseconds 150
-  }
-  Start-Sleep -Milliseconds 300
-
-  $packagePath = [string]$config.package_path
-  if ((Get-Item -LiteralPath $packagePath -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-    throw 'Refusing reparse point installer package'
-  }
   $programDataBase = [Environment]::GetFolderPath('CommonApplicationData')
   if (-not $programDataBase) { $programDataBase = $env:ProgramData }
   if (-not $programDataBase) { throw 'ProgramData directory unavailable' }
   $uthelperProgramData = Join-Path $programDataBase 'UTHelper'
   $stageParent = Join-Path $uthelperProgramData 'update_stage'
-  $statusParent = Join-Path $uthelperProgramData 'update_status'
+  $candidateStatusParent = Join-Path $uthelperProgramData 'update_status'
 
   $adminOwnerSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
   $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
   $prop = [System.Security.AccessControl.PropagationFlags]::None
 
   $adminAcl = New-Object System.Security.AccessControl.DirectorySecurity
-  $adminAcl.SetOwner($adminOwnerSid)
   $adminAcl.SetAccessRuleProtection($true, $false)
   foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
     $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
@@ -984,7 +980,6 @@ try {
   }
 
   $readOnlyStatusAcl = New-Object System.Security.AccessControl.DirectorySecurity
-  $readOnlyStatusAcl.SetOwner($adminOwnerSid)
   $readOnlyStatusAcl.SetAccessRuleProtection($true, $false)
   foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
     $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
@@ -1007,12 +1002,28 @@ try {
   )
   $readOnlyStatusAcl.AddAccessRule($usersReadRule)
 
-  Assert-TrustedAdminDir $uthelperProgramData $readOnlyStatusAcl
-  Assert-TrustedAdminDir $stageParent $adminAcl
-  Assert-TrustedAdminDir $statusParent $readOnlyStatusAcl
+  Assert-TrustedAdminDir $uthelperProgramData $readOnlyStatusAcl $adminOwnerSid
+  Assert-TrustedAdminDir $stageParent $adminAcl $adminOwnerSid
+  Assert-TrustedAdminDir $candidateStatusParent $readOnlyStatusAcl $adminOwnerSid
+  $statusParent = $candidateStatusParent
+
+  $parentPid = [int]$config.parent_pid
+  $waitSeconds = [double]$config.wait_timeout_seconds
+  if ($waitSeconds -le 0) { $waitSeconds = 30 }
+  $deadline = (Get-Date).AddSeconds($waitSeconds)
+  while ((Get-Date) -lt $deadline) {
+    if (-not (Get-Process -Id $parentPid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 150
+  }
+  Start-Sleep -Milliseconds 300
+
+  $packagePath = [string]$config.package_path
+  if ((Get-Item -LiteralPath $packagePath -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point installer package'
+  }
 
   $stageDir = Join-Path $stageParent ('stage-' + [guid]::NewGuid().ToString('N'))
-  Assert-TrustedAdminDir $stageDir $adminAcl
+  Assert-TrustedAdminDir $stageDir $adminAcl $adminOwnerSid
 
   $fileName = [System.IO.Path]::GetFileName($packagePath)
   if (-not $fileName) { throw 'Invalid installer filename' }
@@ -1073,11 +1084,48 @@ try {
       ($resolvedStatusDir.Equals($resolvedStatusParent, [System.StringComparison]::OrdinalIgnoreCase)) -and
       ($statusFileName -match '^handoff-[0-9a-f]+\.status\.json$')
     ) {
+      $staleCutoff = (Get-Date).ToUniversalTime().AddMinutes(-15)
+      Get-ChildItem -LiteralPath $resolvedStatusParent -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if (
+          ($_.Name -ne $statusFileName) -and
+          ($_.Name -match '^handoff-[0-9a-f]+\.status\.json(\.tmp)?$') -and
+          (-not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -and
+          ($_.LastWriteTimeUtc -lt $staleCutoff)
+        ) {
+          try { [System.IO.File]::Delete($_.FullName) } catch {}
+        }
+      }
       $safeStatusPath = Join-Path $resolvedStatusParent $statusFileName
       $statusTmp = Join-Path $resolvedStatusParent ($statusFileName + '.tmp')
       $statusJson = @{ exit_code = $exitCode } | ConvertTo-Json -Compress
       $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
       [System.IO.File]::WriteAllText($statusTmp, $statusJson, $utf8NoBom)
+      if ($handoffOwnerSid) {
+        $statusFileAcl = New-Object System.Security.AccessControl.FileSecurity
+        $statusFileAcl.SetAccessRuleProtection($true, $false)
+        foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+          $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+          $statusFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+          )))
+        }
+        if ($trustedOwnerSids -notcontains $handoffOwnerSid.Value) {
+          $statusFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $handoffOwnerSid,
+            [System.Security.AccessControl.FileSystemRights]'Read, Synchronize, Delete',
+            [System.Security.AccessControl.AccessControlType]::Allow
+          )))
+        }
+        [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
+        try {
+          $ownerAcl = Get-Acl -LiteralPath $statusTmp
+          $ownerAcl.SetOwner($adminOwnerSid)
+          Set-Acl -LiteralPath $statusTmp -AclObject $ownerAcl
+        } catch {}
+        [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
+      }
       Move-Item -LiteralPath $statusTmp -Destination $safeStatusPath -Force
     }
   }
@@ -1091,13 +1139,61 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $statusPath = [string]$config.status_path
-$deadline = (Get-Date).AddSeconds(600)
+$statusWaitSeconds = 600.0
+if ($null -ne $config.status_wait_timeout_seconds) {
+  $parsedWait = 0.0
+  if (
+    [double]::TryParse(
+      [string]$config.status_wait_timeout_seconds,
+      [System.Globalization.NumberStyles]::Float,
+      [System.Globalization.CultureInfo]::InvariantCulture,
+      [ref]$parsedWait
+    ) -and ($parsedWait -gt 0)
+  ) {
+    $statusWaitSeconds = [Math]::Min($parsedWait, 600.0)
+  }
+}
+$deadline = (Get-Date).AddSeconds($statusWaitSeconds)
 $exitCode = -1
 while ((Get-Date) -lt $deadline) {
   if ($statusPath -and (Test-Path -LiteralPath $statusPath)) {
     try {
-      $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
-      $exitCode = [int]$status.exit_code
+      $statusItem = Get-Item -LiteralPath $statusPath -Force -ErrorAction Stop
+      if ($statusItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { break }
+      $rawStatus = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 -ErrorAction Stop
+      if ([string]::IsNullOrWhiteSpace($rawStatus)) { throw 'Empty status payload' }
+      $status = $rawStatus | ConvertFrom-Json -ErrorAction Stop
+      if (
+        ($null -eq $status) -or
+        ($status.PSObject.Properties.Match('exit_code').Count -eq 0) -or
+        ($null -eq $status.exit_code) -or
+        ($status.exit_code -is [bool])
+      ) {
+        throw 'Missing exit_code in status payload'
+      }
+      $parsedExitCode = 0
+      if (
+        -not [int]::TryParse(
+          [string]$status.exit_code,
+          [System.Globalization.NumberStyles]::Integer,
+          [System.Globalization.CultureInfo]::InvariantCulture,
+          [ref]$parsedExitCode
+        )
+      ) {
+        throw 'Invalid integer exit_code in status payload'
+      }
+      $exitCode = $parsedExitCode
+      if ($statusItem.Name -match '^handoff-[0-9a-f]+\.status\.json$') {
+        for ($delTry = 0; $delTry -lt 3; $delTry++) {
+          try {
+            [System.IO.File]::Delete($statusItem.FullName)
+            break
+          } catch {
+            if (-not (Test-Path -LiteralPath $statusItem.FullName)) { break }
+            Start-Sleep -Milliseconds 50
+          }
+        }
+      }
       break
     } catch {}
   }
@@ -1134,7 +1230,59 @@ if ($exitCode -eq 0 -or $exitCode -eq 3010) {
 Set-Location -LiteralPath $env:TEMP
 $handoffDir = [string]$config.handoff_dir
 if ($handoffDir -and (Test-Path -LiteralPath $handoffDir)) {
-  Remove-Item -LiteralPath $handoffDir -Recurse -Force -ErrorAction SilentlyContinue
+  $dirItem = Get-Item -LiteralPath $handoffDir -Force -ErrorAction SilentlyContinue
+  if (
+    $dirItem -and
+    $dirItem.PSIsContainer -and
+    ($dirItem.Name -match '^handoff-[0-9a-f]+$') -and
+    (-not ($dirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -and
+    $dirItem.Parent -and
+    ($dirItem.Parent.Name -eq 'update_handoff') -and
+    (-not ($dirItem.Parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+  ) {
+    try {
+      $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $dirRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentSid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow
+      )
+      $fileRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentSid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+      )
+      $children = @(Get-ChildItem -LiteralPath $dirItem.FullName -Force -ErrorAction SilentlyContinue)
+      $hasReparseChild = $false
+      foreach ($child in $children) {
+        if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+          $hasReparseChild = $true
+          break
+        }
+      }
+      if (-not $hasReparseChild) {
+        $dirAcl = [System.IO.Directory]::GetAccessControl(
+          $dirItem.FullName,
+          [System.Security.AccessControl.AccessControlSections]::Access
+        )
+        $dirAcl.SetAccessRule($dirRule)
+        [System.IO.Directory]::SetAccessControl($dirItem.FullName, $dirAcl)
+        foreach ($child in $children) {
+          if (-not $child.PSIsContainer) {
+            $childAcl = [System.IO.File]::GetAccessControl(
+              $child.FullName,
+              [System.Security.AccessControl.AccessControlSections]::Access
+            )
+            $childAcl.SetAccessRule($fileRule)
+            [System.IO.File]::SetAccessControl($child.FullName, $childAcl)
+          }
+        }
+        Remove-Item -LiteralPath $dirItem.FullName -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 """
 
