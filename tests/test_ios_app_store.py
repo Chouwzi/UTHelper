@@ -123,11 +123,17 @@ def test_app_store_packaging_installs_privacy_manifest_and_enforces_ats(
     (bundle / "Info.plist").write_bytes(
         plistlib.dumps(
             {
-                "CFBundleIdentifier": "com.uthelper.UTHelper",
-                "NSAppTransportSecurity": {"NSAllowsArbitraryLoads": False},
+                "CFBundleIdentifier": "io.github.chouwzi.uthelper",
+                "NSAppTransportSecurity": {
+                    "NSAllowsArbitraryLoads": False,
+                    "NSAllowsLocalNetworking": True,
+                },
                 "ITSAppUsesNonExemptEncryption": False,
             }
         )
+    )
+    (bundle / "PrivacyInfo.xcprivacy").write_bytes(
+        (ROOT / "packaging/ios/PrivacyInfo.xcprivacy").read_bytes()
     )
 
     installed = prepare_app_bundle(bundle)
@@ -169,7 +175,10 @@ def test_ios_build_configuration_uses_ats_without_cleartext_exceptions() -> None
         "NSAppTransportSecurity"
     ]
 
-    assert transport_security == {"NSAllowsArbitraryLoads": False}
+    assert transport_security == {
+        "NSAllowsArbitraryLoads": False,
+        "NSAllowsLocalNetworking": True,
+    }
     assert project["tool"]["flet"]["ios"]["info"][
         "ITSAppUsesNonExemptEncryption"
     ] is False

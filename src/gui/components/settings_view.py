@@ -585,7 +585,7 @@ class SettingsView(ft.Container):
         url: str,
         fallback_url: str | None = None,
     ) -> bool:
-        allowed_schemes = {"market", "ms-windows-store", "https"}
+        allowed_schemes = {"market", "ms-windows-store", "itms-apps", "https"}
         if urlsplit(url).scheme.lower() not in allowed_schemes:
             return False
         safe_fallback = (

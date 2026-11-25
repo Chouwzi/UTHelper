@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import plistlib
 from pathlib import Path
-import shutil
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +13,6 @@ _ATS_BYPASSES = (
     "NSAllowsArbitraryLoads",
     "NSAllowsArbitraryLoadsForMedia",
     "NSAllowsArbitraryLoadsInWebContent",
-    "NSAllowsLocalNetworking",
 )
 
 
@@ -80,12 +78,18 @@ def prepare_app_bundle(app_bundle: Path) -> Path:
         raise IOSAppStorePreparationError("App Store builds cannot allow insecure domain exceptions")
 
     read_privacy_manifest()
-    target = bundle / "PrivacyInfo.xcprivacy"
-    if target.is_symlink():
-        raise IOSAppStorePreparationError("app privacy manifest cannot be a symlink")
-    shutil.copyfile(PRIVACY_MANIFEST, target)
-    read_privacy_manifest(target)
-    return target
+    manifests = [
+        path
+        for path in bundle.rglob("PrivacyInfo.xcprivacy")
+        if not path.is_symlink() and path.is_file()
+    ]
+    if not manifests:
+        raise IOSAppStorePreparationError(
+            "app privacy manifest must be bundled before code signing"
+        )
+    for manifest in manifests:
+        read_privacy_manifest(manifest)
+    return manifests[0]
 
 
 def main() -> None:
@@ -93,7 +97,7 @@ def main() -> None:
     parser.add_argument("--app-bundle", required=True, type=Path)
     args = parser.parse_args()
     result = prepare_app_bundle(args.app_bundle)
-    print(f"Prepared iOS App Store privacy manifest: {result}")
+    print(f"Verified pre-bundled iOS App Store privacy manifest: {result}")
 
 
 if __name__ == "__main__":
