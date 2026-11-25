@@ -80,6 +80,7 @@ tasks.configureEach {
 }
 
 tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+    systemProperty 'robolectric.dependency.repo.url', 'https://maven-central.storage-download.googleapis.com/maven2'
     testLogging {
         events "failed"
         exceptionFormat "full"
