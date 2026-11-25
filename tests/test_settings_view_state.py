@@ -926,3 +926,36 @@ def test_settings_load_skips_redundant_refresh_when_palette_unchanged():
         view._refresh_section_colors.assert_called_once()
 
     asyncio.run(scenario())
+
+
+def test_settings_view_marshal_ui_handles_destroyed_flet_session_and_closed_loop():
+    import threading
+
+    class _DestroyedSessionPage:
+        @property
+        def loop(self):
+            raise RuntimeError("An attempt to fetch destroyed session.")
+
+    view = SimpleNamespace(_page=_DestroyedSessionPage())
+    called = []
+    errors = []
+
+    def _worker():
+        try:
+            SettingsView._marshal_ui(view, lambda: called.append("ran"))
+        except Exception as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join(timeout=2.0)
+    assert errors == []
+    assert called == []
+
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    closed_view = SimpleNamespace(_page=SimpleNamespace(loop=closed_loop))
+    closed_called = []
+    SettingsView._marshal_ui(closed_view, lambda: closed_called.append("ran"))
+    assert closed_called == []
+

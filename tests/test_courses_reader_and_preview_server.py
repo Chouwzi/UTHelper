@@ -576,8 +576,13 @@ def test_document_reader_tier_a_webview_mounts_html_and_pdf(
     assert len(captured_urls) == 2
     status, headers, body = _http_request(captured_urls[1])
     assert status == 200
-    assert headers["content-type"] == "application/pdf"
-    assert body == pdf_bytes
+    assert headers["content-type"].startswith("text/html")
+    assert b"pdf_host.js" in body
+    assert reader_pdf._office_viewer is not None
+    blob_status, blob_headers, blob_body = _http_request(reader_pdf._office_viewer.blob_url)
+    assert blob_status == 200
+    assert blob_headers["content-type"] == "application/pdf"
+    assert blob_body == pdf_bytes
     assert any(getattr(c, "key", None) == "fake-wv" for c in _walk_controls(reader_pdf))
 
 
@@ -938,20 +943,22 @@ def test_document_reader_tier_b_pdf_lazy_server_oversized_and_url_revalidation()
             webview_builder=_wv,
         )
         assert len(built_urls) == 1
-        first_url = built_urls[0]
-        assert big_srv.has_active_url(first_url) is True
+        assert reader._office_viewer is not None
+        first_blob_url = reader._office_viewer.blob_url
+        assert big_srv.has_active_url(first_blob_url) is True
 
-        # update_theme on active PDF Tier A skips rebuilding WebView while URL is active
+        # update_theme on active PDF viewer skips rebuilding WebView while URL is active
         reader.update_theme()
         assert len(built_urls) == 1
 
-        # Evict first_url, then update_theme re-registers cleanly
+        # Evict first_blob_url, then update_theme re-registers cleanly
         big_srv.register_bytes(b"other", "text/plain")
-        assert big_srv.has_active_url(first_url) is False
+        assert big_srv.has_active_url(first_blob_url) is False
         reader.update_theme()
         assert len(built_urls) == 2
-        assert built_urls[1] != first_url
-        assert big_srv.has_active_url(built_urls[1]) is True
+        assert built_urls[1] != built_urls[0]
+        assert reader._office_viewer is not None
+        assert big_srv.has_active_url(reader._office_viewer.blob_url) is True
     finally:
         big_srv.stop()
 

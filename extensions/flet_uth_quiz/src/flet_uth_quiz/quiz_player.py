@@ -147,3 +147,19 @@ class UthQuizSessionCleaner(Service):
             return bool(await self._invoke_method("clear_sessions", timeout=10))
         except Exception:
             return False
+
+    async def prewarm(self, session_key: str) -> bool:
+        if not isinstance(session_key, str) or not _SESSION_KEY_RE.fullmatch(
+            session_key
+        ):
+            return False
+        try:
+            return bool(
+                await self._invoke_method(
+                    "prewarm",
+                    {"session_key": session_key},
+                    timeout=10,
+                )
+            )
+        except Exception:
+            return False

@@ -130,3 +130,52 @@ bool _cookiePathApplies(String cookiePath, String requestPath) {
       requestPath.length > cookiePath.length &&
           requestPath[cookiePath.length] == '/';
 }
+
+/// Removes only cookies scoped to [trustedOrigin]'s exact host so shared
+/// general-WebView logins (Microsoft, Google, Portal, etc.) stay persisted.
+Future<void> purgeQuizOriginCookies(
+  CookieManager manager,
+  Uri? trustedOrigin,
+) async {
+  if (trustedOrigin == null || trustedOrigin.host.isEmpty) return;
+  final host = trustedOrigin.host;
+  final originUri = Uri(
+    scheme: trustedOrigin.scheme.isNotEmpty ? trustedOrigin.scheme : 'https',
+    host: host,
+    port: trustedOrigin.hasPort ? trustedOrigin.port : null,
+    path: '/',
+  );
+  final webOrigin = WebUri.uri(originUri);
+
+  final cookies = await manager.getCookies(url: webOrigin);
+  for (final cookie in cookies) {
+    final name = cookie.name;
+    if (name.isEmpty) continue;
+    final domain = cookie.domain;
+    if (domain != null &&
+        domain.isNotEmpty &&
+        !_cookieDomainMatches(domain, host)) {
+      continue;
+    }
+    try {
+      await manager.deleteCookie(
+        url: webOrigin,
+        name: name,
+        path: (cookie.path != null && cookie.path!.isNotEmpty)
+            ? cookie.path!
+            : '/',
+        domain: domain,
+      );
+    } catch (_) {}
+  }
+
+  for (final targetDomain in <String>[host, '.$host']) {
+    try {
+      await manager.deleteCookies(
+        url: webOrigin,
+        domain: targetDomain,
+        path: '/',
+      );
+    } catch (_) {}
+  }
+}

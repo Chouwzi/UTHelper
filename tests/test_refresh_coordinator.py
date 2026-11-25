@@ -263,3 +263,40 @@ def test_card_detail_prefetch_prioritizes_near_deadlines_and_filters_noise():
         far_future,
         unknown_deadline,
     ]
+
+
+def test_build_prefetched_dataset_preserves_optimistic_pending_submission_and_prunes():
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=555"
+    items = [
+        {
+            "url": url,
+            "title": "Lab 05",
+            "course": "CS101",
+            "deadline": "2026-12-30 23:59:00",
+            "urgency": "safe",
+            "submission_status": "submitted",
+        }
+    ]
+    stale_cache = {
+        url: {
+            "submission_status": "not_submitted",
+            "course": "CS101",
+        }
+    }
+    pending = {
+        url: (200.0, "submitted"),
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=1": (10.0, "submitted"),
+    }
+
+    result = build_prefetched_dataset(
+        items,
+        stale_cache,
+        pending,
+        prefetch_start_time=150.0,
+        now=350.0,
+    )
+
+    assert result[0]["submission_status"] == "submitted"
+    assert result[0]["details"]["status_data"]["Trạng thái nộp bài"] == "submitted"
+    assert set(pending) == {url}
+    assert result[0]["_title_lower"] == "lab 05"

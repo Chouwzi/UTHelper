@@ -491,6 +491,52 @@ def cleanup_image_cache():
         logger.warning(f"Lỗi khi chạy dọn dẹp cache ảnh: {e}")
 
 
+_DEFAULT_URLLIB_URLOPEN = urllib.request.urlopen
+
+
+def _parse_trusted_moodle_pluginfile_url(
+    raw_url: str, trusted_origin: str
+) -> tuple[str, str] | None:
+    """Validate an untrusted ``<img src>`` strictly against the trusted HTTPS Moodle origin.
+
+    Returns ``(normalized_ws_path, original_path)`` only when ``raw_url`` uses
+    ``https``, has no userinfo or control characters, matches ``trusted_origin``
+    exactly, and targets Moodle's ``/pluginfile.php`` endpoint.
+    """
+    if not raw_url or not trusted_origin:
+        return None
+    cleaned = raw_url.strip()
+    if not cleaned or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(cleaned)
+        origin_parts = urllib.parse.urlsplit(trusted_origin)
+    except ValueError:
+        return None
+
+    if parsed.scheme.lower() != "https" or origin_parts.scheme.lower() != "https":
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if not parsed.netloc or parsed.netloc.lower() != origin_parts.netloc.lower():
+        return None
+
+    path = parsed.path or ""
+    if "/pluginfile.php" not in path or ".." in path.split("/"):
+        return None
+    if not (
+        path.startswith("/pluginfile.php/")
+        or path.startswith("/webservice/pluginfile.php/")
+        or path in ("/pluginfile.php", "/webservice/pluginfile.php")
+    ):
+        return None
+
+    ws_path = path
+    if not ws_path.startswith("/webservice/"):
+        ws_path = ws_path.replace("/pluginfile.php", "/webservice/pluginfile.php", 1)
+    return ws_path, path
+
+
 def pre_cache_description_images(html_content: str) -> str:
     """
     Tải xuống và cache toàn bộ ảnh từ description_html vào ổ đĩa local,
@@ -504,38 +550,47 @@ def pre_cache_description_images(html_content: str) -> str:
         return html_content
 
     from config import _USER_DATA_DIR, settings
+    from core.client import _SameMoodleOriginRedirectHandler, _is_same_moodle_origin_url
+    from core.moodle_sites import moodle_site_from_origin
+
     cache_dir = _USER_DATA_DIR / "cache" / "images"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     token = settings.MOODLE_WS_TOKEN
     base_url = settings.MOODLE_BASE_URL or "https://courses.ut.edu.vn"
-    base_domain = base_url.replace("https://", "").replace("http://", "")
+    trusted_site = moodle_site_from_origin(base_url)
+    if trusted_site is None:
+        return html_content
+    trusted_origin = trusted_site.origin
+    token_matches_origin = bool(
+        token
+        and (
+            not getattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "")
+            or settings.MOODLE_WS_TOKEN_ORIGIN == trusted_origin
+        )
+    )
 
     for tag in img_tags:
         src_match = re.search(r'src="([^"]+)"', tag)
         if not src_match:
             continue
-        
-        orig_url = src_match.group(1)
-        if "pluginfile.php" not in orig_url or base_domain not in orig_url:
-            continue
 
-        parsed_url = urllib.parse.urlparse(orig_url)
-        path = parsed_url.path
-        
-        # Chuẩn hoá sang webservice/pluginfile.php
-        if not path.startswith("/webservice/"):
-            path = path.replace("/pluginfile.php", "/webservice/pluginfile.php")
-            
-        auth_url = f"{parsed_url.scheme}://{parsed_url.netloc}{path}"
-        if token:
-            auth_url += f"?token={token}"
-            
-        url_hash = hashlib.sha256(parsed_url.path.encode('utf-8')).hexdigest()
-        ext = os.path.splitext(parsed_url.path)[1]
-        if not ext or len(ext) > 5:
+        orig_url = src_match.group(1)
+        validated = _parse_trusted_moodle_pluginfile_url(orig_url, trusted_origin)
+        if validated is None:
+            continue
+        ws_path, orig_path = validated
+
+        public_ws_url = f"{trusted_origin}{ws_path}"
+        auth_url = public_ws_url
+        if token_matches_origin:
+            auth_url = f"{public_ws_url}?token={urllib.parse.quote(token, safe='')}"
+
+        url_hash = hashlib.sha256(orig_path.encode('utf-8')).hexdigest()
+        ext = os.path.splitext(orig_path)[1]
+        if not ext or not re.fullmatch(r"\.[A-Za-z0-9]{1,5}", ext):
             ext = ".png"
-        
+
         cache_filename = f"{url_hash}{ext}"
         cache_file_path = cache_dir / cache_filename
 
@@ -543,10 +598,21 @@ def pre_cache_description_images(html_content: str) -> str:
         if not cache_file_path.exists():
             temporary_path = None
             try:
-                logger.info(f"Downloading Moodle image: {orig_url}")
+                logger.info("Downloading Moodle image: %s", orig_url)
                 req = urllib.request.Request(auth_url)
                 req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
-                with urllib.request.urlopen(req, timeout=8) as resp:
+                if urllib.request.urlopen is _DEFAULT_URLLIB_URLOPEN:
+                    opener = urllib.request.build_opener(
+                        _SameMoodleOriginRedirectHandler(trusted_origin)
+                    )
+                    cm = opener.open(req, timeout=8)
+                else:
+                    cm = urllib.request.urlopen(req, timeout=8)
+                with cm as resp:
+                    geturl = getattr(resp, "geturl", None)
+                    final_url = str(geturl() or "") if callable(geturl) else ""
+                    if final_url and not _is_same_moodle_origin_url(final_url, trusted_origin):
+                        raise ValueError("Image response redirected outside trusted Moodle origin")
                     if resp.status != 200:
                         raise ValueError(f"Image response status was {resp.status}")
                     headers = getattr(resp, "headers", None)
@@ -578,9 +644,9 @@ def pre_cache_description_images(html_content: str) -> str:
 
                     os.replace(temporary_path, cache_file_path)
                     temporary_path = None
-                    logger.info(f"Successfully cached image to {cache_file_path}")
+                    logger.info("Successfully cached image to %s", cache_file_path)
             except Exception as e:
-                logger.warning(f"Failed to cache image {orig_url}: {e}")
+                logger.warning("Failed to cache image %s: %s", orig_url, e)
                 downloaded = False
                 if temporary_path is not None:
                     try:
@@ -598,8 +664,8 @@ def pre_cache_description_images(html_content: str) -> str:
             new_tag = tag.replace(orig_url, assets_rel_path)
             html_content = html_content.replace(tag, new_tag)
         else:
-            # Fallback sang link web service trực tuyến có kèm token
-            new_tag = tag.replace(orig_url, auth_url)
+            # Never embed WS token into rendered HTML/Markdown on fallback
+            new_tag = tag.replace(orig_url, public_ws_url)
             html_content = html_content.replace(tag, new_tag)
 
     # Chạy dọn dẹp cache sau mỗi lần tải ảnh mới

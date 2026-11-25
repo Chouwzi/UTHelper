@@ -23,9 +23,17 @@ _REQUIRED_OFFICE_VIEWER_ASSETS = (
     "jszip.min.js",
     "pptx_host.html",
     "pptx_host.js",
+    "pptx_worker.js",
     "pptx_engine.js",
     "viewer.css",
     "viewer_common.js",
+)
+_REQUIRED_PDF_VIEWER_ASSETS = (
+    "pdf_host.html",
+    "pdf_host.js",
+    "pdf_viewer.css",
+    "pdf.min.mjs",
+    "pdf.worker.min.mjs",
 )
 
 
@@ -47,6 +55,7 @@ def inspect_bundle(
     bundle_dir: Path,
     *,
     expected_version: str | None = None,
+    strict_site_packages: bool = False,
 ) -> tuple[str, ...]:
     """Return every detected integrity issue without mutating the bundle."""
     root = bundle_dir.resolve()
@@ -91,6 +100,11 @@ def inspect_bundle(
         asset_path = office_viewer_dir / asset_name
         if not asset_path.is_file() or asset_path.stat().st_size <= 0:
             issues.append(f"packaged office_viewer asset is missing: {asset_name}")
+    pdf_viewer_dir = app_dir / "assets" / "pdf_viewer"
+    for asset_name in _REQUIRED_PDF_VIEWER_ASSETS:
+        asset_path = pdf_viewer_dir / asset_name
+        if not asset_path.is_file() or asset_path.stat().st_size <= 0:
+            issues.append(f"packaged pdf_viewer asset is missing: {asset_name}")
 
     site_packages = root / "site-packages"
     if not site_packages.is_dir():
@@ -121,12 +135,40 @@ def inspect_bundle(
         ):
             issues.append("packaged flet_uth_quiz extension is missing")
 
+        # Enforce extended Windows runtime package checks when explicitly requested
+        # or when inspecting a full Flet-packaged site-packages tree (.dist-info present).
+        if strict_site_packages or any(site_packages.glob("*.dist-info")):
+            if not any((site_packages / "webview2").rglob("_webview2_*.pyd")):
+                issues.append("WebView2 WinRT projection is missing")
+            if not any(
+                (site_packages / "winrt").glob("_winrt_windows_foundation*.pyd")
+            ):
+                issues.append("Windows.Foundation projection is missing")
+            for module in ("win32gui", "win32process"):
+                if not any(win32.glob(f"{module}*.pyd")):
+                    issues.append(f"packaged {module} extension is missing")
+            if not any((site_packages / "pypdfium2").glob("__init__.py*")):
+                issues.append("packaged pypdfium2 module is missing")
+            if not any((site_packages / "lxml").glob("etree*.pyd")):
+                issues.append("packaged lxml.etree extension is missing")
+            if not any((site_packages / "filelock").glob("__init__.py*")):
+                issues.append("packaged filelock module is missing")
+
     return tuple(issues)
 
 
-def verify_bundle(bundle_dir: Path, *, expected_version: str | None = None) -> None:
+def verify_bundle(
+    bundle_dir: Path,
+    *,
+    expected_version: str | None = None,
+    strict_site_packages: bool = False,
+) -> None:
     """Raise with a complete diagnostic when the bundle is incomplete."""
-    issues = inspect_bundle(bundle_dir, expected_version=expected_version)
+    issues = inspect_bundle(
+        bundle_dir,
+        expected_version=expected_version,
+        strict_site_packages=strict_site_packages,
+    )
     if issues:
         raise BundleVerificationError("; ".join(issues))
 
@@ -135,9 +177,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify a Flet Windows bundle")
     parser.add_argument("bundle_dir", type=Path)
     parser.add_argument("--expected-version")
+    parser.add_argument(
+        "--strict-site-packages",
+        action="store_true",
+        help="Verify all Windows runtime extensions (WebView2 WinRT, Foundation, win32gui/process, pypdfium2, lxml, filelock)",
+    )
     args = parser.parse_args(argv)
     try:
-        verify_bundle(args.bundle_dir, expected_version=args.expected_version)
+        verify_bundle(
+            args.bundle_dir,
+            expected_version=args.expected_version,
+            strict_site_packages=args.strict_site_packages,
+        )
     except BundleVerificationError as exc:
         print(f"Windows bundle verification failed: {exc}", file=sys.stderr)
         return 1

@@ -115,6 +115,8 @@ try {
     if ((Invoke-BoundedProcess "msiexec.exe" @("/i", $BaselineMsi, "/qn", "/norestart") $installEnvironment) -ne 0) { throw "Baseline install failed" }
     Assert-InstalledState $BaselineProductCode $CurrentProductCode $baselineVersion
     [IO.File]::WriteAllText($sentinel, '{"sentinel":true}')
+    $expectedAutostartValue = '"C:\Program Files\UTHelper\UTHelperAutostart.exe"'
+    New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "UTHelper" -Value $expectedAutostartValue -PropertyType String -Force | Out-Null
     $failureInjection = "WIXFAILWHENDEFERRED=1"
     if (-not $failureInjection) { throw "Failure injection contract missing" }
     $failedUpgrade = Invoke-BoundedProcess "msiexec.exe" @("/i", $CurrentMsi, "WIXFAILWHENDEFERRED=1", "/qn", "/norestart") $installEnvironment
@@ -123,8 +125,9 @@ try {
     if ((Invoke-BoundedProcess "msiexec.exe" @("/i", $CurrentMsi, "/qn", "/norestart") $installEnvironment) -ne 0) { throw "Current MSI upgrade failed" }
     Assert-InstalledState $CurrentProductCode $BaselineProductCode $currentVersion
     if (-not (Test-Path $sentinel)) { throw "Successful upgrade removed user settings sentinel" }
+    $upgradedRunValues = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
+    if ($null -eq $upgradedRunValues -or $upgradedRunValues.UTHelper -ne $expectedAutostartValue) { throw "MajorUpgrade removed or altered HKCU Run\UTHelper autostart value" }
     if ((Invoke-BoundedProcess "msiexec.exe" @("/i", $BaselineMsi, "/qn", "/norestart") $installEnvironment) -eq 0) { throw "Downgrade was not rejected" }
-    New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "UTHelper" -Value "stale" -PropertyType String -Force | Out-Null
     New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "UTHElearningAlert" -Value "stale" -PropertyType String -Force | Out-Null
     if ((Invoke-BoundedProcess "msiexec.exe" @("/x", $CurrentProductCode, "/qn", "/norestart") $installEnvironment) -ne 0) { throw "MSI uninstall failed" }
     Assert-UninstalledState @($BaselineProductCode, $CurrentProductCode)

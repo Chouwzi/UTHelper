@@ -1024,6 +1024,7 @@ def test_t4_s06_msstore_msix_cold_start_and_package_verification(
             capture_output=True,
             text=True,
             timeout=20,
+            stdin=subprocess.DEVNULL,
         )
         params = {p.strip().lower(): p.strip() for p in param_probe.stdout.split(",") if p.strip()}
         assert any(k in params for k in ("identityname", "packagename")), (
@@ -1055,13 +1056,14 @@ def test_t4_s06_msstore_msix_cold_start_and_package_verification(
             if cand_key in params:
                 cmd.extend([f"-{params[cand_key]}", val])
 
-        pack_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        pack_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
         assert pack_proc.returncode == 0, pack_proc.stderr or pack_proc.stdout
         unpack_proc = subprocess.run(
             [str(makeappx), "unpack", "/p", str(msix_out), "/d", str(unpack_dir), "/o"],
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr or unpack_proc.stdout
 
@@ -1113,6 +1115,7 @@ def test_t4_s06_msstore_msix_cold_start_and_package_verification(
                 capture_output=True,
                 text=True,
                 timeout=20,
+                stdin=subprocess.DEVNULL,
             )
             assert v_param_probe.returncode == 0, v_param_probe.stderr
             v_params = {
@@ -1143,7 +1146,7 @@ def test_t4_s06_msstore_msix_cold_start_and_package_verification(
             ):
                 if cand_key in v_params:
                     v_cmd.extend([f"-{v_params[cand_key]}", val])
-            verify_proc = subprocess.run(v_cmd, capture_output=True, text=True, timeout=60)
+            verify_proc = subprocess.run(v_cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
             assert verify_proc.returncode == 0, verify_proc.stderr or verify_proc.stdout
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
@@ -1161,6 +1164,7 @@ def test_t4_s07_chplay_aab_release_compliance_pipeline(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         timeout=15,
+        stdin=subprocess.DEVNULL,
     )
     assert help_proc.returncode == 0
     assert "--aab" in help_proc.stdout or "--channel" in help_proc.stdout, (
@@ -1194,7 +1198,7 @@ def test_t4_s07_chplay_aab_release_compliance_pipeline(tmp_path: Path) -> None:
         ]
         if "--certificate-sha256" in help_proc.stdout:
             cmd.extend(["--certificate-sha256", DEFAULT_TRUSTED_SIGNER_SHA256])
-        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
 
     good_manifest = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -1293,6 +1297,7 @@ def test_t4_s08_dual_track_release_isolation_7_asset_lts(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert meta_proc.returncode == 0, meta_proc.stderr
     version = runtime_ver.read_text(encoding="utf-8").strip()
@@ -1309,6 +1314,7 @@ def test_t4_s08_dual_track_release_isolation_7_asset_lts(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert diag_proc.returncode == 0, diag_proc.stderr
     assert json.loads(diag_cfg.read_text(encoding="utf-8"))["schema_version"] == 1
@@ -1342,6 +1348,7 @@ def test_t4_s08_dual_track_release_isolation_7_asset_lts(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert gen_proc.returncode == 0, gen_proc.stderr
 
@@ -1365,6 +1372,7 @@ def test_t4_s08_dual_track_release_isolation_7_asset_lts(tmp_path: Path) -> None
         capture_output=True,
         text=True,
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert inv_proc.returncode == 0, inv_proc.stderr
     assert len(list(release_dir.iterdir())) == 7
@@ -1393,6 +1401,7 @@ def test_t4_s08_dual_track_release_isolation_7_asset_lts(tmp_path: Path) -> None
             capture_output=True,
             text=True,
             timeout=20,
+            stdin=subprocess.DEVNULL,
         )
         mixed_path.unlink()
         assert bad_inv.returncode != 0

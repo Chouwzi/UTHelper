@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from pathlib import Path
 import re
 import threading
@@ -23,12 +24,18 @@ from core.courses.document_converter import (
 )
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import PreviewKind
-from core.courses.office_viewer_service import OfficeViewerDescriptor, prepare_office_viewer
+from core.courses.office_viewer_service import (
+    OfficeViewerDescriptor,
+    prepare_office_viewer,
+    prepare_office_viewer_from_file,
+    prepare_pdf_viewer,
+)
 from core.courses.pdf_renderer import PdfDocumentSession, PdfSearchHit
 from gui.components.courses._shared import (
     build_expand_toggle_button,
     build_filter_chip,
     build_viewer_header,
+    marshal_to_ui,
     refresh_viewer_header,
     safe_control_update,
     sync_expand_toggle_button,
@@ -106,6 +113,8 @@ class DocumentReaderView(ft.Container):
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
+        preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None,
+        cached_file_path: Optional[Path] = None,
         **kwargs,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG, **kwargs)
@@ -147,6 +156,7 @@ class DocumentReaderView(ft.Container):
         self._pdf_search_query: str = ""
         self._pdf_search_hits: list[PdfSearchHit] = []
         self._pdf_search_hit_pos: int = 0
+        self._pdf_search_seq: int = 0
         self._pdf_render_seq: int = 0
         self._disposed: bool = False
         self._converted_cache: dict[bool, ConvertedDocument] = (
@@ -155,14 +165,21 @@ class DocumentReaderView(ft.Container):
         self._html_urls: dict[bool, str] = {}
         self._pdf_url: Optional[str] = None
         self._active_webview_url: Optional[str] = None
-        self._office_viewer: Optional[OfficeViewerDescriptor] = None
+        self._office_viewer: Optional[OfficeViewerDescriptor] = preprepared_office_viewer
+        self._cached_file_path: Optional[Path] = (
+            Path(cached_file_path) if cached_file_path is not None else None
+        )
         self._office_webview: Optional[ft.Control] = None
         self._embedded_host = None
         self._webview_failed: bool = False
+        self._viewer_watchdog: Optional[threading.Timer] = None
+        self._viewer_watchdog_timeout: float = 14.0
+        self._viewer_ready_received: bool = False
+        self._webview_fallback_notice: str = ""
 
         size_text = format_file_size(len(self._data)) or "0 B"
         hide_night_for_wv_pdf = bool(
-            self._kind == "pdf"
+            (self._kind == "pdf" or self._rendered_pdf_bytes is not None)
             and self._pdf_in_webview
             and self._webview_builder is not None
         )
@@ -229,7 +246,17 @@ class DocumentReaderView(ft.Container):
         self._schedule_alternate_theme_prewarm(force=True)
 
     def _set_body_content(self, ctrl: ft.Control) -> None:
+        if (
+            self._active_webview_url
+            and getattr(self._embedded_host, "backend", None)
+            in {"inappwebview", "flet_webview"}
+        ):
+            self._body_switcher.content = ft.Container()
+            self._body_host.content = ctrl
+            return
         self._body_switcher.content = ctrl
+        if self._body_host.content is not self._body_switcher:
+            self._body_host.content = self._body_switcher
 
     def _schedule_alternate_theme_prewarm(self, *, force: bool = False) -> None:
         """Warm the opposite dark/light conversion in a background thread so toggling is 0ms."""
@@ -303,8 +330,19 @@ class DocumentReaderView(ft.Container):
         if self._pdf_url and self._preview_server.has_active_url(self._pdf_url):
             return self._pdf_url
         try:
-            url = self._preview_server.register_bytes(self._rendered_pdf_bytes or self._data, "application/pdf")
-        except ValueError:
+            if (
+                self._rendered_pdf_bytes is None
+                and self._cached_file_path is not None
+                and self._cached_file_path.is_file()
+            ):
+                url = self._preview_server.register_file(
+                    self._cached_file_path, "application/pdf"
+                )
+            else:
+                url = self._preview_server.register_bytes(
+                    self._rendered_pdf_bytes or self._data, "application/pdf"
+                )
+        except (ValueError, OSError):
             self._pdf_url = None
             return None
         self._pdf_url = url
@@ -324,7 +362,54 @@ class DocumentReaderView(ft.Container):
         self._html_urls[dark_mode] = url
         return url
 
+    def _cancel_viewer_watchdog(self) -> None:
+        timer, self._viewer_watchdog = self._viewer_watchdog, None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _arm_viewer_watchdog(self, url: str, result: Any) -> None:
+        self._cancel_viewer_watchdog()
+        if self._disposed or self._viewer_ready_received:
+            return
+        if not any(
+            host in url
+            for host in ("docx_host.html", "pptx_host.html", "pdf_host.html")
+        ):
+            return
+        if not (hasattr(result, "control") or hasattr(result, "eval_js")):
+            return
+        timeout_s = max(0.05, float(getattr(self, "_viewer_watchdog_timeout", 14.0)))
+        timer = threading.Timer(
+            timeout_s,
+            lambda: self._fallback_from_webview("viewer_timeout"),
+        )
+        timer.daemon = True
+        self._viewer_watchdog = timer
+        timer.start()
+
+    def _handle_viewer_message(self, raw_msg: str) -> None:
+        if self._disposed:
+            return
+        try:
+            payload = json.loads(raw_msg)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        msg_type = str(payload.get("type") or "").strip().lower()
+        if msg_type == "ready":
+            self._viewer_ready_received = True
+            self._cancel_viewer_watchdog()
+        elif msg_type == "error":
+            self._cancel_viewer_watchdog()
+            self._fallback_from_webview(str(payload.get("message") or "viewer_error"))
+
     def _fallback_from_webview(self, _reason: str = "") -> None:
+        self._cancel_viewer_watchdog()
+
         def _apply() -> None:
             if self._disposed or self._webview_failed:
                 return
@@ -338,6 +423,61 @@ class DocumentReaderView(ft.Container):
                     pass
                 self._embedded_host = None
             self._night_btn.visible = self._kind in _NIGHT_MODE_KINDS
+            if self._kind == "pptx" and _reason:
+                self._webview_fallback_notice = (
+                    "Đang dùng chế độ thẻ slide gọn nhẹ cho tệp lớn"
+                )
+            key = bool(self._dark_reader)
+            page_live = self._get_page()
+            if (
+                self._kind in {"docx", "pptx"}
+                and key not in self._converted_cache
+                and page_live is not None
+                and callable(getattr(page_live, "run_task", None))
+            ):
+                self._set_body_content(
+                    ft.Container(
+                        expand=True,
+                        alignment=ft.Alignment.CENTER,
+                        padding=24,
+                        content=ft.Column(
+                            tight=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=10,
+                            controls=[
+                                ft.ProgressRing(width=28, height=28, stroke_width=3, color=C.ACCENT),
+                                ft.Text(
+                                    "Đang chuyển sang chế độ đọc gọn nhẹ...",
+                                    size=13,
+                                    color=C.TEXT_SECONDARY,
+                                ),
+                            ],
+                        ),
+                    )
+                )
+                safe_control_update(self)
+
+                async def _convert_and_mount() -> None:
+                    if self._disposed:
+                        return
+                    conv = await asyncio.to_thread(
+                        convert_document_bytes,
+                        self._file_name,
+                        self._data,
+                        self._kind,
+                        dark_mode=key,
+                    )
+                    if self._disposed:
+                        return
+                    self._converted_cache[key] = conv
+                    self._set_body_content(self._build_body())
+                    safe_control_update(self)
+
+                try:
+                    page_live.run_task(_convert_and_mount)
+                    return
+                except Exception:
+                    pass
             self._set_body_content(self._build_body())
             safe_control_update(self)
 
@@ -362,10 +502,18 @@ class DocumentReaderView(ft.Container):
         if self._webview_builder is None or self._webview_failed:
             return None
         try:
+            self._viewer_ready_received = False
             try:
-                result = self._webview_builder(url, on_error=self._fallback_from_webview)
+                result = self._webview_builder(
+                    url,
+                    on_error=self._fallback_from_webview,
+                    on_message=self._handle_viewer_message,
+                )
             except TypeError:
-                result = self._webview_builder(url)
+                try:
+                    result = self._webview_builder(url, on_error=self._fallback_from_webview)
+                except TypeError:
+                    result = self._webview_builder(url)
             dock = getattr(result, "dock", None)
             if dock is not None and getattr(dock, "_failed", False) is True:
                 dispose_fn = getattr(result, "dispose", None)
@@ -378,8 +526,12 @@ class DocumentReaderView(ft.Container):
                 if self._embedded_host is not None and self._embedded_host is not result:
                     self._embedded_host.dispose()
                 self._embedded_host = result
+                self._arm_viewer_watchdog(url, result)
                 return control_fn()
-            return result if isinstance(result, ft.Control) else None
+            if isinstance(result, ft.Control):
+                self._arm_viewer_watchdog(url, result)
+                return result
+            return None
         except Exception:
             return None
 
@@ -395,6 +547,13 @@ class DocumentReaderView(ft.Container):
         self._night_btn.icon_color = C.ACCENT if self._dark_reader else C.TEXT_SECONDARY
 
     def _toggle_reader_mode(self, _e=None) -> None:
+        if (
+            (self._kind == "pdf" or self._rendered_pdf_bytes is not None)
+            and self._pdf_in_webview
+            and not self._webview_failed
+            and self._webview_builder is not None
+        ):
+            return
         self._dark_reader = not self._dark_reader
         self._sync_night_button()
         if self._office_webview is not None:
@@ -420,6 +579,7 @@ class DocumentReaderView(ft.Container):
         # Offload uncached non-PDF conversion when mounted on a live page so UI never stutters
         if (
             self._kind != "pdf"
+            and self._rendered_pdf_bytes is None
             and target_mode not in self._converted_cache
             and self._get_page() is not None
         ):
@@ -434,10 +594,16 @@ class DocumentReaderView(ft.Container):
                     self._kind,
                     dark_mode=target_mode,
                 )
-                self._converted_cache[target_mode] = conv
-                if not self._disposed and bool(self._dark_reader) == target_mode:
-                    self._set_body_content(self._build_body())
-                    safe_control_update(self)
+
+                def _apply_converted() -> None:
+                    if self._disposed:
+                        return
+                    self._converted_cache[target_mode] = conv
+                    if bool(self._dark_reader) == target_mode:
+                        self._set_body_content(self._build_body())
+                        safe_control_update(self)
+
+                marshal_to_ui(self, _apply_converted)
 
             threading.Thread(target=_convert_async, name="DocThemeToggle", daemon=True).start()
             return
@@ -461,14 +627,18 @@ class DocumentReaderView(ft.Container):
     def dispose(self) -> None:
         """Release underlying PDF session handles and cancel background pre-rendering."""
         self._disposed = True
+        self._cancel_viewer_watchdog()
         self._close_pdf_outline_sheet()
         self._pdf_render_seq += 1
+        self._pdf_search_seq += 1
         if self._embedded_host is not None:
             self._embedded_host.dispose()
             self._embedded_host = None
         if self._pdf_session is not None:
             self._pdf_session.close()
             self._pdf_session = None
+        self._converted_cache.clear()
+        self._rendered_pdf_bytes = None
 
     def set_expanded(self, expanded: bool, *, visible: bool = True) -> None:
         self._expanded = bool(expanded)
@@ -479,12 +649,37 @@ class DocumentReaderView(ft.Container):
             visible=self._show_expand_toggle,
         )
 
-    def sync_bounds(self, _left: float, _top: float, width: float, _height: float) -> None:
+    def sync_bounds(
+        self,
+        _left: float,
+        _top: float,
+        width: float,
+        _height: float,
+        *,
+        bottom_inset: float = 0.0,
+    ) -> None:
         """Adapt document page width proportionally when Pane 3 resizes or expands."""
         if self._disposed:
             return
         if self._embedded_host is not None:
-            self._embedded_host.sync_bounds(_left, _top + 55, width, max(80, _height - 55))
+            inset = max(0.0, float(bottom_inset))
+            if inset > 0.0:
+                try:
+                    self._embedded_host.sync_bounds(
+                        _left,
+                        _top + 55,
+                        width,
+                        max(80, _height - 55),
+                        bottom_inset=inset,
+                    )
+                except TypeError:
+                    self._embedded_host.sync_bounds(
+                        _left, _top + 55, width, max(80, _height - 55)
+                    )
+            else:
+                self._embedded_host.sync_bounds(
+                    _left, _top + 55, width, max(80, _height - 55)
+                )
         try:
             new_w = max(320.0, float(width))
         except (TypeError, ValueError):
@@ -2326,8 +2521,38 @@ class DocumentReaderView(ft.Container):
             safe_control_update(self)
 
         def _run_search(query_str: str) -> None:
-            self._pdf_search_query = (query_str or "").strip()
-            self._pdf_search_hits = session.search(self._pdf_search_query, max_hits=60)
+            clean_q = (query_str or "").strip()
+            self._pdf_search_query = clean_q
+            self._pdf_search_seq += 1
+            search_seq = self._pdf_search_seq
+            page = self._get_page()
+            try:
+                loop = getattr(page, "loop", None) if page is not None else None
+            except Exception:
+                return
+            if (
+                isinstance(loop, asyncio.AbstractEventLoop)
+                and loop.is_running()
+                and callable(getattr(page, "run_task", None))
+            ):
+                async def _search_async() -> None:
+                    hits = await asyncio.to_thread(session.search, clean_q, max_hits=60)
+                    if self._disposed or self._pdf_search_seq != search_seq:
+                        return
+                    self._pdf_search_hits = hits
+                    self._pdf_search_hit_pos = 0
+                    if self._pdf_search_hits:
+                        self._pdf_page_index = self._pdf_search_hits[0].page_index
+                    self._set_body_content(self._build_native_pdf_body(session))
+                    safe_control_update(self)
+
+                try:
+                    page.run_task(_search_async)
+                except Exception:
+                    return
+                return
+
+            self._pdf_search_hits = session.search(clean_q, max_hits=60)
             self._pdf_search_hit_pos = 0
             if self._pdf_search_hits:
                 self._pdf_page_index = self._pdf_search_hits[0].page_index
@@ -2349,6 +2574,15 @@ class DocumentReaderView(ft.Container):
             if self._pdf_search_hits
             else ("0/0" if self._pdf_search_query else "")
         )
+        is_compact = self._pane_width < 600
+        compact_constraints = (
+            ft.BoxConstraints(min_width=32, min_height=34, max_width=34, max_height=36)
+            if is_compact
+            else None
+        )
+        compact_style = (
+            ft.ButtonStyle(padding=ft.Padding.all(2)) if is_compact else None
+        )
         toolbar_controls: list[ft.Control] = []
         if session.outline:
             toolbar_controls.append(
@@ -2357,6 +2591,8 @@ class DocumentReaderView(ft.Container):
                     icon_size=18,
                     icon_color=accent_color if self._pdf_outline_open else text_primary,
                     tooltip="Mục lục PDF",
+                    size_constraints=compact_constraints,
+                    style=compact_style,
                     on_click=lambda _e: _toggle_outline(),
                 )
             )
@@ -2368,12 +2604,14 @@ class DocumentReaderView(ft.Container):
                     icon_color=text_primary,
                     tooltip="Trang trước",
                     disabled=self._pdf_page_index <= 0,
+                    size_constraints=compact_constraints,
+                    style=compact_style,
                     on_click=lambda _e: _jump_pdf_page(self._pdf_page_index - 1),
                 ),
                 ft.TextField(
                     value=str(self._pdf_page_index + 1),
-                    width=54,
-                    height=32,
+                    width=42 if is_compact else 54,
+                    height=30 if is_compact else 32,
                     dense=True,
                     text_size=12,
                     text_align=ft.TextAlign.CENTER,
@@ -2386,13 +2624,15 @@ class DocumentReaderView(ft.Container):
                         else self._pdf_page_index
                     ),
                 ),
-                ft.Text(f"/ {page_count}", size=12, color=text_secondary),
+                ft.Text(f"/ {page_count}", size=11 if is_compact else 12, color=text_secondary),
                 ft.IconButton(
                     icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
                     icon_size=18,
                     icon_color=text_primary,
                     tooltip="Trang tiếp",
                     disabled=self._pdf_page_index >= page_count - 1,
+                    size_constraints=compact_constraints,
+                    style=compact_style,
                     on_click=lambda _e: _jump_pdf_page(self._pdf_page_index + 1),
                 ),
                 ft.IconButton(
@@ -2400,6 +2640,8 @@ class DocumentReaderView(ft.Container):
                     icon_size=18,
                     icon_color=text_primary,
                     tooltip="Thu nhỏ",
+                    size_constraints=compact_constraints,
+                    style=compact_style,
                     on_click=lambda _e: _adjust_zoom(-0.25),
                 ),
                 ft.TextButton(
@@ -2409,7 +2651,11 @@ class DocumentReaderView(ft.Container):
                         color=text_primary,
                     ),
                     tooltip="Đặt lại mức thu phóng 100%",
-                    style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=6, vertical=0)),
+                    style=ft.ButtonStyle(
+                        padding=ft.Padding.symmetric(
+                            horizontal=4 if is_compact else 6, vertical=0
+                        )
+                    ),
                     on_click=lambda _e: _reset_zoom(),
                 ),
                 ft.IconButton(
@@ -2417,36 +2663,29 @@ class DocumentReaderView(ft.Container):
                     icon_size=18,
                     icon_color=text_primary,
                     tooltip="Phóng to",
+                    size_constraints=compact_constraints,
+                    style=compact_style,
                     on_click=lambda _e: _adjust_zoom(0.25),
-                ),
-                ft.TextField(
-                    value=self._pdf_search_query,
-                    visible=self._pane_width >= 600 or self._pdf_search_open,
-                    hint_text="Tìm trong PDF...",
-                    width=170,
-                    height=32,
-                    dense=True,
-                    text_size=12,
-                    color=text_primary,
-                    bgcolor=bg_color,
-                    border_color=border_color,
-                    on_submit=lambda e: _run_search(str(e.control.value or "")),
                 ),
             ]
         )
-        if self._pane_width < 600:
-            def _toggle_search(_e=None):
-                self._pdf_search_open = not self._pdf_search_open
-                self._set_body_content(self._build_native_pdf_body(session))
-                safe_control_update(self)
-
-            toolbar_controls.append(ft.IconButton(
-                icon=ft.Icons.SEARCH_ROUNDED, tooltip="Tìm trong PDF",
-                icon_color=accent_color if self._pdf_search_open else text_primary,
-                on_click=_toggle_search,
-            ))
+        search_field = ft.TextField(
+            value=self._pdf_search_query,
+            visible=(not is_compact) or self._pdf_search_open,
+            hint_text="Tìm trong PDF...",
+            width=None if is_compact else 170,
+            expand=is_compact,
+            height=32,
+            dense=True,
+            text_size=12,
+            color=text_primary,
+            bgcolor=bg_color,
+            border_color=border_color,
+            on_submit=lambda e: _run_search(str(e.control.value or "")),
+        )
+        hit_controls: list[ft.Control] = []
         if hit_badge:
-            toolbar_controls.extend(
+            hit_controls.extend(
                 [
                     ft.Text(hit_badge, size=11, color=text_secondary),
                     ft.IconButton(
@@ -2468,16 +2707,56 @@ class DocumentReaderView(ft.Container):
                 ]
             )
 
-        toolbar = ft.Container(
-            bgcolor=surface_color,
-            border=ft.Border.only(bottom=ft.BorderSide(1, border_color)),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-            content=ft.Row(
+        if is_compact:
+            def _toggle_search(_e=None):
+                self._pdf_search_open = not self._pdf_search_open
+                self._set_body_content(self._build_native_pdf_body(session))
+                safe_control_update(self)
+
+            toolbar_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.SEARCH_ROUNDED,
+                    icon_size=18,
+                    tooltip="Tìm trong PDF",
+                    icon_color=accent_color if self._pdf_search_open else text_primary,
+                    size_constraints=compact_constraints,
+                    style=compact_style,
+                    on_click=_toggle_search,
+                )
+            )
+            primary_row = ft.Row(
+                wrap=False,
+                spacing=2,
+                scroll=ft.ScrollMode.AUTO,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=toolbar_controls,
+            )
+            search_subrow = ft.Row(
+                visible=self._pdf_search_open or bool(hit_badge),
+                spacing=4,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[search_field, *hit_controls],
+            )
+            toolbar_content: ft.Control = ft.Column(
+                spacing=4,
+                tight=True,
+                controls=[primary_row, search_subrow],
+            )
+        else:
+            toolbar_controls.append(search_field)
+            toolbar_controls.extend(hit_controls)
+            toolbar_content = ft.Row(
                 wrap=True,
                 spacing=4,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=toolbar_controls,
-            ),
+            )
+
+        toolbar = ft.Container(
+            bgcolor=surface_color,
+            border=ft.Border.only(bottom=ft.BorderSide(1, border_color)),
+            padding=ft.Padding.symmetric(horizontal=6 if is_compact else 10, vertical=4 if is_compact else 6),
+            content=toolbar_content,
         )
 
         # Render 5-page batch centered on active page (active page rendered immediately, rest pre-warmed)
@@ -2625,8 +2904,15 @@ class DocumentReaderView(ft.Container):
                         return
                     slot = page_slots.get(p_idx)
                     if slot is not None:
-                        slot.content = _page_control_for(p_idx, rendered)
-                        safe_control_update(slot)
+                        ctrl = _page_control_for(p_idx, rendered)
+
+                        def _mount_slot(s=slot, c=ctrl) -> None:
+                            if self._disposed or self._pdf_render_seq != render_seq:
+                                return
+                            s.content = c
+                            safe_control_update(s)
+
+                        marshal_to_ui(slot, _mount_slot)
                 # Pre-warm opposite dark/light mode in RAM so clicking Dark/Light is 0ms
                 alt_dark = not cur_dark
                 for p_idx in all_batch_indices:
@@ -2896,10 +3182,26 @@ class DocumentReaderView(ft.Container):
                 pdf_url = self._try_register_pdf_url()
                 webview = self._build_webview(pdf_url) if pdf_url else None
                 if webview is not None:
+                    self._night_btn.visible = False
                     self._active_webview_url = pdf_url
                     return webview
+            if (
+                self._office_viewer is not None
+                and self._office_viewer.format == "pdf"
+                and not self._webview_failed
+                and self._webview_builder is not None
+                and self._preview_server.has_active_url(self._office_viewer.blob_url)
+            ):
+                if self._office_webview is None:
+                    self._office_webview = self._build_webview(
+                        self._office_viewer.viewer_url
+                    )
+                if self._office_webview is not None:
+                    self._night_btn.visible = True
+                    self._active_webview_url = self._office_viewer.viewer_url
+                    return self._office_webview
             session = self._ensure_pdf_session()
-            if session.supported and session.page_count > 0:
+            if session.supported and session.page_count > 0 and session.can_render_images:
                 size_text = format_file_size(len(self._data)) or "0 B"
                 self._subtitle_text.value = (
                     f"{self._kind.upper()} · {session.page_count} trang · {size_text}"
@@ -2907,12 +3209,40 @@ class DocumentReaderView(ft.Container):
                 self._night_btn.visible = True
                 return self._build_native_pdf_body(session)
             if self._webview_builder is not None and not self._webview_failed:
-                pdf_url = self._try_register_pdf_url()
-                if pdf_url:
-                    wv = self._build_webview(pdf_url)
-                    if wv is not None:
-                        self._active_webview_url = pdf_url
-                        return wv
+                if (
+                    self._office_viewer is None
+                    or self._office_viewer.format != "pdf"
+                    or not self._preview_server.has_active_url(self._office_viewer.blob_url)
+                ):
+                    pdf_payload = self._rendered_pdf_bytes or self._data
+                    pdf_path = (
+                        self._cached_file_path
+                        if (self._rendered_pdf_bytes is None and self._kind == "pdf")
+                        else None
+                    )
+                    self._office_viewer = prepare_pdf_viewer(
+                        pdf_payload,
+                        self._preview_server,
+                        theme="dark" if self._dark_reader else "light",
+                        file_path=pdf_path,
+                    )
+                    self._office_webview = None
+                if self._office_viewer is not None:
+                    if self._office_webview is None:
+                        self._office_webview = self._build_webview(
+                            self._office_viewer.viewer_url
+                        )
+                    if self._office_webview is not None:
+                        self._night_btn.visible = True
+                        self._active_webview_url = self._office_viewer.viewer_url
+                        return self._office_webview
+            if session.supported and session.page_count > 0:
+                size_text = format_file_size(len(self._data)) or "0 B"
+                self._subtitle_text.value = (
+                    f"{self._kind.upper()} · {session.page_count} trang · {size_text}"
+                )
+                self._night_btn.visible = True
+                return self._build_native_pdf_body(session)
             return self._build_fallback_card(
                 icon=ft.Icons.PICTURE_AS_PDF_OUTLINED,
                 title=self._file_name,
@@ -2929,10 +3259,20 @@ class DocumentReaderView(ft.Container):
                 and self._webview_builder is not None
             ):
                 if self._office_viewer is None or not self._preview_server.has_active_url(self._office_viewer.blob_url):
-                    self._office_viewer = prepare_office_viewer(
-                        self._data, self._file_name, self._preview_server,
-                        theme="dark" if self._dark_reader else "light",
-                    )
+                    if self._cached_file_path is not None and self._cached_file_path.is_file():
+                        self._office_viewer = prepare_office_viewer_from_file(
+                            self._cached_file_path,
+                            self._file_name,
+                            self._preview_server,
+                            theme="dark" if self._dark_reader else "light",
+                        )
+                    else:
+                        self._office_viewer = prepare_office_viewer(
+                            self._data,
+                            self._file_name,
+                            self._preview_server,
+                            theme="dark" if self._dark_reader else "light",
+                        )
                     self._office_webview = None
                 if self._office_viewer is not None:
                     if self._office_webview is None:
@@ -2941,6 +3281,8 @@ class DocumentReaderView(ft.Container):
                         self._active_webview_url = self._office_viewer.viewer_url
                         return self._office_webview
             converted = self._get_converted()
+            if self._kind in {"xlsx", "csv"} and converted.sheets:
+                return self._build_spreadsheet_body(converted)
             if (
                 converted.html_document
                 and not self._webview_failed
@@ -2954,11 +3296,32 @@ class DocumentReaderView(ft.Container):
                     if wv is not None:
                         self._active_webview_url = html_url
                         return wv
-
-            if self._kind in {"xlsx", "csv"} and converted.sheets:
-                return self._build_spreadsheet_body(converted)
             if self._kind == "pptx" and converted.slides:
-                return self._build_pptx_body(converted)
+                pptx_body = self._build_pptx_body(converted)
+                if self._webview_fallback_notice:
+                    banner = ft.Container(
+                        bgcolor=C.SURFACE,
+                        border=ft.Border.only(bottom=ft.BorderSide(1, C.BORDER)),
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                        content=ft.Row(
+                            spacing=6,
+                            controls=[
+                                ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=15, color=C.ACCENT),
+                                ft.Text(
+                                    self._webview_fallback_notice,
+                                    size=12,
+                                    color=C.TEXT_SECONDARY,
+                                    expand=True,
+                                ),
+                            ],
+                        ),
+                    )
+                    return ft.Column(
+                        expand=True,
+                        spacing=0,
+                        controls=[banner, ft.Container(expand=True, content=pptx_body)],
+                    )
+                return pptx_body
             if self._kind == "docx" and converted.docx_blocks:
                 return self._build_docx_rich_body(converted)
             return self._build_text_or_markdown_body(converted)

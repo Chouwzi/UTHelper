@@ -2,6 +2,17 @@
 window.uthViewer = (() => {
   const status = document.getElementById("status");
   const params = new URLSearchParams(location.search);
+  function _emitHostMessage(payload) {
+    const json = JSON.stringify(payload);
+    try {
+      console.info("__UTH_MSG__:" + json);
+    } catch (_) {}
+    try {
+      if (window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === "function") {
+        window.chrome.webview.postMessage(json);
+      }
+    } catch (_) {}
+  }
   function setTheme(theme) {
     document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
   }
@@ -19,12 +30,20 @@ window.uthViewer = (() => {
     if (data.byteLength > 32 * 1024 * 1024) throw new Error("Tệp vượt quá giới hạn xem trước.");
     return data;
   }
-  function ready() { status.hidden = true; document.documentElement.dataset.ready = "true"; }
+  function ready() {
+    status.hidden = true;
+    document.documentElement.dataset.ready = "true";
+    _emitHostMessage({ type: "ready" });
+  }
   function fail(error) {
     status.hidden = false;
-    status.textContent = error instanceof Error ? error.message : "Không thể xem trước tệp. Bạn có thể lưu bản gốc.";
+    const message = error instanceof Error
+      ? error.message
+      : (typeof error === "string" && error ? error : "Không thể xem trước tệp. Bạn có thể lưu bản gốc.");
+    status.textContent = message;
     status.setAttribute("role", "alert");
     document.documentElement.dataset.ready = "error";
+    _emitHostMessage({ type: "error", message });
   }
   // Opening the original in another app remains an explicit header action.
   document.addEventListener("click", event => {

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from http.cookiejar import Cookie
 from typing import Any
@@ -149,16 +151,10 @@ def _export_moodle_session_cookies(
     return tuple(found)
 
 
-def _authenticated_quiz_client(
+def _validate_quiz_session_request(
     target: QuizLaunchTarget,
     lease: QuizSessionLease,
-):
-    """Open a fresh, account-scoped HTML session and return its temporary hold.
-
-    The caller releases the returned hold only after its full operation (for
-    example cookie export or quiz entry) completes. This covers a UI lease
-    being released while a blocking operation is still in flight.
-    """
+) -> tuple[MoodleSite, str, str]:
     site = _site_for_target(target)
     if not isinstance(lease, QuizSessionLease) or not lease.is_active:
         raise QuizWebSessionError("session_lease_inactive")
@@ -173,6 +169,166 @@ def _authenticated_quiz_client(
         raise QuizWebSessionError("missing_credentials")
     if quiz_session_key(site, account_id) != target.session_key:
         raise QuizWebSessionError("account_mismatch")
+    return site, account_id, password
+
+
+def clone_quiz_client_from(
+    existing_client: Any,
+    site: MoodleSite,
+    account_id: str,
+) -> tuple[Any, int] | None:
+    """Clone an already-authenticated MoodleClient's cookies into a quiz-isolated client."""
+    if existing_client is None or not isinstance(account_id, str) or not account_id.strip():
+        return None
+    target_host = (urlsplit(site.origin).hostname or "").casefold()
+    if not target_host:
+        return None
+
+    lock = getattr(existing_client, "_session_lock", None)
+    ctx = lock if lock is not None else nullcontext()
+    with ctx:
+        if getattr(existing_client, "moodle_site_origin", "") != site.origin:
+            return None
+        owner = str(getattr(existing_client, "_session_owner", "") or "")
+        if not owner.strip() or owner.strip().casefold() != account_id.strip().casefold():
+            return None
+        source_jar = getattr(existing_client, "_cookie_jar", None)
+        if source_jar is None:
+            return None
+        cookies = list(source_jar)
+        has_session_cookie = any(
+            getattr(cookie, "name", "").casefold() == "moodlesession"
+            and bool(getattr(cookie, "value", ""))
+            and str(getattr(cookie, "domain", "") or "").lstrip(".").casefold() == target_host
+            and _cookie_path_applies(getattr(cookie, "path", "/") or "/", "/mod/quiz/view.php")
+            for cookie in cookies
+        )
+        if not has_session_cookie:
+            return None
+
+        from core.client import MoodleClient
+
+        cloned = MoodleClient(site.origin)
+        if cloned.moodle_site_origin != site.origin:
+            return None
+        for cookie in cookies:
+            cloned._cookie_jar.set_cookie(copy.deepcopy(cookie))
+        cloned._session_owner = owner
+        cloned._sesskey = str(getattr(existing_client, "_sesskey", "") or "")
+        snapshot_gen = int(getattr(existing_client, "_session_generation", 0))
+        return cloned, snapshot_gen
+
+
+def clone_authenticated_quiz_client(
+    target: QuizLaunchTarget,
+    lease: QuizSessionLease,
+    existing_client: Any,
+):
+    """Return a cloned quiz client and active lease when ``existing_client`` holds a valid session."""
+    site, account_id, _password = _validate_quiz_session_request(target, lease)
+    cloned_pair = clone_quiz_client_from(existing_client, site, account_id)
+    if cloned_pair is None:
+        return None
+    cloned, snapshot_gen = cloned_pair
+    operation_lease = acquire_quiz_session_lease(target.session_key)
+    try:
+        if not operation_lease.is_active or not operation_lease.is_ready:
+            raise QuizWebSessionError("session_not_ready")
+        return cloned, site, operation_lease, snapshot_gen
+    except Exception:
+        cloned._cookie_jar.clear()
+        operation_lease.release()
+        raise
+
+
+def warm_existing_client_from_quiz_login(
+    existing_client: Any,
+    quiz_client: Any,
+    site: MoodleSite,
+    account_id: str,
+    html: str,
+    *,
+    initial_gen: int | None = None,
+    fallback_sesskey: str = "",
+    replace_stale: bool = False,
+) -> None:
+    """Seed an unauthenticated shared client after a cold quiz login without sharing CookieJar."""
+    if (
+        existing_client is None
+        or quiz_client is None
+        or not isinstance(account_id, str)
+        or not account_id.strip()
+        or getattr(existing_client, "moodle_site_origin", "") != site.origin
+    ):
+        return
+
+    from core.client import MoodleClient
+
+    sesskey = (
+        MoodleClient._extract_sesskey_from_html(html)
+        or str(fallback_sesskey or "").strip()
+        or str(getattr(quiz_client, "_sesskey", "") or "")
+    )
+    if not sesskey:
+        return
+    source_jar = getattr(quiz_client, "_cookie_jar", None)
+    if source_jar is None:
+        return
+    cookies = list(source_jar)
+    if not any(
+        getattr(c, "name", "").casefold() == "moodlesession" and bool(getattr(c, "value", ""))
+        for c in cookies
+    ):
+        return
+
+    lock = getattr(existing_client, "_session_lock", None)
+    ctx = lock if lock is not None else nullcontext()
+    with ctx:
+        if (
+            initial_gen is not None
+            and int(getattr(existing_client, "_session_generation", 0)) != initial_gen
+        ):
+            return
+        current_user = str(getattr(settings, "UTH_USERNAME", "") or "")
+        if (
+            current_user.strip()
+            and current_user.strip().casefold() != account_id.strip().casefold()
+        ):
+            return
+        existing_owner = str(getattr(existing_client, "_session_owner", "") or "")
+        if (
+            existing_owner.strip()
+            and existing_owner.strip().casefold() != account_id.strip().casefold()
+        ):
+            return
+        if not replace_stale and getattr(existing_client, "_sesskey", ""):
+            return
+        existing_jar = getattr(existing_client, "_cookie_jar", None)
+        if existing_jar is None:
+            return
+        existing_jar.clear()
+        for cookie in cookies:
+            existing_jar.set_cookie(copy.deepcopy(cookie))
+        existing_client._sesskey = sesskey
+        existing_client._session_owner = account_id.strip()
+        existing_client._session_generation = (
+            int(getattr(existing_client, "_session_generation", 0)) + 1
+        )
+
+
+def _authenticated_quiz_client(
+    target: QuizLaunchTarget,
+    lease: QuizSessionLease,
+    *,
+    require_sesskey: bool = True,
+):
+    """Open a fresh, account-scoped HTML session and return its temporary hold.
+
+    The caller releases the returned hold only after its full operation (for
+    example cookie export or quiz entry) completes. This covers a UI lease
+    being released while a blocking operation is still in flight.
+    """
+    site, account_id, password = _validate_quiz_session_request(target, lease)
 
     # Imported here so core.client can continue to use the launch lease guard
     # without creating a client <-> web-session import cycle.
@@ -191,6 +347,7 @@ def _authenticated_quiz_client(
             password=password,
             force=True,
             quiz_lease=login_lease,
+            require_sesskey=require_sesskey,
         ):
             raise QuizWebSessionError("login_failed")
         return client, site, login_lease

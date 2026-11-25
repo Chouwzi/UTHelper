@@ -170,6 +170,12 @@ account is owned by UTH. You can delete all locally stored data at any time:
    Keychain; any
    legacy plaintext entries in `settings.json` are scrubbed automatically upon
    migration or save.
+2. **Clear credentials**: open **Settings → Account** and click **Sign out**
+   (*Đăng xuất*) inside UTHelper to immediately clear the active Moodle/Portal
+   session, embedded WebView cookies/sessions, and stored credentials from
+   Windows Credential Manager (`keyring`) or Android `AndroidKeyStore` vaults
+   (`CredentialVault` and `AppSecretVault`); any legacy plaintext entries in
+   `settings.json` are scrubbed automatically upon migration or save.
 3. **Remove all local app data**:
    - **Android (Google Play / APK LTS)**: open Android *Settings → Apps →
      UTHelper → Storage → Clear storage*, or uninstall UTHelper.
@@ -177,8 +183,10 @@ account is owned by UTH. You can delete all locally stored data at any time:
      *Settings → Apps*; MSIX AppData virtualization automatically removes the
      package's virtualized `%APPDATA%\UTHelper` container.
    - **Windows (MSI / Burn EXE LTS)**: uninstall UTHelper via Windows *Settings
-     → Apps* and delete `%APPDATA%\UTHelper` (and remove any `UTHelper` entries
-     in Windows Credential Manager if desired).
+     → Apps* and delete `%APPDATA%\UTHelper`, `%LOCALAPPDATA%\UTHelper`
+     (including `%LOCALAPPDATA%\UTHelper\webview2_profile`), and
+     `%APPDATA%\com.uthelper\UTHelper\uthhelper\quiz-webview` (and remove any
+     `UTHelper` entries in Windows Credential Manager if desired).
 
 An **unclean exit** means the previous run did not remove its run marker. It is
 not definitive proof of a crash: power loss, forced termination, or OS shutdown
@@ -196,11 +204,14 @@ step. Only the bounded semantic breadcrumbs described above can be delivered.
 Redirects are refused. The Sentry project must be configured not to store client
 IP addresses. Only a confirmed HTTP 2xx response removes a queued report.
 
-**Sentry retention:** the server-side retention period is controlled by the
-public Sentry project and must be recorded here before a production ingestion
-DSN is enabled. This repository currently treats a missing DSN as
-“unconfigured,” retains eligible local reports within the limits above, and does
-not claim remote delivery succeeded. For privacy or deletion requests, use a
+**Sentry retention:** for official releases with a configured public Sentry
+ingestion DSN, server-side crash events are retained for up to **90 days**
+(standard Sentry project retention policy, configured not to store client IP
+addresses) and are automatically purged thereafter. Development, CI, or
+diagnostic builds without a DSN treat remote reporting as unconfigured, retain
+eligible local reports only within the local queue limits above (up to 20
+reports / 7 days), and do not transmit events externally. For privacy or
+deletion requests, use a
 [private GitHub security advisory](https://github.com/Chouwzi/UTHelper/security/advisories/new).
 Non-sensitive questions may use the public issue tracker.
 

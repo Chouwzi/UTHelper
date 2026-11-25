@@ -1,5 +1,4 @@
 import CryptoKit
-import Foundation
 import Flutter
 import Security
 import UIKit
@@ -12,8 +11,13 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private static let classSchedulePrefix = "uth.class."
     private static let settingsKey = "uth.notification.settings"
     private static let receiptsKey = "uth.notification.receipts"
-    private static let appSecretsService = "com.uthelper.app-secrets"
-    private static let appSecretsAccount = "settings"
+    private static let keychainService = "com.uthelper.app_secrets"
+    private static let keychainAccount = "app_secrets_v1"
+    private static let keychainLock = NSLock()
+    private static let keychainQueue = DispatchQueue(
+        label: "com.uthelper.app_secrets.keychain",
+        qos: .userInitiated
+    )
 
     private let center = UNUserNotificationCenter.current()
     private let defaults = UserDefaults.standard
@@ -49,36 +53,42 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             result(nil)
 
         case "read_app_secrets":
-            do {
-                result(try readAppSecrets())
-            } catch {
-                result(keychainFlutterError(error, operation: "read"))
+            Self.keychainQueue.async {
+                switch self.readKeychainSecrets() {
+                case .success(let secrets):
+                    self.finish(result, secrets)
+                case .failure(let error):
+                    self.finish(
+                        result,
+                        FlutterError(
+                            code: "keychain_read_failed",
+                            message: error.localizedDescription,
+                            details: nil
+                        )
+                    )
+                }
             }
 
         case "write_app_secrets":
             let arguments = call.arguments as? [String: Any]
-            let rawSecrets = arguments?["secrets"] as? [String: Any] ?? [:]
-            var secrets: [String: String] = [:]
-            for (rawKey, rawValue) in rawSecrets {
-                let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                let value = String(describing: rawValue)
-                if !key.isEmpty && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    secrets[key] = value
+            let raw = arguments?["secrets"] as? [String: Any] ?? [:]
+            var sanitized: [String: String] = [:]
+            for (key, value) in raw {
+                let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanValue = text(value)
+                if !cleanKey.isEmpty && !cleanValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    sanitized[cleanKey] = cleanValue
                 }
             }
-            do {
-                try writeAppSecrets(secrets)
-                result(true)
-            } catch {
-                result(keychainFlutterError(error, operation: "write"))
+            Self.keychainQueue.async {
+                let ok = self.writeKeychainSecrets(sanitized)
+                self.finish(result, ok)
             }
 
         case "clear_app_secrets":
-            do {
-                try clearAppSecrets()
-                result(true)
-            } catch {
-                result(keychainFlutterError(error, operation: "clear"))
+            Self.keychainQueue.async {
+                let ok = self.clearKeychainSecrets()
+                self.finish(result, ok)
             }
 
         case "import_activities":
@@ -591,82 +601,6 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         }
     }
 
-    private func appSecretsQuery() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.appSecretsService,
-            kSecAttrAccount as String: Self.appSecretsAccount,
-        ]
-    }
-
-    private func readAppSecrets() throws -> [String: String] {
-        var query = appSecretsQuery()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return [:] }
-        guard status == errSecSuccess else {
-            throw KeychainVaultError(status: status)
-        }
-        guard let data = item as? Data,
-              let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw KeychainVaultError(status: errSecDecode)
-        }
-        var secrets: [String: String] = [:]
-        for (key, value) in raw {
-            guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  let secret = value as? String,
-                  !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                continue
-            }
-            secrets[key] = secret
-        }
-        return secrets
-    }
-
-    private func writeAppSecrets(_ secrets: [String: String]) throws {
-        guard !secrets.isEmpty else {
-            try clearAppSecrets()
-            return
-        }
-        let data = try JSONSerialization.data(withJSONObject: secrets, options: [.sortedKeys])
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-        ]
-        let updateStatus = SecItemUpdate(
-            appSecretsQuery() as CFDictionary,
-            attributes as CFDictionary
-        )
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else {
-            throw KeychainVaultError(status: updateStatus)
-        }
-        var addQuery = appSecretsQuery()
-        attributes.forEach { addQuery[$0.key] = $0.value }
-        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw KeychainVaultError(status: addStatus)
-        }
-    }
-
-    private func clearAppSecrets() throws {
-        let status = SecItemDelete(appSecretsQuery() as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainVaultError(status: status)
-        }
-    }
-
-    private func keychainFlutterError(_ error: Error, operation: String) -> FlutterError {
-        let status = (error as? KeychainVaultError)?.status ?? errSecInternalError
-        return FlutterError(
-            code: "keychain_\(operation)_failed",
-            message: "iOS Keychain operation failed",
-            details: ["status": status]
-        )
-    }
-
     /// Clears only countdown/deadline notifications, preserving class-schedule
     /// reminders. Used when the deadline switch is turned off and on Moodle
     /// logout, where the Portal schedule must stay armed.
@@ -714,6 +648,95 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         completionHandler()
     }
 
+    private func baseKeychainQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.keychainService,
+            kSecAttrAccount as String: Self.keychainAccount,
+        ]
+    }
+
+    private func readKeychainSecrets() -> Result<[String: String], NSError> {
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
+
+        var query = baseKeychainQuery()
+        query[kSecReturnData as String] = kCFBooleanTrue
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound {
+            return .success([:])
+        }
+        guard status == errSecSuccess else {
+            return .failure(
+                NSError(
+                    domain: NSOSStatusErrorDomain,
+                    code: Int(status),
+                    userInfo: [NSLocalizedDescriptionKey: "Keychain read failed (OSStatus \(status))"]
+                )
+            )
+        }
+        guard let data = item as? Data,
+              let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // Item exists and Keychain unlocked (errSecSuccess), but payload is corrupt/unreadable.
+            // Self-heal by deleting the corrupt entry directly while holding keychainLock so the
+            // user is never permanently locked out across app reinstalls.
+            SecItemDelete(baseKeychainQuery() as CFDictionary)
+            return .success([:])
+        }
+        var secrets: [String: String] = [:]
+        for (key, value) in decoded {
+            let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let strValue = value as? String,
+               !cleanKey.isEmpty,
+               !strValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                secrets[cleanKey] = strValue
+            }
+        }
+        return .success(secrets)
+    }
+
+    private func writeKeychainSecrets(_ secrets: [String: String]) -> Bool {
+        if secrets.isEmpty {
+            return clearKeychainSecrets()
+        }
+        guard let payload = try? JSONSerialization.data(withJSONObject: secrets, options: []) else {
+            return false
+        }
+
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
+
+        let query = baseKeychainQuery()
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: payload,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        if updateStatus != errSecItemNotFound {
+            return false
+        }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = payload
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        return addStatus == errSecSuccess
+    }
+
+    private func clearKeychainSecrets() -> Bool {
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
+
+        let status = SecItemDelete(baseKeychainQuery() as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
     private func finish(_ result: @escaping FlutterResult, _ value: Any?) {
         DispatchQueue.main.async { result(value) }
     }
@@ -747,8 +770,4 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private func stringArray(_ value: Any?) -> [String] {
         (value as? [Any] ?? []).compactMap { $0 as? String }
     }
-}
-
-private struct KeychainVaultError: Error {
-    let status: OSStatus
 }

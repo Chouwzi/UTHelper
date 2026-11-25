@@ -322,6 +322,8 @@ def test_verify_android_release_require_office_viewer_schema_passes_inventory(
     with zipfile.ZipFile(app_zip_buf, "w") as nested:
         for asset in android_verifier._REQUIRED_OFFICE_VIEWER_ASSETS:
             nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in android_verifier._REQUIRED_PDF_VIEWER_ASSETS:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
     app_zip_bytes = app_zip_buf.getvalue()
 
     manifest_xml = (
@@ -407,6 +409,7 @@ def test_canonical_release_clis_bootstrap_in_isolated_python(script):
         text=True,
         timeout=10,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert completed.returncode == 0, completed.stderr
