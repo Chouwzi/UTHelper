@@ -498,14 +498,27 @@ def _validated_portal_api_base(raw_base: object) -> str:
         parsed.scheme.lower() != "https"
         or not parsed.netloc
         or not host
+        or parsed.netloc.casefold() != host
         or parsed.username is not None
         or parsed.password is not None
         or port is not None
         or parsed.query
         or parsed.fragment
+        or host.startswith(".")
+        or host.endswith(".")
+        or ".." in host
         or not (host == "ut.edu.vn" or host.endswith(".ut.edu.vn"))
     ):
         return ""
+    for label in host.split("."):
+        if (
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(ch.isascii() and (ch.isalnum() or ch == "-") for ch in label)
+        ):
+            return ""
     return raw_base.rstrip("/")
 
 
@@ -620,6 +633,7 @@ class MoodleClient:
     
     # Giới hạn tần suất gọi API ở phía Client (Moodle không tự động bóp băng thông từ server-side)
     _MIN_INTERVAL = 0.05  # 50ms = tối đa 20 req/s (trước đây là 200ms - gây lãng phí 1.6s cho mỗi chu kỳ quét)
+    _LIVE_SESSION_PROBE_TIMEOUT = 2.5
 
     def __init__(self, base_url: str | None = None):
         self._moodle_site: MoodleSite | None = moodle_site_from_origin(
@@ -634,6 +648,7 @@ class MoodleClient:
         self._cookie_jar = CookieJar()
         self._sesskey = ""
         self._session_owner = ""
+        self._session_authenticated_at: float = 0.0
         self._session_generation: int = 0
         self._html_opener = None
         self._session_lock = threading.RLock()
@@ -664,6 +679,17 @@ class MoodleClient:
         meta.has_set_cookie = False
         return value
 
+    def _record_session_login_error(self, code: str) -> None:
+        self._last_login_error = code
+        self._get_open_session_meta_local().session_login_error = code
+
+    def get_last_cookie_export_error(self) -> str:
+        """Return the current thread's last HTML login error observed during ``get_session_cookies``."""
+        return str(
+            getattr(self._get_open_session_meta_local(), "last_cookie_export_error", "")
+            or ""
+        )
+
     def clear_session(self) -> None:
         """Clear HTML cookies, sesskey, portal token, cached userid, and owning username.
 
@@ -675,6 +701,7 @@ class MoodleClient:
             self._html_opener = None
             self._sesskey = ""
             self._session_owner = ""
+            self._session_authenticated_at = 0.0
             self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
             self._portal_token = ""
             self._portal_token_username = ""
@@ -699,6 +726,7 @@ class MoodleClient:
                 self._html_opener = None
                 self._sesskey = ""
                 self._session_owner = ""
+                self._session_authenticated_at = 0.0
                 self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
             if portal_owner and portal_owner != active_norm:
                 self._portal_token = ""
@@ -758,6 +786,25 @@ class MoodleClient:
             and self.moodle_site_origin == COURSES_MOODLE_SITE.origin
         )
 
+    def can_authenticate_html_session(self) -> bool:
+        """Whether stored UTH SSO credentials may authenticate an HTML WebView session.
+
+        Requires a trusted Moodle site origin, non-demo non-empty credentials, and an
+        explicitly stamped ``UTH_CREDENTIALS_ORIGIN`` matching a trusted UTH Moodle site
+        (never unstamped ``""``). Unlike ``_get_ws_token()``, verified UTH SSO credentials
+        work across ``courses`` and ``thnn`` HTML login forms.
+        """
+        if self._is_demo_mode() or not self.moodle_site_origin:
+            return False
+        username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        password = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        if not username or not password.strip():
+            return False
+        credential_site = moodle_site_from_origin(
+            getattr(settings, "UTH_CREDENTIALS_ORIGIN", "")
+        )
+        return credential_site is not None
+
     def _throttle(self):
         """Ensure minimum interval between API calls across concurrent threads."""
         with self._get_lock("_throttle_lock"):
@@ -789,7 +836,7 @@ class MoodleClient:
         path: str,
         *,
         data: dict[str, str] | None = None,
-        timeout: int = 20,
+        timeout: float = 20,
     ) -> tuple[str, str]:
         tls_opener = getattr(self._get_open_session_meta_local(), "html_opener", None)
         opener = tls_opener if tls_opener is not None else self._ensure_html_opener()
@@ -819,35 +866,294 @@ class MoodleClient:
             self._reset_session_if_account_changed()
             return self._sesskey or ""
 
-    def get_session_cookies(self, *, ensure_login: bool = True) -> list[dict[str, Any]]:
-        """Return snapshot cookie dicts from this client's cookie jar for WebView injection."""
+    @staticmethod
+    def _is_ajax_session_error(resp: Any) -> bool:
+        """Return whether a Moodle AJAX response dict signals an expired/invalid session."""
+        if not isinstance(resp, dict) or not resp.get("error"):
+            return False
+        exc_info = resp.get("exception")
+        exc_text = ""
+        if isinstance(exc_info, dict):
+            exc_text = (
+                f"{exc_info.get('errorcode') or ''} {exc_info.get('message') or ''}"
+            )
+        elif exc_info:
+            exc_text = str(exc_info)
+        err_text = (
+            f"{resp.get('errorcode') or ''} {resp.get('message') or ''} {exc_text}"
+        ).lower()
+        return any(
+            marker in err_text
+            for marker in ("requirelogin", "requireslogin", "invalidsesskey", "sesskey")
+        )
+
+    def ensure_live_session(
+        self,
+        *,
+        max_idle_seconds: float = 900.0,
+        probe_timeout: float = _LIVE_SESSION_PROBE_TIMEOUT,
+    ) -> bool:
+        """Verify the Moodle HTML cookie session is still alive without holding ``_session_lock`` across HTTP."""
+        if self._is_demo_mode() or not self.moodle_site_origin:
+            return False
+
         with self._get_lock("_session_lock", reentrant=True):
             self._reset_session_if_account_changed()
-            needs_login = bool(ensure_login and not self._sesskey)
+            entry_user = (
+                str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+            )
+            sesskey = self._sesskey
+            has_cookie = self._has_moodle_session_cookie()
+            auth_at = float(getattr(self, "_session_authenticated_at", 0.0) or 0.0)
+            gen = int(getattr(self, "_session_generation", 0))
 
-        if needs_login:
+        if not sesskey or not has_cookie:
+            return bool(
+                self.login_session(force=True) if sesskey else self.login_session()
+            )
+        if auth_at > 0.0 and (time.monotonic() - auth_at) < max_idle_seconds:
+            return True
+
+        budget = min(self._LIVE_SESSION_PROBE_TIMEOUT, max(0.1, float(probe_timeout)))
+        probe_start = time.perf_counter()
+
+        meta = self._get_open_session_meta_local()
+        prev_ajax_timeout = getattr(meta, "ajax_timeout", None)
+        prev_no_auto_login = getattr(meta, "ajax_no_auto_login", False)
+        prev_expected_gen = getattr(meta, "ajax_expected_gen", None)
+        meta.ajax_timeout = budget
+        meta.ajax_no_auto_login = True
+        meta.ajax_expected_gen = gen
+        try:
+            resp = self.call_ajax_api("core_session_time_remaining")
+        except Exception as exc:
+            logger.debug("Session liveness AJAX probe failed (%s)", type(exc).__name__)
+            resp = None
+        finally:
+            meta.ajax_timeout = prev_ajax_timeout
+            meta.ajax_no_auto_login = prev_no_auto_login
+            meta.ajax_expected_gen = prev_expected_gen
+
+        probe_state = "fallback"
+        if isinstance(resp, dict) and not resp.get("error"):
+            data = resp.get("data")
+            if (
+                isinstance(data, dict)
+                and "userid" in data
+                and data.get("userid") is not None
+            ):
+                try:
+                    userid = int(data["userid"])
+                    remaining = int(data.get("timeremaining") or 0)
+                except (TypeError, ValueError):
+                    userid = -1
+                    remaining = -1
+                if userid > 0 and remaining > 60:
+                    probe_state = "alive"
+                elif userid == 0 or (userid > 0 and remaining <= 60):
+                    probe_state = "expired"
+        elif self._is_ajax_session_error(resp):
+            probe_state = "expired"
+
+        if probe_state == "fallback":
+            with self._get_lock("_session_lock", reentrant=True):
+                self._reset_session_if_account_changed()
+                pre_html_user = (
+                    str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+                )
+                pre_html_gen = int(getattr(self, "_session_generation", 0))
+                pre_html_sesskey = self._sesskey
+                pre_html_has_cookie = self._has_moodle_session_cookie()
+                if pre_html_user != entry_user or not pre_html_user:
+                    return False
+                if pre_html_gen != gen:
+                    return bool(pre_html_sesskey and pre_html_has_cookie)
+                if not pre_html_sesskey or not pre_html_has_cookie:
+                    probe_state = "expired"
+                    probe_opener = None
+                else:
+                    probe_opener = self._ensure_html_opener()
+
+            if probe_state == "fallback":
+                elapsed = max(0.0, time.perf_counter() - probe_start)
+                remaining_budget = budget - elapsed
+                if remaining_budget <= 0.05:
+                    probe_state = "network_error"
+                else:
+                    prev_tls_opener = getattr(meta, "html_opener", None)
+                    meta.html_opener = probe_opener
+                    try:
+                        final_url, _ = self._open_html("/my/", timeout=remaining_budget)
+                    except urllib.error.HTTPError as exc:
+                        try:
+                            logger.debug(
+                                "Session liveness HTML probe failed (HTTPError %s)",
+                                getattr(exc, "code", "?"),
+                            )
+                        finally:
+                            exc.close()
+                        probe_state = "network_error"
+                    except Exception as exc:
+                        logger.debug(
+                            "Session liveness HTML probe failed (%s)",
+                            type(exc).__name__,
+                        )
+                        probe_state = "network_error"
+                    else:
+                        if urllib.parse.urlsplit(final_url).path.endswith(
+                            "/login/index.php"
+                        ):
+                            probe_state = "expired"
+                        else:
+                            probe_state = "alive"
+                    finally:
+                        meta.html_opener = prev_tls_opener
+
+        with self._get_lock("_session_lock", reentrant=True):
+            self._reset_session_if_account_changed()
+            current_user = (
+                str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+            )
+            current_gen = int(getattr(self, "_session_generation", 0))
+            if current_user != entry_user or not current_user:
+                return False
+            if current_gen != gen:
+                return bool(self._sesskey and self._has_moodle_session_cookie())
+            if probe_state == "alive":
+                if self._sesskey and self._has_moodle_session_cookie():
+                    self._session_authenticated_at = time.monotonic()
+                    return True
+                return False
+            if probe_state == "network_error":
+                return self._has_moodle_session_cookie()
+
+        return bool(self.login_session(force=True))
+
+    def get_session_cookies(
+        self,
+        *,
+        ensure_login: bool = True,
+        verify_live: bool = False,
+        force_relogin: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return host-only cookie dicts from this client's cookie jar for WebView injection."""
+        site_host = (
+            urllib.parse.urlsplit(self.moodle_site_origin).hostname or ""
+        ).casefold()
+        if not site_host or self._is_demo_mode():
+            return []
+
+        meta = self._get_open_session_meta_local()
+        meta.last_cookie_export_error = ""
+        action = "none"
+        had_sesskey = False
+        prev_shared_err = ""
+        with self._get_lock("_session_lock", reentrant=True):
+            self._reset_session_if_account_changed()
+            entry_user = (
+                str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+            )
+            had_sesskey = bool(self._sesskey)
+            has_cookie = self._has_moodle_session_cookie()
+            prev_shared_err = self._last_login_error
+            if force_relogin:
+                action = "force"
+            elif ensure_login and verify_live:
+                action = "verify_live"
+            elif ensure_login and (not had_sesskey or not has_cookie):
+                action = "login"
+
+        if action != "none":
+            meta.session_login_error = None
+
+        auth_ok = True
+        if action == "force":
             try:
-                self.login_session()
+                auth_ok = bool(self.login_session(force=True))
             except Exception as exc:
-                logger.warning("Session login before cookie export failed (%s)", type(exc).__name__)
+                logger.warning(
+                    "Forced session login before cookie export failed (%s)",
+                    type(exc).__name__,
+                )
+                return []
+        elif action == "verify_live":
+            try:
+                auth_ok = bool(self.ensure_live_session())
+            except Exception as exc:
+                logger.warning(
+                    "Session liveness check before cookie export failed (%s)",
+                    type(exc).__name__,
+                )
+                auth_ok = False
+        elif action == "login":
+            try:
+                auth_ok = bool(
+                    self.login_session(force=True)
+                    if had_sesskey
+                    else self.login_session()
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Session login before cookie export failed (%s)",
+                    type(exc).__name__,
+                )
+                auth_ok = False
+
+        call_err = ""
+        if action != "none":
+            tls_err = getattr(meta, "session_login_error", None)
+            if isinstance(tls_err, str):
+                call_err = tls_err
+            elif self._last_login_error != prev_shared_err:
+                call_err = self._last_login_error
+            meta.last_cookie_export_error = call_err
+
+        with self._get_lock("_session_lock", reentrant=True):
+            self._reset_session_if_account_changed()
+            if self._is_demo_mode():
+                return []
+            current_user = (
+                str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+            )
+            if action != "none" and current_user != entry_user:
+                return []
+            if not auth_ok and not (
+                call_err == "quiz_session_active"
+                and self._has_moodle_session_cookie()
+            ):
                 return []
 
-        with self._get_lock("_session_lock", reentrant=True):
-            self._reset_session_if_account_changed()
             cookies: list[dict[str, Any]] = []
             for cookie in list(self._cookie_jar):
                 if not cookie.name or cookie.value is None:
                     continue
+                cookie_domain = (
+                    str(getattr(cookie, "domain", "") or "")
+                    .strip()
+                    .lstrip(".")
+                    .casefold()
+                )
+                if cookie_domain != site_host:
+                    continue
                 rest = getattr(cookie, "_rest", None) or {}
+                http_only = any(str(k).casefold() == "httponly" for k in rest.keys())
+                same_site: str | None = None
+                for key, val in rest.items():
+                    if str(key).casefold() == "samesite":
+                        text = str(val).strip() if val is not None else ""
+                        same_site = text or None
+                        break
                 cookies.append(
                     {
                         "name": cookie.name,
                         "value": cookie.value,
-                        "domain": cookie.domain or "",
+                        "domain": site_host,
+                        "domain_specified": False,
                         "path": cookie.path or "/",
                         "secure": bool(cookie.secure),
                         "expires": cookie.expires,
-                        "httpOnly": any(str(k).casefold() == "httponly" for k in rest),
+                        "httpOnly": http_only,
+                        "sameSite": same_site,
                     }
                 )
             return cookies
@@ -916,12 +1222,18 @@ class MoodleClient:
                     not self._sesskey or (owner and current_owner != owner)
                 ):
                     raise RuntimeError("Moodle session expired")
-            if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+            if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                with self._get_lock("_session_lock", reentrant=True):
+                    if int(getattr(self, "_session_generation", 0)) == gen:
+                        self._session_authenticated_at = 0.0
                 if attempt == 0:
                     if not self.login_session(force=True):
                         raise RuntimeError("Moodle session re-login failed")
                     continue
                 raise RuntimeError("Moodle session expired")
+            with self._get_lock("_session_lock", reentrant=True):
+                if int(getattr(self, "_session_generation", 0)) == gen and self._sesskey:
+                    self._session_authenticated_at = time.monotonic()
             return final_url, html_text, False
         raise RuntimeError("Moodle session expired")
 
@@ -1045,7 +1357,10 @@ class MoodleClient:
             final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
             if final_origin != origin:
                 raise ValueError("Moodle response changed origin")
-            if parsed.path == "/login/index.php" and not path.startswith("/login/index.php"):
+            if parsed.path.endswith("/login/index.php") and not path.startswith("/login/index.php"):
+                with self._get_lock("_session_lock", reentrant=True):
+                    if int(getattr(self, "_session_generation", 0)) == gen:
+                        self._session_authenticated_at = 0.0
                 if attempt == 0:
                     need_relogin = False
                     with self._get_lock("_session_lock", reentrant=True):
@@ -1076,6 +1391,8 @@ class MoodleClient:
                     not self._sesskey or (owner and current_owner != owner)
                 ):
                     raise RuntimeError("Moodle session expired")
+                if self._sesskey and not parsed.path.endswith("/login/index.php"):
+                    self._session_authenticated_at = time.monotonic()
             meta.has_set_cookie = attempt_has_set_cookie
             return status, final_url, resp_ct, raw
 
@@ -1122,12 +1439,18 @@ class MoodleClient:
                     not self._sesskey or (owner and current_owner != owner)
                 ):
                     raise RuntimeError("Moodle session expired")
-            if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+            if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                with self._get_lock("_session_lock", reentrant=True):
+                    if int(getattr(self, "_session_generation", 0)) == gen:
+                        self._session_authenticated_at = 0.0
                 if attempt == 0:
                     if not self.login_session(force=True):
                         raise RuntimeError("Moodle session re-login failed")
                     continue
                 raise RuntimeError("Moodle session expired")
+            with self._get_lock("_session_lock", reentrant=True):
+                if int(getattr(self, "_session_generation", 0)) == gen and self._sesskey:
+                    self._session_authenticated_at = time.monotonic()
             return final_url, html_text, False
         raise RuntimeError("Moodle session expired")
 
@@ -1147,10 +1470,21 @@ class MoodleClient:
         return ""
 
     def _has_moodle_session_cookie(self) -> bool:
+        site_host = (
+            urllib.parse.urlsplit(self.moodle_site_origin).hostname or ""
+        ).casefold()
         with self._get_lock("_session_lock", reentrant=True):
             return any(
                 getattr(cookie, "name", "").casefold() == "moodlesession"
                 and bool(getattr(cookie, "value", ""))
+                and (
+                    not site_host
+                    or str(getattr(cookie, "domain", "") or "")
+                    .strip()
+                    .lstrip(".")
+                    .casefold()
+                    == site_host
+                )
                 for cookie in list(self._cookie_jar)
             )
 
@@ -1169,7 +1503,7 @@ class MoodleClient:
         if username is not None and (
             not isinstance(username, str) or not username.strip()
         ):
-            self._last_login_error = "invalid_credentials"
+            self._record_session_login_error("invalid_credentials")
             return False
         if password is not None and (
             not isinstance(password, str) or password == ""
@@ -1183,10 +1517,11 @@ class MoodleClient:
                     self._html_opener = None
                     self._sesskey = ""
                     self._session_owner = ""
+                    self._session_authenticated_at = 0.0
                     self._session_generation = (
                         int(getattr(self, "_session_generation", 0)) + 1
                     )
-            self._last_login_error = "invalid_credentials"
+            self._record_session_login_error("invalid_credentials")
             return False
 
         eff_user = active_raw if username is None else username
@@ -1195,7 +1530,7 @@ class MoodleClient:
             if username is not None and (
                 not active_norm or target_norm != active_norm
             ):
-                self._last_login_error = "invalid_credentials"
+                self._record_session_login_error("invalid_credentials")
                 return False
             eff_pwd = getattr(settings, "UTH_PASSWORD", "")
         else:
@@ -1219,10 +1554,11 @@ class MoodleClient:
                         self._html_opener = None
                         self._sesskey = ""
                         self._session_owner = ""
+                        self._session_authenticated_at = 0.0
                         self._session_generation = (
                             int(getattr(self, "_session_generation", 0)) + 1
                         )
-                    self._last_login_error = "invalid_credentials"
+                    self._record_session_login_error("invalid_credentials")
                     return False
                 if username is None or (
                     bool(active_norm) and canonical.casefold() == active_norm
@@ -1234,10 +1570,11 @@ class MoodleClient:
                     self._html_opener = None
                     self._sesskey = "demoSessKey2026"
                     self._session_owner = canonical
+                    self._session_authenticated_at = 0.0
                     self._session_generation = (
                         int(getattr(self, "_session_generation", 0)) + 1
                     )
-                self._last_login_error = ""
+                self._record_session_login_error("")
                 return True
 
         username = str(eff_user or "").strip()
@@ -1248,36 +1585,39 @@ class MoodleClient:
                 self._reset_session_if_account_changed(username)
 
                 if not force and self._sesskey and quiz_lease is None:
+                    self._record_session_login_error("")
                     return True
 
                 if not self.moodle_site_origin or not username or not password:
-                    self._last_login_error = "invalid_credentials"
+                    self._record_session_login_error("invalid_credentials")
                     return False
 
                 try:
                     session_key = quiz_session_key(self._moodle_site, username)
                 except ValueError:
-                    self._last_login_error = "invalid_credentials"
+                    self._record_session_login_error("invalid_credentials")
                     return False
                 if quiz_lease is not None and (
                     quiz_lease.session_key != session_key or not quiz_lease.is_active
                 ):
-                    self._last_login_error = "quiz_session_lease_invalid"
+                    self._record_session_login_error("quiz_session_lease_invalid")
                     return False
 
                 if not _begin_quiz_session_login(session_key, lease=quiz_lease):
                     # Leave the existing cookie jar and sesskey intact while a quiz
                     # player holds this account/site session.
-                    self._last_login_error = "quiz_session_active"
+                    self._record_session_login_error("quiz_session_active")
                     return False
 
                 self._cookie_jar = CookieJar()
                 self._html_opener = None
                 self._sesskey = ""
                 self._session_owner = ""
+                self._session_authenticated_at = 0.0
                 self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
                 start_gen = self._session_generation
 
+            authenticated = False
             login_jar = CookieJar()
             login_opener = urllib.request.build_opener(
                 urllib.request.HTTPCookieProcessor(login_jar),
@@ -1293,7 +1633,7 @@ class MoodleClient:
                 login_token = parsed_login.inputs.get("logintoken", "")
                 if not login_token:
                     logger.error("Không tìm thấy logintoken trên trang đăng nhập.")
-                    self._last_login_error = "server_error"
+                    self._record_session_login_error("server_error")
                     return False
 
                 final_url, post_html = self._open_html(
@@ -1305,9 +1645,9 @@ class MoodleClient:
                         "password": password,
                     },
                 )
-                if urllib.parse.urlsplit(final_url).path == "/login/index.php":
+                if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
                     logger.warning("Đăng nhập session thất bại (sai tài khoản hoặc lỗi Moodle).")
-                    self._last_login_error = "invalid_credentials"
+                    self._record_session_login_error("invalid_credentials")
                     return False
 
                 sesskey = self._extract_sesskey_from_html(post_html)
@@ -1318,11 +1658,7 @@ class MoodleClient:
 
                 with self._get_lock("_session_lock", reentrant=True):
                     if int(getattr(self, "_session_generation", 0)) != start_gen:
-                        self._cookie_jar = CookieJar()
-                        self._html_opener = None
-                        self._sesskey = ""
-                        self._session_owner = ""
-                        self._last_login_error = "session_invalidated"
+                        self._record_session_login_error("session_invalidated")
                         return False
 
                     if len(login_jar) > 0:
@@ -1332,23 +1668,30 @@ class MoodleClient:
                     if sesskey:
                         self._sesskey = sesskey
                         self._session_owner = str(username)
+                        self._session_authenticated_at = time.monotonic()
+                        self._record_session_login_error("")
                         self._session_generation += 1
+                        authenticated = True
                         return True
 
                     if not require_sesskey and self._has_moodle_session_cookie():
                         self._sesskey = ""
                         self._session_owner = str(username)
+                        self._session_authenticated_at = time.monotonic()
+                        self._record_session_login_error("")
                         self._session_generation += 1
+                        authenticated = True
                         return True
 
                     self._cookie_jar = CookieJar()
                     self._html_opener = None
+                    self._session_authenticated_at = 0.0
                     if not require_sesskey:
-                        self._last_login_error = "session_cookie_missing"
+                        self._record_session_login_error("session_cookie_missing")
                         return False
 
                     logger.error("Không trích xuất được sesskey sau khi login.")
-                    self._last_login_error = "server_error"
+                    self._record_session_login_error("server_error")
                     return False
 
             except Exception as e:
@@ -1358,10 +1701,18 @@ class MoodleClient:
                     )
                 else:
                     logger.error(f"Lỗi login_session: {e}")
-                self._last_login_error = "network_error"
+                self._record_session_login_error("network_error")
                 return False
             finally:
                 meta.html_opener = prev_tls_opener
+                if not authenticated:
+                    with self._get_lock("_session_lock", reentrant=True):
+                        if int(getattr(self, "_session_generation", 0)) == start_gen:
+                            self._cookie_jar = CookieJar()
+                            self._html_opener = None
+                            self._sesskey = ""
+                            self._session_owner = ""
+                            self._session_authenticated_at = 0.0
                 _end_quiz_session_login(session_key)
 
     def call_ajax_api(self, function: str, **params) -> Optional[dict]:
@@ -1376,16 +1727,28 @@ class MoodleClient:
             return handle_demo_ajax_call(
                 function, params, site_origin=self.moodle_site_origin
             )
+        meta = self._get_open_session_meta_local()
+        no_auto_login = bool(getattr(meta, "ajax_no_auto_login", False))
+        expected_gen = getattr(meta, "ajax_expected_gen", None)
+
         with self._get_lock("_session_lock", reentrant=True):
             self._reset_session_if_account_changed()
+            current_gen = int(getattr(self, "_session_generation", 0))
+            if expected_gen is not None and current_gen != expected_gen:
+                return None
             needs_login = not self._sesskey
+            if needs_login and no_auto_login:
+                return None
 
         if needs_login and not self.login_session():
             return None
 
         with self._get_lock("_session_lock", reentrant=True):
+            current_gen = int(getattr(self, "_session_generation", 0))
+            if expected_gen is not None and current_gen != expected_gen:
+                return None
             sesskey = self._sesskey
-            gen = int(getattr(self, "_session_generation", 0))
+            gen = current_gen
             opener = self._ensure_html_opener()
         if not sesskey:
             return None
@@ -1412,8 +1775,11 @@ class MoodleClient:
             method="POST",
         )
         
+        req_timeout = getattr(
+            self._get_open_session_meta_local(), "ajax_timeout", None
+        ) or 20
         try:
-            with opener.open(request, timeout=20) as response:
+            with opener.open(request, timeout=req_timeout) as response:
                 body = _read_bounded_response_bytes(
                     response, max_bytes=_MAX_API_RESPONSE_BYTES
                 )
@@ -1428,13 +1794,22 @@ class MoodleClient:
                 
                 if isinstance(data, list) and len(data) > 0:
                     resp = data[0]
-                    if resp.get("error"):
-                        logger.error(f"AJAX API error: {resp.get('exception')} - {resp.get('message')}")
-                        # Xóa sesskey nếu lỗi liên quan tới session (chỉ nếu generation chưa đổi)
-                        if "requireloginerror" in resp.get("errorcode", "") or "sesskey" in resp.get("message", "").lower():
+                    if isinstance(resp, dict) and resp.get("error"):
+                        if self._is_ajax_session_error(resp):
+                            logger.debug(
+                                "AJAX API session error (%s): %s - %s",
+                                function,
+                                resp.get("exception"),
+                                resp.get("message"),
+                            )
                             with self._get_lock("_session_lock", reentrant=True):
                                 if int(getattr(self, "_session_generation", 0)) == gen:
                                     self._sesskey = ""
+                                    self._session_authenticated_at = 0.0
+                        else:
+                            logger.error(
+                                f"AJAX API error: {resp.get('exception')} - {resp.get('message')}"
+                            )
                     return resp
                 return None
         except Exception as e:
@@ -1496,10 +1871,14 @@ class MoodleClient:
                 with self._get_lock("_session_lock", reentrant=True):
                     if int(getattr(self, "_session_generation", 0)) == gen:
                         self._sesskey = ""
+                        self._session_authenticated_at = 0.0
                 if attempt == 0 and self.login_session(force=True):
                     continue
                 self.last_grade_report_error = "session_expired"
                 return None
+            with self._get_lock("_session_lock", reentrant=True):
+                if int(getattr(self, "_session_generation", 0)) == gen and self._sesskey:
+                    self._session_authenticated_at = time.monotonic()
             return body
         return None
 
@@ -2255,11 +2634,12 @@ class MoodleClient:
                     if not _is_same_moodle_origin_url(final_url, origin):
                         logger.warning("Session download response changed origin")
                         return False
-                    if urllib.parse.urlsplit(final_url).path == "/login/index.php":
-                        if attempt == 0:
-                            with self._get_lock("_session_lock", reentrant=True):
-                                if int(getattr(self, "_session_generation", 0)) != gen:
-                                    return False
+                    if urllib.parse.urlsplit(final_url).path.endswith("/login/index.php"):
+                        with self._get_lock("_session_lock", reentrant=True):
+                            same_gen = int(getattr(self, "_session_generation", 0)) == gen
+                            if same_gen:
+                                self._session_authenticated_at = 0.0
+                        if attempt == 0 and same_gen:
                             if not self.login_session(force=True):
                                 return False
                             with self._get_lock("_session_lock", reentrant=True):
@@ -2285,6 +2665,10 @@ class MoodleClient:
                     with self._get_lock("_session_lock", reentrant=True):
                         if int(getattr(self, "_session_generation", 0)) != gen:
                             return False
+                        if self._sesskey and not urllib.parse.urlsplit(
+                            final_url
+                        ).path.endswith("/login/index.php"):
+                            self._session_authenticated_at = time.monotonic()
                     return True
         except urllib.error.HTTPError as e:
             try:

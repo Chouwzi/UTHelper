@@ -8,8 +8,10 @@ import inspect
 import logging
 import os
 import re
+import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -46,6 +48,64 @@ from core.courses.office_viewer_service import (
 )
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.windows_office_bridge import render_office_pdf
+from core.url_validation import validate_https_url
+
+try:
+    from core.webview_auth import (
+        classify_uth_webview_url as _core_classify_uth_webview_url,
+        normalize_uth_webview_target_url as _core_normalize_uth_webview_target_url,
+    )
+except ImportError:
+    _core_classify_uth_webview_url = None
+    _core_normalize_uth_webview_target_url = None
+
+
+def classify_uth_webview_url(url: str) -> str:
+    fn = _core_classify_uth_webview_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "classify_uth_webview_url", None)
+    if callable(fn):
+        return str(fn(url))
+    validated = validate_https_url(url)
+    if validated is None:
+        return "external"
+    parsed = urllib.parse.urlsplit(validated)
+    if parsed.port is not None:
+        return "external"
+    host = (parsed.hostname or "").casefold()
+    if host in ("courses.ut.edu.vn", "elearning.ut.edu.vn"):
+        return "courses"
+    if host == "thnn.ut.edu.vn":
+        return "thnn"
+    if host == "portal.ut.edu.vn":
+        return "portal"
+    return "external"
+
+
+def normalize_uth_webview_target_url(url: str, *, has_credentials: bool = True) -> str:
+    fn = _core_normalize_uth_webview_target_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "normalize_uth_webview_target_url", None)
+    if callable(fn):
+        return str(fn(url, has_credentials=has_credentials))
+    if not isinstance(url, str) or not url:
+        return ""
+    validated = validate_https_url(url)
+    if validated is None:
+        return url
+    parsed = urllib.parse.urlsplit(validated)
+    if parsed.port is not None:
+        return url
+    host = (parsed.hostname or "").casefold()
+    if host == "elearning.ut.edu.vn":
+        return urllib.parse.urlunsplit(
+            ("https", "courses.ut.edu.vn", parsed.path, parsed.query, parsed.fragment)
+        )
+    if host == "portal.ut.edu.vn" and parsed.path in ("", "/", "/login") and has_credentials:
+        return "https://portal.ut.edu.vn/dashboard"
+    return validated
 from gui.components.courses._shared import (
     PaneErrorOverlay,
     PaneLoadingOverlay,
@@ -224,10 +284,14 @@ class CoursesCoordinator:
         all_assignments_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_start_quiz: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
         account_namespace: Optional[str] = None,
+        webview_auth_service: Any = None,
+        account_epoch_getter: Optional[Callable[[], int]] = None,
     ) -> None:
         self._page = page
         self._on_start_quiz = on_start_quiz
         self._account_namespace = account_namespace
+        self._webview_auth_service = webview_auth_service
+        self._account_epoch_getter = account_epoch_getter
         self.catalog_service = catalog_service
         self.preview_cache = preview_cache
         self.archive_service = archive_service
@@ -379,8 +443,39 @@ class CoursesCoordinator:
                     reset_srv()
                 except Exception:
                     pass
+        overlays = getattr(getattr(self, "courses_view", None), "_overlays", None)
+        if isinstance(overlays, list):
+            for ov in list(overlays):
+                dispose_fn = getattr(ov, "dispose", None)
+                if callable(dispose_fn) and _supports_kwarg(
+                    dispose_fn, "clear_browser_storage"
+                ):
+                    try:
+                        dispose_fn(clear_browser_storage=True)
+                    except Exception:
+                        pass
         if hasattr(self.courses_view, "reset_for_account_switch"):
             self.courses_view.reset_for_account_switch()
+
+    def _resolve_account_epoch(self) -> int:
+        getter = getattr(self, "_account_epoch_getter", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if val is not None:
+                    return int(val)
+            except Exception:
+                pass
+        svc = getattr(self, "_webview_auth_service", None)
+        svc_getter = getattr(svc, "_account_epoch_getter", None)
+        if callable(svc_getter):
+            try:
+                val = svc_getter()
+                if val is not None:
+                    return int(val)
+            except Exception:
+                pass
+        return int(getattr(self, "_account_epoch", 0))
 
     def _client_for(self, source: CourseSource) -> Any:
         return self._thnn_client if source == "thnn" else self._courses_client
@@ -391,6 +486,8 @@ class CoursesCoordinator:
         url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
         if not url:
             return None
+        if classify_uth_webview_url(url) == "courses":
+            url = normalize_uth_webview_target_url(url, has_credentials=False)
         if callable(self._all_assignments_provider):
             try:
                 for item in self._all_assignments_provider() or []:
@@ -526,6 +623,45 @@ class CoursesCoordinator:
             on_history_changed=on_history_changed,
         )
 
+    def ensure_preview_server(self) -> LocalPreviewServer:
+        """Return the active LocalPreviewServer, ensuring Moodle session providers are registered."""
+        register_fn = getattr(self.preview_server, "register_session_provider", None)
+        if callable(register_fn):
+            reg_lock = getattr(self, "_preview_register_lock", None)
+            ctx = reg_lock if reg_lock is not None else contextlib.nullcontext()
+            with ctx:
+                providers = getattr(self.preview_server, "_session_providers", None)
+                if self._courses_client is not None and (
+                    not isinstance(providers, dict) or "courses" not in providers
+                ):
+                    register_fn("courses", self._courses_client)
+                if self._thnn_client is not None and (
+                    not isinstance(providers, dict) or "thnn" not in providers
+                ):
+                    register_fn("thnn", self._thnn_client)
+        return self.preview_server
+
+    def _has_webview_credentials(self, site_kind: str) -> bool:
+        if is_demo_account(settings.UTH_USERNAME):
+            return False
+        svc = getattr(self, "_webview_auth_service", None)
+        if svc is not None:
+            public_has_fn = getattr(svc, "has_credentials", None)
+            if callable(public_has_fn):
+                try:
+                    return bool(public_has_fn(site_kind))
+                except TypeError:
+                    return bool(public_has_fn())
+            client_for_site = getattr(svc, "client_for_site", None)
+            if callable(client_for_site) and client_for_site(site_kind) is None:
+                return False
+            return True
+        if site_kind == "thnn":
+            return getattr(self, "_thnn_client", None) is not None
+        if site_kind == "courses":
+            return getattr(self, "_courses_client", None) is not None
+        return False
+
     def open_in_app_webview(
         self,
         source: CourseSource,
@@ -541,6 +677,17 @@ class CoursesCoordinator:
         if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe_url):
             self._show_snack(DEMO_LMS_WEBVIEW_GUARD_MESSAGE)
             return
+        site_kind = classify_uth_webview_url(safe_url)
+        resolved_source: CourseSource = (
+            "thnn"
+            if site_kind == "thnn"
+            else ("courses" if site_kind == "courses" else source)
+        )
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         initial_pane_w: Optional[float] = None
         bounds_fn = getattr(self.courses_view, "_compute_pane3_bounds", None)
         if callable(bounds_fn):
@@ -548,19 +695,23 @@ class CoursesCoordinator:
                 initial_pane_w = float(bounds_fn()[2])
             except Exception:
                 initial_pane_w = None
-        pane = CoursesWebViewPane(
-            page=self._page,
-            source=source,
-            title=title or "Trình duyệt trong ứng dụng",
-            url=safe_url,
-            preview_server=self.preview_server,
-            session_client=self._client_for(source),
-            on_back=self.courses_view.pop_overlay,
-            on_open_external=self._launch_url_safe,
-            on_toggle_expand=self.courses_view.toggle_pane3_expanded,
-            pane_width=initial_pane_w,
-            account_namespace=self._account_namespace,
-        )
+        pane_kwargs: dict[str, Any] = {
+            "page": getattr(self, "_page", None),
+            "source": resolved_source,
+            "title": title or "Trình duyệt trong ứng dụng",
+            "url": safe_url,
+            "preview_server": getattr(self, "preview_server", None),
+            "session_client": self._client_for(resolved_source),
+            "webview_auth_service": getattr(self, "_webview_auth_service", None),
+            "on_back": self.courses_view.pop_overlay,
+            "on_open_external": self._launch_url_safe,
+            "on_toggle_expand": self.courses_view.toggle_pane3_expanded,
+            "pane_width": initial_pane_w,
+            "account_namespace": getattr(self, "_account_namespace", None),
+        }
+        if _supports_kwarg(CoursesWebViewPane, "account_epoch_getter"):
+            pane_kwargs["account_epoch_getter"] = self._resolve_account_epoch
+        pane = CoursesWebViewPane(**pane_kwargs)
         self.courses_view.push_overlay(pane, tag=tag or f"webview:{abs(hash(safe_url))}")
 
     def _handle_course_url_action(self, url: str, title: str = "") -> None:
@@ -570,11 +721,18 @@ class CoursesCoordinator:
         selected = None
         if hasattr(self.courses_view, "_state"):
             selected = self.courses_view._state.selected_course()
-        source: CourseSource = (
-            "thnn"
-            if "thnn.ut.edu.vn" in safe_url.lower()
-            else (selected.source if selected is not None else "courses")
-        )
+        site_kind = classify_uth_webview_url(safe_url)
+        if site_kind == "thnn":
+            source: CourseSource = "thnn"
+        elif site_kind == "courses":
+            source = "courses"
+        else:
+            source = selected.source if selected is not None else "courses"
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         pane_title = str(title or "").strip() or (
             (selected.display_name or selected.fullname) if selected is not None else "Moodle Web"
         )
@@ -694,7 +852,13 @@ class CoursesCoordinator:
             if not safe_url:
                 return
 
-        source: CourseSource = "thnn" if "thnn.ut.edu.vn" in safe_url.lower() else "courses"
+        site_kind = classify_uth_webview_url(safe_url)
+        source: CourseSource = "thnn" if site_kind == "thnn" else "courses"
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         self.open_in_app_webview(source, mod.name, safe_url, tag=f"webview:{mod.cmid}")
 
     async def _prefetch_course_attachments_async(

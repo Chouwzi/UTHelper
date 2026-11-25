@@ -19,9 +19,194 @@ const _popupSinkResolveTimeout = Duration(milliseconds: 800);
 const _defaultSurfaceBgColor = Color(0xFF0F172A);
 const _backgroundSyncChannel = MethodChannel('com.uthelper/background_sync');
 
+class MobileAuthApplyResult {
+  const MobileAuthApplyResult({
+    required this.appliedCookies,
+    required this.installedScriptOrigin,
+  });
+
+  final int appliedCookies;
+  final String? installedScriptOrigin;
+}
+
+class _ResolvedCookieWrite {
+  const _ResolvedCookieWrite({
+    required this.webTarget,
+    required this.host,
+    required this.cookie,
+  });
+
+  final WebUri webTarget;
+  final String host;
+  final ValidatedAppCookie cookie;
+}
+
+/// Atomically applies validated host-only cookies and origin-pinned `AT_DOCUMENT_START`
+/// user scripts under a single [MobileSessionQueue] lease so session updates never
+/// interleave with logout cleanup, quiz origin purges, or concurrent navigations.
+Future<MobileAuthApplyResult> applyAppWebViewAuthPayload({
+  required List<dynamic> rawCookies,
+  required String? rawInitScript,
+  required String? rawAllowedOrigin,
+  required Uri? targetUri,
+  required Uri? initialUri,
+  required bool viewerLocked,
+  required bool blockUthLms,
+  required bool Function() isDisposed,
+  required Future<void> disposeSignal,
+  required Future<void> Function(WebUri url, ValidatedAppCookie cookie)
+      setCookie,
+  Future<void> Function(WebUri url, String name, String path, String? domain)?
+      deleteCookie,
+  Future<void> Function()? clearAuthUserScripts,
+  Future<void> Function(UserScript script)? addAuthUserScript,
+  MobileSessionQueue? queue,
+  Duration queueTimeout = _cookieQueueTimeout,
+}) async {
+  if (isDisposed()) {
+    return const MobileAuthApplyResult(
+      appliedCookies: 0,
+      installedScriptOrigin: null,
+    );
+  }
+
+  final validatedScript = buildOriginPinnedAppUserScript(
+    source: rawInitScript,
+    allowedOrigin: rawAllowedOrigin,
+    targetUrl: targetUri?.toString(),
+    viewerLocked: viewerLocked,
+    blockUthLms: blockUthLms,
+  );
+
+  final cookieWrites = <_ResolvedCookieWrite>[];
+  final targetAllowedForCookies = !viewerLocked &&
+      rawCookies.isNotEmpty &&
+      rawCookies.length <= _maxInjectedCookies &&
+      targetUri != null &&
+      targetUri.scheme.toLowerCase() == 'https' &&
+      targetUri.host.isNotEmpty &&
+      !(blockUthLms && isUthLmsBrowserUrl(targetUri.toString()));
+
+  if (targetAllowedForCookies) {
+    final sameAsInitial = initialUri != null &&
+        initialUri.scheme.toLowerCase() == 'https' &&
+        initialUri.host.isNotEmpty &&
+        targetUri.host.toLowerCase() == initialUri.host.toLowerCase() &&
+        targetUri.port == initialUri.port;
+    final crossHostTrustedUth = isTrustedUthAuthUri(targetUri);
+
+    if (sameAsInitial || crossHostTrustedUth) {
+      for (final raw in rawCookies) {
+        var effectiveCookieUri = targetUri;
+        if (crossHostTrustedUth && raw is Map && raw['domain'] is String) {
+          var d = (raw['domain'] as String).trim().toLowerCase();
+          if (d.endsWith('.local')) {
+            d = d.substring(0, d.length - '.local'.length);
+          }
+          if (d.startsWith('.')) {
+            d = d.substring(1);
+          }
+          if (d == 'courses.ut.edu.vn' || d == 'thnn.ut.edu.vn') {
+            effectiveCookieUri = Uri.parse('https://$d/');
+          }
+        }
+        final cookie = validateAppWebViewCookie(raw, effectiveCookieUri);
+        if (cookie != null) {
+          final host = effectiveCookieUri.host.toLowerCase();
+          cookieWrites.add(
+            _ResolvedCookieWrite(
+              webTarget: WebUri('https://$host/'),
+              host: host,
+              cookie: cookie,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  if (cookieWrites.isEmpty &&
+      validatedScript == null &&
+      clearAuthUserScripts == null) {
+    return const MobileAuthApplyResult(
+      appliedCookies: 0,
+      installedScriptOrigin: null,
+    );
+  }
+
+  final sessionQueue = queue ?? sharedMobileSessionQueue;
+  final timeout = Completer<void>();
+  final timer = Timer(queueTimeout, timeout.complete);
+  MobileSessionLease? lease;
+  var applied = 0;
+  String? installedOrigin;
+  try {
+    lease = await sessionQueue.acquire(
+      cancelled: Future.any<void>([disposeSignal, timeout.future]),
+    );
+    if (lease == null || isDisposed()) {
+      return const MobileAuthApplyResult(
+        appliedCookies: 0,
+        installedScriptOrigin: null,
+      );
+    }
+
+    if (clearAuthUserScripts != null) {
+      try {
+        await clearAuthUserScripts();
+      } catch (_) {}
+    }
+    if (validatedScript != null &&
+        addAuthUserScript != null &&
+        !isDisposed()) {
+      try {
+        await addAuthUserScript(validatedScript);
+        installedOrigin = validatedScript.allowedOriginRules.first;
+      } catch (_) {}
+    }
+
+    for (final entry in cookieWrites) {
+      if (isDisposed()) break;
+      if (deleteCookie != null &&
+          entry.cookie.name.toLowerCase().startsWith('moodlesession')) {
+        try {
+          await deleteCookie(
+            entry.webTarget,
+            entry.cookie.name,
+            entry.cookie.path,
+            null,
+          );
+        } catch (_) {}
+        try {
+          await deleteCookie(
+            entry.webTarget,
+            entry.cookie.name,
+            entry.cookie.path,
+            entry.host,
+          );
+        } catch (_) {}
+      }
+      try {
+        await setCookie(entry.webTarget, entry.cookie);
+        applied++;
+      } catch (_) {
+        // Continue setting remaining cookies cleanly.
+      }
+    }
+    return MobileAuthApplyResult(
+      appliedCookies: applied,
+      installedScriptOrigin: installedOrigin,
+    );
+  } finally {
+    timer.cancel();
+    lease?.release();
+  }
+}
+
 /// Serializes host-only cookie installation through [MobileSessionQueue] so
 /// writes never interleave with logout cleanup or quiz origin purges, and pins
-/// cookie targets strictly to [initialUri]'s exact HTTPS host and port.
+/// cookie targets strictly to [initialUri]'s exact HTTPS host/port or verified
+/// canonical UTH LMS hosts.
 Future<int> installAppWebViewCookies({
   required List<dynamic> rawCookies,
   required Uri? targetUri,
@@ -33,57 +218,26 @@ Future<int> installAppWebViewCookies({
   MobileSessionQueue? queue,
   Duration queueTimeout = _cookieQueueTimeout,
 }) async {
-  if (isDisposed() ||
-      rawCookies.isEmpty ||
-      rawCookies.length > _maxInjectedCookies ||
-      initialUri == null ||
+  if (initialUri == null ||
       initialUri.scheme.toLowerCase() != 'https' ||
-      initialUri.host.isEmpty ||
-      targetUri == null ||
-      targetUri.scheme.toLowerCase() != 'https' ||
-      targetUri.host.toLowerCase() != initialUri.host.toLowerCase() ||
-      targetUri.port != initialUri.port) {
+      initialUri.host.isEmpty) {
     return 0;
   }
-
-  final validated = <ValidatedAppCookie>[];
-  for (final raw in rawCookies) {
-    final cookie = validateAppWebViewCookie(raw, targetUri);
-    if (cookie != null) {
-      validated.add(cookie);
-    }
-  }
-  if (validated.isEmpty || isDisposed()) {
-    return 0;
-  }
-
-  final sessionQueue = queue ?? sharedMobileSessionQueue;
-  final timeout = Completer<void>();
-  final timer = Timer(queueTimeout, timeout.complete);
-  MobileSessionLease? lease;
-  var applied = 0;
-  try {
-    lease = await sessionQueue.acquire(
-      cancelled: Future.any<void>([disposeSignal, timeout.future]),
-    );
-    if (lease == null || isDisposed()) {
-      return 0;
-    }
-    final webTarget = WebUri('${targetUri.scheme}://${targetUri.host}/');
-    for (final cookie in validated) {
-      if (isDisposed()) return applied;
-      try {
-        await setCookie(webTarget, cookie);
-        applied++;
-      } catch (_) {
-        // Continue setting remaining cookies cleanly.
-      }
-    }
-    return applied;
-  } finally {
-    timer.cancel();
-    lease?.release();
-  }
+  final result = await applyAppWebViewAuthPayload(
+    rawCookies: rawCookies,
+    rawInitScript: null,
+    rawAllowedOrigin: null,
+    targetUri: targetUri,
+    initialUri: initialUri,
+    viewerLocked: false,
+    blockUthLms: false,
+    isDisposed: isDisposed,
+    disposeSignal: disposeSignal,
+    setCookie: setCookie,
+    queue: queue,
+    queueTimeout: queueTimeout,
+  );
+  return result.appliedCookies;
 }
 
 class _PopupSinkEntry {
@@ -114,6 +268,11 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   String _currentLoadedUrl = '';
   String? _initialHtml;
   String? _initialBaseUrl;
+  String? _initialUserScript;
+  String? _initialUserScriptAllowedOrigin;
+  final AppWebViewAuthScriptTracker _authScriptTracker =
+      AppWebViewAuthScriptTracker();
+  UserScript? _deferredControllerUserScript;
   bool _viewerLocked = false;
   String? _viewerPrefix;
   Set<int> _allowedLoopbackPorts = const <int>{};
@@ -147,6 +306,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     _initialUrl = widget.control.getString('url', '') ?? '';
     _initialHtml = widget.control.getString('html');
     _initialBaseUrl = widget.control.getString('base_url');
+    _initialUserScript = widget.control.getString('initial_user_script');
+    _initialUserScriptAllowedOrigin =
+        widget.control.getString('initial_user_script_allowed_origin');
+    _deferredControllerUserScript = null;
     _viewerLocked = widget.control.getBool('viewer_locked', false) ?? false;
     _requireInitialCookies =
         widget.control.getBool('require_initial_cookies', false) ?? false;
@@ -176,6 +339,18 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     _viewerPrefix = extractViewerLockPrefix(_initialUrl);
     if (_viewerPrefix != null || _initialHtml != null) {
       _viewerLocked = true;
+    }
+    final initialValidatedScript = buildOriginPinnedAppUserScript(
+      source: _initialUserScript,
+      allowedOrigin: _initialUserScriptAllowedOrigin,
+      targetUrl: _initialUrl,
+      viewerLocked: _viewerLocked,
+      blockUthLms: _blockUthLms,
+    );
+    if (initialValidatedScript != null) {
+      _authScriptTracker.arm(initialValidatedScript.allowedOriginRules.first);
+    } else {
+      _authScriptTracker.clear();
     }
   }
 
@@ -352,40 +527,109 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     }
   }
 
+  Future<void> _clearAuthUserScripts(InAppWebViewController? controller) async {
+    _authScriptTracker.clear();
+    _deferredControllerUserScript = null;
+    _initialUserScript = null;
+    _initialUserScriptAllowedOrigin = null;
+    if (controller == null) return;
+    try {
+      await controller.removeUserScriptsByGroupName(
+        groupName: kAppWebViewAuthUserScriptGroup,
+      );
+    } catch (_) {}
+  }
+
+  Future<MobileAuthApplyResult> _applyDecodedAuthPayload(
+    Map<dynamic, dynamic> decoded, {
+    required String fallbackTargetUrl,
+  }) async {
+    final targetStr = decoded['target_url'] is String &&
+            (decoded['target_url'] as String).trim().isNotEmpty
+        ? (decoded['target_url'] as String).trim()
+        : fallbackTargetUrl;
+    final targetUri = Uri.tryParse(targetStr);
+    final initialUri = Uri.tryParse(
+      _initialUrl.isNotEmpty ? _initialUrl : targetStr,
+    );
+    final rawCookies = decoded['cookies'] is List
+        ? decoded['cookies'] as List<dynamic>
+        : const <dynamic>[];
+    final rawInitScript = decoded['init_script'] is String
+        ? decoded['init_script'] as String
+        : null;
+    final rawAllowedOrigin = decoded['init_script_allowed_origin'] is String
+        ? decoded['init_script_allowed_origin'] as String
+        : null;
+    final ctrl = _controller;
+    final cm = CookieManager.instance();
+
+    final res = await applyAppWebViewAuthPayload(
+      rawCookies: rawCookies,
+      rawInitScript: rawInitScript,
+      rawAllowedOrigin: rawAllowedOrigin,
+      targetUri: targetUri,
+      initialUri: initialUri,
+      viewerLocked: _viewerLocked,
+      blockUthLms: _blockUthLms,
+      isDisposed: () => _disposed,
+      disposeSignal: _disposeSignal.future,
+      clearAuthUserScripts: () async {
+        _authScriptTracker.clear();
+        _deferredControllerUserScript = null;
+        if (ctrl != null) {
+          await ctrl.removeUserScriptsByGroupName(
+            groupName: kAppWebViewAuthUserScriptGroup,
+          );
+        }
+      },
+      addAuthUserScript: (script) async {
+        if (ctrl != null) {
+          await ctrl.addUserScript(userScript: script);
+        } else {
+          _deferredControllerUserScript = script;
+        }
+      },
+      deleteCookie: (webTarget, name, cookiePath, domain) => cm.deleteCookie(
+        url: webTarget,
+        name: name,
+        path: cookiePath,
+        domain: domain,
+      ),
+      setCookie: (webTarget, cookie) => cm.setCookie(
+        url: webTarget,
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path,
+        expiresDate: cookie.expiresDate,
+        isSecure: cookie.isSecure,
+        isHttpOnly: cookie.isHttpOnly,
+        sameSite: cookie.sameSite,
+      ),
+    );
+    if (res.installedScriptOrigin != null) {
+      _authScriptTracker.arm(res.installedScriptOrigin!);
+    } else {
+      _authScriptTracker.clear();
+    }
+    return res;
+  }
+
   Future<bool> _applyCookiesFromChannel() async {
     Uint8List? payload;
     var appliedCount = 0;
+    var hasInstalledScript = false;
     try {
       payload = await _takeCookiePayload();
       final decoded = jsonDecode(utf8.decode(payload));
       if (decoded is! Map) return false;
-      final targetStr = decoded['target_url'] is String
-          ? (decoded['target_url'] as String).trim()
-          : _initialUrl;
-      final targetUri = Uri.tryParse(targetStr);
-      final initialUri = Uri.tryParse(_initialUrl);
-      final rawCookies = decoded['cookies'];
-      if (rawCookies is List && rawCookies.isNotEmpty) {
-        final cm = CookieManager.instance();
-        appliedCount = await installAppWebViewCookies(
-          rawCookies: rawCookies,
-          targetUri: targetUri,
-          initialUri: initialUri,
-          isDisposed: () => _disposed,
-          disposeSignal: _disposeSignal.future,
-          setCookie: (webTarget, cookie) => cm.setCookie(
-            url: webTarget,
-            name: cookie.name,
-            value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path,
-            expiresDate: cookie.expiresDate,
-            isSecure: cookie.isSecure,
-            isHttpOnly: cookie.isHttpOnly,
-            sameSite: cookie.sameSite,
-          ),
-        );
-      }
+      final res = await _applyDecodedAuthPayload(
+        decoded,
+        fallbackTargetUrl: _initialUrl,
+      );
+      hasInstalledScript = res.installedScriptOrigin != null;
+      appliedCount = res.appliedCookies + (hasInstalledScript ? 1 : 0);
       return true;
     } catch (_) {
       return false;
@@ -404,7 +648,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         currentLoadedUrl: _currentLoadedUrl,
       )) {
         _lateCookieReloaded = true;
-        unawaited(_navigateInternal(_controller!, _initialUrl));
+        unawaited(
+          _navigateInternal(
+            _controller!,
+            _initialUrl,
+            preserveMatchingAuthScript: hasInstalledScript,
+          ),
+        );
       }
     }
   }
@@ -428,16 +678,32 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       }
     }
     if (_disposed) return;
+    final deferredScript = _deferredControllerUserScript;
+    if (deferredScript != null) {
+      _deferredControllerUserScript = null;
+      try {
+        await controller.removeUserScriptsByGroupName(
+          groupName: kAppWebViewAuthUserScriptGroup,
+        );
+        await controller.addUserScript(userScript: deferredScript);
+        _authScriptTracker.arm(deferredScript.allowedOriginRules.first);
+      } catch (_) {}
+    }
     if (_initialUrl.isNotEmpty) {
       _initialNavDispatched = true;
-      await _navigateInternal(controller, _initialUrl);
+      await _navigateInternal(
+        controller,
+        _initialUrl,
+        preserveMatchingAuthScript: true,
+      );
     }
   }
 
   Future<bool> _navigateInternal(
     InAppWebViewController controller,
-    String targetUrl,
-  ) async {
+    String targetUrl, {
+    bool preserveMatchingAuthScript = false,
+  }) async {
     final decision = decideAppWebViewNavigation(
       targetUrl,
       isForMainFrame: true,
@@ -452,6 +718,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       AppNavigationKind.cancel => null,
     };
     if (resolved == null || resolved.isEmpty) return false;
+    final activeOrigin = _authScriptTracker.activeOrigin;
+    if (activeOrigin != null) {
+      final nextOrigin = extractHttpsOrigin(resolved);
+      if (!preserveMatchingAuthScript || nextOrigin != activeOrigin) {
+        await _clearAuthUserScripts(controller);
+      }
+    }
     _currentLoadedUrl = resolved;
     try {
       await controller.loadUrl(
@@ -470,6 +743,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     String html, {
     String? baseUrl,
   }) async {
+    if (_authScriptTracker.activeOrigin != null) {
+      await _clearAuthUserScripts(controller);
+    }
     WebUri? safeBase;
     if (baseUrl != null && baseUrl.trim().isNotEmpty) {
       safeBase = WebUri(baseUrl.trim());
@@ -525,6 +801,57 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         }
         return await _applyCookiesFromChannel();
 
+      case 'ensure_auth_channel':
+        if (_viewerLocked || !mounted) return null;
+        if (_cookieChannel == null) {
+          final channel = FletBackend.of(context).openDataChannel();
+          _cookieChannel = channel;
+          _cookieSubscription = channel.messages.listen(_onCookiePayload);
+          widget.control.triggerEvent('data_channel_open', {
+            'channel_name': 'app_webview_cookies',
+            'channel_id': channel.id,
+          });
+        }
+        return _cookieChannel?.id;
+
+      case 'apply_auth_and_navigate':
+        if (_viewerLocked ||
+            args is! Map ||
+            _cookieChannel == null ||
+            args['channel_id'] != _cookieChannel?.id) {
+          return false;
+        }
+        Uint8List? payload;
+        try {
+          payload = await _takeCookiePayload();
+          final decoded = jsonDecode(utf8.decode(payload));
+          if (decoded is! Map) return false;
+          final targetUrl = decoded['target_url'] is String
+              ? (decoded['target_url'] as String).trim()
+              : '';
+          if (targetUrl.isEmpty) return false;
+          await _applyDecodedAuthPayload(
+            decoded,
+            fallbackTargetUrl: targetUrl,
+          );
+          if (_disposed) return false;
+          _initialHtml = null;
+          _initialUrl = targetUrl;
+          final ctrl = _controller;
+          if (ctrl == null) {
+            return true;
+          }
+          return await _navigateInternal(
+            ctrl,
+            targetUrl,
+            preserveMatchingAuthScript: true,
+          );
+        } catch (_) {
+          return false;
+        } finally {
+          payload?.fillRange(0, payload.length, 0);
+        }
+
       case 'navigate':
         final url = args is Map && args['url'] is String
             ? (args['url'] as String).trim()
@@ -542,6 +869,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         if (ctrl == null) {
           _initialHtml = null;
           _initialUrl = url;
+          _deferredControllerUserScript = null;
+          _initialUserScript = null;
+          _initialUserScriptAllowedOrigin = null;
+          _authScriptTracker.clear();
           return true;
         }
         return await _navigateInternal(ctrl, url);
@@ -556,8 +887,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         if (ctrl == null) {
           _initialHtml = html;
           _initialBaseUrl = baseUrl;
+          _deferredControllerUserScript = null;
+          _initialUserScript = null;
+          _initialUserScriptAllowedOrigin = null;
+          _authScriptTracker.clear();
           return true;
         }
+        await _clearAuthUserScripts(ctrl);
         return await _loadHtmlInternal(ctrl, html, baseUrl: baseUrl);
 
       case 'eval_js':
@@ -566,11 +902,29 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             : '';
         final ctrl = _controller;
         if (ctrl == null || script.isEmpty) return false;
+        if (_viewerLocked) {
+          try {
+            await ctrl.evaluateJavascript(source: script);
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
+        final timeout = Completer<void>();
+        final timer = Timer(_cookieQueueTimeout, timeout.complete);
+        MobileSessionLease? lease;
         try {
+          lease = await sharedMobileSessionQueue.acquire(
+            cancelled: Future.any<void>([_disposeSignal.future, timeout.future]),
+          );
+          if (lease == null || _disposed || _controller != ctrl) return false;
           await ctrl.evaluateJavascript(source: script);
           return true;
         } catch (_) {
           return false;
+        } finally {
+          timer.cancel();
+          lease?.release();
         }
 
       case 'go_back':
@@ -918,6 +1272,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         children: [
           InAppWebView(
             key: _webViewKey,
+            initialUserScripts: buildInitialAppWebViewUserScripts(
+              source: _initialUserScript,
+              allowedOrigin: _initialUserScriptAllowedOrigin,
+              initialUrl: _initialUrl,
+              viewerLocked: _viewerLocked,
+              blockUthLms: _blockUthLms,
+            ),
             initialSettings: createAppWebViewSettings(
               viewerLocked: _viewerLocked,
               viewerPrefix: _viewerPrefix,
@@ -932,6 +1293,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                   rawActionUri?.rawValue.isNotEmpty == true
                       ? rawActionUri!.rawValue
                       : rawActionUri?.toString();
+              final activeOrigin = _authScriptTracker.activeOrigin;
+              if (action.isForMainFrame && activeOrigin != null) {
+                final actionOrigin = extractHttpsOrigin(actionUrl);
+                if (actionOrigin != activeOrigin) {
+                  await _clearAuthUserScripts(controller);
+                }
+              }
               final effectiveCurrentUrl =
                   _currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl;
 
@@ -1089,6 +1457,11 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                 }
                 if (!urlLower.startsWith('blob:')) {
                   _currentLoadedUrl = urlStr;
+                  final loadAction =
+                      _authScriptTracker.onMainFrameLoadStart(urlStr);
+                  if (loadAction == AuthScriptLoadAction.clearNow) {
+                    unawaited(_clearAuthUserScripts(controller));
+                  }
                 }
                 _suppressCommitUntilNextLoadStart = false;
               }
@@ -1102,6 +1475,12 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             onLoadStop: (controller, url) async {
               if (_disposed || _suppressCommitUntilNextLoadStart) return;
               final urlStr = url?.toString() ?? '';
+              if (_authScriptTracker.shouldClearOnLoadStop(
+                urlStr,
+                hasInitialHtml: _initialHtml != null,
+              )) {
+                await _clearAuthUserScripts(controller);
+              }
               _revealSurfaceIfReady(urlStr);
               widget.control.triggerEvent('page_ended', urlStr);
               await _emitHistoryState(controller);
