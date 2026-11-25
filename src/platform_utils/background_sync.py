@@ -95,6 +95,11 @@ class AndroidBackgroundBridge:
         """Replace locally scheduled reminders for the current Portal snapshot."""
         if not self.service:
             return {}
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return await self.service.schedule_class_sessions([], False)
         return await self.service.schedule_class_sessions(sessions, enabled)
 
     async def cached_activities(self) -> list[dict[str, Any]]:
@@ -120,6 +125,11 @@ class AndroidBackgroundBridge:
 
     async def sync_now(self, force: bool = False) -> str:
         if not self.service:
+            return ""
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")):
             return ""
         return await self.service.sync_now(force)
 
