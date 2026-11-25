@@ -934,4 +934,235 @@ def test_courses_tab_view_roundtrip_mobile_tablet_wide_emits_valid_flet_patches(
         _context_page.reset(token)
 
 
+def test_courses_webview_pane_initial_disabled_history_inappwebview_error_fallback_and_external_app_cards():
+    """CoursesWebViewPane must disable < / > initially, fall back cleanly on pre-commit inappwebview errors,
+    show external-app status/missing cards for zalo:///intent:// redirects, and cancel its commit watchdog."""
+    page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    launched_external: list[str] = []
+    closed: list[bool] = []
+
+    # 1. Pre-commit main-frame error on inappwebview must fall back to card with external browser button
+    pane_err = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="Bảng tính Google",
+        url="https://docs.google.com/spreadsheets/d/1y5syAENL/edit?gid=1012692952#gid=1012692952",
+        on_back=lambda: closed.append(True),
+        on_open_external=launched_external.append,
+    )
+    try:
+        assert pane_err._wv_back_btn.disabled is True
+        assert pane_err._wv_fwd_btn.disabled is True
+        assert pane_err._commit_watchdog is not None
+        assert pane_err._host is not None
+        assert pane_err._host.backend == "inappwebview"
+
+        wv = pane_err._host.control().content
+        wv.on_web_error(SimpleNamespace(data="net::ERR_CONNECTION_TIMED_OUT", is_for_main_frame=True))
+        assert pane_err._host is None
+        assert pane_err._commit_watchdog is None
+        # Wait briefly for fallback worker thread and verify Android never shows Windows "WebView2" wording
+        import time
+
+        for _ in range(30):
+            texts_err = [
+                getattr(n, "value", "")
+                for n in _iter_tree(pane_err._body_host)
+                if isinstance(n, ft.Text)
+            ]
+            if any("Không thể tải trang web" in t for t in texts_err):
+                break
+            time.sleep(0.02)
+        assert any("Không thể tải trang web" in t for t in texts_err)
+        assert not any("WebView2" in t for t in texts_err)
+
+        # Tapping Reload re-mounts a fresh InAppWebView host so transient errors recover!
+        pane_err._on_webview_reload(None)
+        assert pane_err._host is not None
+        assert pane_err._host.backend == "inappwebview"
+        assert pane_err._commit_watchdog is not None
+    finally:
+        pane_err.dispose()
+
+    # 2. Post-commit error must NOT destroy an already-rendered inappwebview page
+    pane_ok = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="Zoom Lớp Học",
+        url="https://zoom.us/j/123456789",
+        on_back=lambda: None,
+        on_open_external=launched_external.append,
+    )
+    try:
+        assert pane_ok._commit_watchdog is not None
+        wv_ok = pane_ok._host.control().content
+        wv_ok.on_page_ended(SimpleNamespace(data="https://zoom.us/j/123456789"))
+        assert pane_ok._initial_page_committed is True
+        assert pane_ok._commit_watchdog is None
+        wv_ok.on_web_error(SimpleNamespace(data="net::ERR_TIMED_OUT", is_for_main_frame=True))
+        assert pane_ok._host is not None
+    finally:
+        pane_ok.dispose()
+
+    # 3. External native app launched (__UTH_EXTERNAL_APP_LAUNCHED__:intent) before commit shows status card
+    pane_meet = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="Phòng học Google Meet",
+        url="https://meet.google.com/abc-defg-hij",
+        on_back=lambda: closed.append(True),
+        on_open_external=launched_external.append,
+    )
+    try:
+        wv_meet = pane_meet._host.control().content
+        wv_meet.on_web_error(SimpleNamespace(data="__UTH_EXTERNAL_APP_LAUNCHED__:intent"))
+        assert pane_meet._host is None
+        texts_meet = [
+            getattr(n, "value", "")
+            for n in _iter_tree(pane_meet._body_host)
+            if isinstance(n, ft.Text)
+        ]
+        assert any("ứng dụng ngoài" in t for t in texts_meet)
+    finally:
+        pane_meet.dispose()
+
+    # 4. External native app missing (__UTH_EXTERNAL_APP_MISSING__:zalo) shows Zalo fallback card + external button
+    pane_zalo = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="Nhóm Zalo Lớp",
+        url="https://zalo.me/g/nhom_lop_a",
+        on_back=lambda: closed.append(True),
+        on_open_external=launched_external.append,
+    )
+    try:
+        wv_zalo = pane_zalo._host.control().content
+        wv_zalo.on_web_error(SimpleNamespace(data="__UTH_EXTERNAL_APP_MISSING__:zalo"))
+        assert pane_zalo._host is None
+        texts_zalo = [
+            getattr(n, "value", "")
+            for n in _iter_tree(pane_zalo._body_host)
+            if isinstance(n, ft.Text)
+        ]
+        assert any("Zalo" in t for t in texts_zalo)
+        ext_btns = [
+            n
+            for n in _iter_tree(pane_zalo._body_host)
+            if isinstance(n, ft.FilledButton)
+        ]
+        assert len(ext_btns) == 1
+        ext_btns[0].on_click(None)
+        assert launched_external == ["https://zalo.me/g/nhom_lop_a"]
+
+        # Reload on Zalo card re-mounts InAppWebView to retry native Zalo launch instead of showing WebView2 card
+        pane_zalo._on_webview_reload(None)
+        assert pane_zalo._host is not None
+        assert pane_zalo._host.backend == "inappwebview"
+    finally:
+        pane_zalo.dispose()
+
+    # 5. Blocked disallowed URL stays blocked even if user clicks Reload
+    pane_blk = CoursesWebViewPane(
+        page=page,
+        source="courses",
+        title="Blocked",
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=10",
+        on_back=lambda: None,
+        on_open_external=launched_external.append,
+    )
+    try:
+        pane_blk._on_host_error("Blocked disallowed WebView URL: http://evil.example/")
+        assert pane_blk._host is None
+        pane_blk._on_webview_reload(None)
+        assert pane_blk._host is None
+        texts_blk = [
+            getattr(n, "value", "")
+            for n in _iter_tree(pane_blk._body_host)
+            if isinstance(n, ft.Text)
+        ]
+        assert any("chặn" in t.lower() for t in texts_blk)
+    finally:
+        pane_blk.dispose()
+
+
+def _iter_tree(ctrl: Optional[ft.Control]):
+    if ctrl is None:
+        return
+    yield ctrl
+    content = getattr(ctrl, "content", None)
+    if isinstance(content, ft.Control):
+        yield from _iter_tree(content)
+    for child in getattr(ctrl, "controls", None) or ():
+        if isinstance(child, ft.Control):
+            yield from _iter_tree(child)
+
+
+def test_in_app_webview_dialog_parity_toolbar_url_sync_and_error_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """InAppWebViewDialog must show nav buttons even when flet_webview is None on mobile,
+    sync self._url on navigation, and fall back cleanly on pre-commit WebView errors."""
+    from gui.components import in_app_webview as webview_module
+    from gui.components.in_app_webview import InAppWebViewDialog
+
+    monkeypatch.setattr(webview_module, "flet_webview", None)
+    live_page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+    dialogs: list[Any] = []
+    launched: list[str] = []
+    monkeypatch.setattr(live_page, "show_dialog", dialogs.append, raising=False)
+
+    dlg = InAppWebViewDialog(
+        live_page,
+        url="https://courses.ut.edu.vn/mod/url/view.php?id=55",
+        title="Tài liệu ngoài",
+        on_open_external=launched.append,
+    )
+    assert dlg.show() is True
+    assert dlg._embedded_host is not None
+
+    # 1. Back / Forward / Reload buttons must still be present in header even when flet_webview is None,
+    #    with < and > initially disabled and updated via history_change
+    header_btns = {
+        getattr(n, "tooltip", None): n
+        for n in _iter_tree(dialogs[0].title)
+        if isinstance(n, ft.IconButton)
+    }
+    assert "Trang trước" in header_btns
+    assert "Trang sau" in header_btns
+    assert "Tải lại" in header_btns
+    assert header_btns["Trang trước"].disabled is True
+    assert header_btns["Trang sau"].disabled is True
+
+    # 2. Navigating to a redirected HTTPS URL updates dlg._url and history_change enables Back
+    wv = dlg._embedded_host.control().content
+    wv.on_history_change(SimpleNamespace(data='{"can_go_back":true,"can_go_forward":false}'))
+    assert header_btns["Trang trước"].disabled is False
+    assert header_btns["Trang sau"].disabled is True
+    redirected_url = "https://docs.google.com/spreadsheets/d/1y5syAENL/htmlview"
+    wv.on_url_change(SimpleNamespace(data=redirected_url))
+    assert dlg._url == redirected_url
+    dlg._handle_open_external()
+    assert launched == [redirected_url]
+
+    # 3. Pre-commit error on a fresh dialog falls back cleanly, clears _webview, without leaving a dead blank host
+    dialogs.clear()
+    dlg_err = InAppWebViewDialog(
+        live_page,
+        url="https://zalo.me/g/nhom_lop_b",
+        title="Nhóm Zalo",
+        on_open_external=launched.append,
+    )
+    assert dlg_err.show() is True
+    wv_err = dlg_err._embedded_host.control().content
+    wv_err.on_web_error(SimpleNamespace(data="__UTH_EXTERNAL_APP_MISSING__:zalo"))
+    assert dlg_err._embedded_host is None
+    assert dlg_err._webview is None
+    asyncio.run(dlg_err._reload())
+    body_buttons = [
+        n for n in _iter_tree(dialogs[0].content) if isinstance(n, ft.Button)
+    ]
+    assert len(body_buttons) >= 1
+
+
+
 

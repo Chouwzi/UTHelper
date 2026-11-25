@@ -1,12 +1,16 @@
 package com.uthelper.backgroundsync
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import java.util.Locale
 import androidx.room.withTransaction
 import com.uthelper.backgroundsync.data.SettingsStore
 import com.uthelper.backgroundsync.data.ForegroundActivityImporter
@@ -20,6 +24,8 @@ import com.uthelper.backgroundsync.security.CredentialVault
 import com.uthelper.backgroundsync.worker.BackgroundSyncScheduler
 import com.uthelper.backgroundsync.worker.MoodleSyncWorker
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
@@ -30,8 +36,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
+class UthBackgroundSyncPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallHandler {
     private lateinit var context: Context
+    @Volatile
+    private var activity: Activity? = null
     private lateinit var channel: MethodChannel
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -44,11 +52,28 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        activity = null
         if (::context.isInitialized) {
             updateBridge.cancel()
         }
         channel.setMethodCallHandler(null)
         scope.cancel()
+    }
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        activity = binding.activity
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() {
+        activity = null
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        activity = binding.activity
+    }
+
+    override fun onDetachedFromActivity() {
+        activity = null
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -207,6 +232,28 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     false
                 }
             }
+            "launch_external_intent" -> {
+                val rawUri = call.argument<String>("uri").orEmpty()
+                val safeIntent = buildSafeExternalIntent(rawUri, context.packageName)
+                if (safeIntent == null) {
+                    result.success(false)
+                } else {
+                    mainHandler.post {
+                        val hostContext = activity ?: context
+                        val launched = try {
+                            hostContext.startActivity(safeIntent)
+                            true
+                        } catch (_: ActivityNotFoundException) {
+                            false
+                        } catch (_: SecurityException) {
+                            false
+                        } catch (_: Exception) {
+                            false
+                        }
+                        result.success(launched)
+                    }
+                }
+            }
             "logout" -> execute(result) {
                 MoodleSyncWorker.syncMutex.withLock {
                     BackgroundSyncScheduler(context).cancelAll()
@@ -255,5 +302,101 @@ class UthBackgroundSyncPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
-    companion object { private const val CHANNEL_NAME = "com.uthelper/background_sync" }
+    companion object {
+        private const val CHANNEL_NAME = "com.uthelper/background_sync"
+    }
+}
+
+private const val FIREBASE_DYNAMIC_LINK_ACTION =
+    "com.google.firebase.dynamiclinks.VIEW_DYNAMIC_LINK"
+private const val GMS_PACKAGE = "com.google.android.gms"
+private val BLOCKED_EXTERNAL_SCHEMES = setOf(
+    "",
+    "javascript",
+    "data",
+    "file",
+    "content",
+    "about",
+    "blob",
+    "vbscript",
+    "jar",
+    "filesystem",
+    "chrome",
+    "chrome-extension",
+    "devtools",
+    "view-source",
+    "intent",
+)
+
+internal fun buildSafeExternalIntent(rawUri: String, ownPackageName: String): Intent? {
+    val trimmed = rawUri.trim()
+    if (trimmed.isEmpty() || trimmed.any { it.code <= 0x20 || it.code == 0x7F }) {
+        return null
+    }
+    val parsed: Intent = try {
+        if (trimmed.startsWith("intent://", ignoreCase = true)) {
+            Intent.parseUri(trimmed, Intent.URI_INTENT_SCHEME)
+        } else {
+            Intent(Intent.ACTION_VIEW, Uri.parse(trimmed))
+        }
+    } catch (_: Exception) {
+        return null
+    }
+
+    val dataUri = parsed.data ?: return null
+    val scheme = dataUri.scheme?.lowercase(Locale.ROOT).orEmpty()
+    if (scheme in BLOCKED_EXTERNAL_SCHEMES) {
+        return null
+    }
+
+    // Unwrap Firebase Dynamic Links (e.g. meet.app.goo.gl/?link=https://meet.google.com/...&apn=com.google.android.apps.tachyon)
+    // directly to the target app package so startActivity fails cleanly with ActivityNotFoundException
+    // when the target app is not installed (instead of succeeding against always-installed GMS).
+    if ((parsed.`package` == GMS_PACKAGE || parsed.action == FIREBASE_DYNAMIC_LINK_ACTION) &&
+        scheme == "https"
+    ) {
+        val innerLink = dataUri.getQueryParameter("link")?.trim().orEmpty()
+        val apn = dataUri.getQueryParameter("apn")?.trim().orEmpty()
+        if (innerLink.isNotEmpty() &&
+            apn.isNotEmpty() &&
+            !apn.equals(ownPackageName, ignoreCase = true)
+        ) {
+            val innerUri = try {
+                Uri.parse(innerLink)
+            } catch (_: Exception) {
+                null
+            }
+            if (innerUri != null &&
+                innerUri.scheme?.lowercase(Locale.ROOT) == "https" &&
+                !innerUri.host.isNullOrEmpty()
+            ) {
+                return Intent(Intent.ACTION_VIEW, innerUri).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    setPackage(apn)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+        }
+    }
+
+    parsed.action = Intent.ACTION_VIEW
+    parsed.addCategory(Intent.CATEGORY_BROWSABLE)
+    parsed.component = null
+    parsed.selector = null
+    parsed.clipData = null
+    parsed.replaceExtras(null as Bundle?)
+    var flags = Intent.FLAG_ACTIVITY_NEW_TASK
+    if ((scheme == "http" || scheme == "https") &&
+        parsed.`package`.isNullOrEmpty() &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    ) {
+        flags = flags or Intent.FLAG_ACTIVITY_REQUIRE_NON_BROWSER
+    }
+    parsed.flags = flags
+
+    val targetPkg = parsed.`package`
+    if (!targetPkg.isNullOrEmpty() && targetPkg.equals(ownPackageName, ignoreCase = true)) {
+        return null
+    }
+    return parsed
 }

@@ -141,6 +141,32 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             // Calendar notifications do not have Android's exact-alarm permission.
             result(true)
 
+        case "launch_external_intent":
+            let arguments = call.arguments as? [String: Any]
+            let rawUri = text(arguments?["uri"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let allowedSchemes: Set<String> = [
+                "zalo", "zoomus", "zoomphonecall", "zoom", "msteams",
+                "mailto", "tel", "sms", "tg", "fb-messenger", "whatsapp",
+                "viber", "skype", "slack", "discord", "googledocs",
+                "googlesheets", "googleslides", "googlemeet", "googleclassroom",
+                "googledrive", "vnd.youtube", "ms-word", "ms-excel",
+                "ms-powerpoint", "ms-onenote", "ms-outlook", "onedrive"
+            ]
+            guard !rawUri.isEmpty,
+                  !rawUri.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7F }),
+                  let url = URL(string: rawUri),
+                  let scheme = url.scheme?.lowercased(),
+                  allowedSchemes.contains(scheme)
+            else {
+                result(false)
+                return
+            }
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { ok in
+                    self.finish(result, ok)
+                }
+            }
+
         case "schedule_periodic":
             result(["scheduled": false, "reason": "ios_foreground_snapshot_only"])
 

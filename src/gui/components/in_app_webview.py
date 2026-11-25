@@ -200,33 +200,47 @@ class InAppWebViewDialog:
             ),
         )
 
+        from gui.components.courses.embedded_webview_host import (
+            _is_inappwebview_mobile_platform,
+            build_embedded_webview_host,
+        )
+
+        is_inapp_mobile = _is_inappwebview_mobile_platform(self._page)
+        back_icon_btn: Optional[ft.IconButton] = None
+        forward_icon_btn: Optional[ft.IconButton] = None
         toolbar_actions: list[ft.Control] = []
-        if supports_native_webview(self._page):
+        if is_inapp_mobile or supports_native_webview(self._page):
+            back_icon_btn = ft.IconButton(
+                icon=ft.Icons.ARROW_BACK_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                disabled_color=C.TEXT_SECONDARY,
+                disabled=is_inapp_mobile,
+                icon_size=19,
+                tooltip="Trang trước",
+                padding=0,
+                size_constraints=btn_constraints,
+                on_click=self._go_back,
+            )
             back_btn = ft.Semantics(
                 label="Trang trước",
                 button=True,
-                content=ft.IconButton(
-                    icon=ft.Icons.ARROW_BACK_ROUNDED,
-                    icon_color=C.TEXT_SECONDARY,
-                    icon_size=19,
-                    tooltip="Trang trước",
-                    padding=0,
-                    size_constraints=btn_constraints,
-                    on_click=self._go_back,
-                ),
+                content=back_icon_btn,
+            )
+            forward_icon_btn = ft.IconButton(
+                icon=ft.Icons.ARROW_FORWARD_ROUNDED,
+                icon_color=C.TEXT_SECONDARY,
+                disabled_color=C.TEXT_SECONDARY,
+                disabled=is_inapp_mobile,
+                icon_size=19,
+                tooltip="Trang sau",
+                padding=0,
+                size_constraints=btn_constraints,
+                on_click=self._go_forward,
             )
             forward_btn = ft.Semantics(
                 label="Trang sau",
                 button=True,
-                content=ft.IconButton(
-                    icon=ft.Icons.ARROW_FORWARD_ROUNDED,
-                    icon_color=C.TEXT_SECONDARY,
-                    icon_size=19,
-                    tooltip="Trang sau",
-                    padding=0,
-                    size_constraints=btn_constraints,
-                    on_click=self._go_forward,
-                ),
+                content=forward_icon_btn,
             )
             reload_btn = ft.Semantics(
                 label="Tải lại trang",
@@ -260,37 +274,85 @@ class InAppWebViewDialog:
         )
 
         body_host = ft.Container(expand=True, bgcolor=C.BG, border_radius=10)
-        from gui.components.courses.embedded_webview_host import (
-            _is_inappwebview_mobile_platform,
-            build_embedded_webview_host,
-        )
+        committed_state = {"done": False}
+
+        def _on_embedded_url_changed(nav_url: str) -> None:
+            validated_nav = validate_public_https_url(nav_url, resolve_dns=False)
+            if validated_nav:
+                self._url = validated_nav
+                subtitle_label.value = (
+                    urllib.parse.urlsplit(validated_nav).hostname or host
+                )
+                self._safe_update(subtitle_label)
+
+        def _on_embedded_history_changed(can_back: bool, can_fwd: bool) -> None:
+            if back_icon_btn is not None:
+                back_icon_btn.disabled = not bool(can_back)
+                self._safe_update(back_icon_btn)
+            if forward_icon_btn is not None:
+                forward_icon_btn.disabled = not bool(can_fwd)
+                self._safe_update(forward_icon_btn)
+
+        def _on_embedded_error(reason: str) -> None:
+            if self._closed or committed_state["done"]:
+                return
+            host_ref = self._embedded_host
+            if host_ref is not None:
+                self._embedded_host = None
+                self._webview = None
+                try:
+                    host_ref.dispose()
+                except Exception:
+                    pass
+            reason_str = str(reason or "")
+            if reason_str.startswith("__UTH_EXTERNAL_APP_LAUNCHED__:"):
+                msg = "Đã mở liên kết trong ứng dụng ngoài trên thiết bị."
+            elif reason_str.startswith("__UTH_EXTERNAL_APP_MISSING__:"):
+                msg = "Thiết bị chưa cài đặt ứng dụng hỗ trợ trực tiếp liên kết này. Bạn có thể mở bằng trình duyệt ngoài."
+            else:
+                msg = "Không thể hiển thị trực tiếp liên kết này trong ứng dụng. Bạn có thể mở bằng trình duyệt ngoài."
+            body_host.padding = ft.Padding.all(14)
+            body_host.border = ft.Border.all(1, C.BORDER)
+            body_host.content = ft.Column(
+                controls=[
+                    ft.Text(self._url, size=11, color=C.ACCENT, selectable=True),
+                    ft.Text(msg, size=12, color=C.TEXT_SECONDARY),
+                    ft.Button(
+                        "Mở bằng trình duyệt ngoài",
+                        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                        bgcolor=C.ACCENT,
+                        color=C.ON_ACCENT,
+                        height=44,
+                        on_click=self._handle_open_external,
+                    ),
+                ],
+                spacing=10,
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+            )
+            self._safe_update(body_host)
 
         embedded_host = (
             build_embedded_webview_host(
                 self._url,
                 page=self._page,
                 bgcolor=C.BG,
+                on_ready=lambda: committed_state.__setitem__("done", True),
+                on_error=_on_embedded_error,
                 on_title_changed=lambda title: (
+                    committed_state.__setitem__("done", True),
                     setattr(title_label, "value", title),
                     self._safe_update(title_label),
                 )
                 if title
                 else None,
-                on_url_changed=lambda nav_url: (
-                    setattr(
-                        subtitle_label,
-                        "value",
-                        urllib.parse.urlsplit(nav_url).hostname or host,
-                    ),
-                    self._safe_update(subtitle_label),
-                )
-                if validate_https_url(nav_url)
-                else None,
+                on_url_changed=_on_embedded_url_changed,
+                on_history_changed=_on_embedded_history_changed,
                 on_external_url=lambda ext: self._on_open_external(ext)
                 if callable(self._on_open_external)
                 else None,
             )
-            if _is_inappwebview_mobile_platform(self._page)
+            if is_inapp_mobile
             else None
         )
         if embedded_host is not None:
@@ -492,6 +554,7 @@ class InAppWebViewDialog:
             except Exception:
                 pass
             self._embedded_host = None
+            self._webview = None
         try:
             self._page.pop_dialog()
         except Exception:
