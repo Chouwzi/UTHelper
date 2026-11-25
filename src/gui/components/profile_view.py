@@ -228,7 +228,7 @@ class ProfileView(ft.Container):
         self._avatar_src: str = ""
         self._name_text: ft.Text | None = None
         self._sid_text: ft.Text | None = None
-        self._info_column: ft.Column | None = None
+        self._info_column: ft.Control | None = None
         self._stat_total: ft.Text | None = None
         self._stat_paid: ft.Text | None = None
         self._stat_debt: ft.Text | None = None
@@ -463,37 +463,89 @@ class ProfileView(ft.Container):
             ("Số điện thoại", profile.phone),
             ("Email", profile.email),
         ]
-        self._info_column = ft.Column(
-            controls=[
-                ft.Row(
-                    controls=[
-                        ft.Text(
-                            label,
-                            size=12.5,
-                            weight=ft.FontWeight.W_600,
-                            color=C.TEXT_SECONDARY,
-                            width=118,
-                            selectable=True,
-                        ),
-                        ft.Text(
-                            value or "—",
-                            size=12.5,
-                            color=C.TEXT_PRIMARY,
-                            expand=True,
-                            selectable=True,
-                        ),
-                    ],
-                    spacing=8,
-                    tight=True,
-                )
-                for label, value in info_rows
-            ],
-            spacing=5,
-            tight=True,
-        )
+        def build_info_column(rows: list[tuple[str, str]]) -> ft.Column:
+            return ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Text(
+                                label,
+                                size=12.5,
+                                weight=ft.FontWeight.W_600,
+                                color=C.TEXT_SECONDARY,
+                                width=118,
+                                selectable=True,
+                            ),
+                            ft.Text(
+                                value or "—",
+                                size=12.5,
+                                color=C.TEXT_PRIMARY,
+                                expand=True,
+                                selectable=True,
+                            ),
+                        ],
+                        spacing=8,
+                        tight=True,
+                    )
+                    for label, value in rows
+                ],
+                spacing=7 if not platform_utils.UI_IS_MOBILE else 5,
+                tight=True,
+                expand=not platform_utils.UI_IS_MOBILE,
+            )
 
-        return ft.Container(
-            content=ft.Column(
+        is_desktop = not platform_utils.UI_IS_MOBILE
+        if is_desktop:
+            self._info_column = ft.Row(
+                controls=[
+                    build_info_column(info_rows[:5]),
+                    ft.Container(
+                        width=1,
+                        height=124,
+                        bgcolor=C.BORDER,
+                        margin=ft.Margin.symmetric(horizontal=12),
+                    ),
+                    build_info_column(info_rows[5:]),
+                ],
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            )
+            identity_header = ft.Row(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            self._avatar,
+                            ft.Column(
+                                controls=[self._name_text, self._sid_text],
+                                spacing=3,
+                                tight=True,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=14,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
+                    ),
+                    ft.Image(
+                        src="uth_campus.jpg",
+                        width=330,
+                        height=148,
+                        fit=ft.BoxFit.COVER,
+                        border_radius=10,
+                        anti_alias=True,
+                    ),
+                ],
+                spacing=20,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            card_content = ft.Column(
+                controls=[identity_header, self._info_column],
+                spacing=14,
+                tight=True,
+            )
+        else:
+            self._info_column = build_info_column(info_rows)
+            card_content = ft.Column(
                 controls=[
                     ft.Row(
                         controls=[
@@ -513,7 +565,10 @@ class ProfileView(ft.Container):
                 ],
                 spacing=4,
                 tight=True,
-            ),
+            )
+
+        return ft.Container(
+            content=card_content,
             padding=16,
             border_radius=14,
             border=ft.Border.all(1, C.BORDER),
@@ -1117,7 +1172,7 @@ class ProfileView(ft.Container):
             border_radius=8,
             horizontal_lines=ft.BorderSide(1, C.BORDER),
             vertical_lines=ft.BorderSide(1, C.BORDER),
-            column_spacing=16,
+            column_spacing=38,
             show_checkbox_column=False,
         )
 
@@ -1219,7 +1274,7 @@ class ProfileView(ft.Container):
             border_radius=8,
             horizontal_lines=ft.BorderSide(1, C.BORDER),
             vertical_lines=ft.BorderSide(1, C.BORDER),
-            column_spacing=16,
+            column_spacing=38,
             show_checkbox_column=False,
         )
 
