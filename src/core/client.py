@@ -481,8 +481,11 @@ def _validated_portal_api_base(raw_base: object) -> str:
     """Return normalized HTTPS UTH Portal API base URL, or empty string if untrusted."""
     if not isinstance(raw_base, str) or not raw_base or raw_base != raw_base.strip():
         return ""
-    if "\\" in raw_base or any(
-        ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw_base
+    if (
+        "\\" in raw_base
+        or "?" in raw_base
+        or "#" in raw_base
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw_base)
     ):
         return ""
     try:
@@ -710,9 +713,7 @@ class MoodleClient:
 
     @property
     def is_demo_mode(self) -> bool:
-        return self._is_demo_mode() or is_demo_account(
-            getattr(self, "_session_owner", "")
-        )
+        return self._is_demo_mode()
 
     @staticmethod
     def _has_valid_demo_credentials() -> bool:
@@ -1163,45 +1164,84 @@ class MoodleClient:
         require_sesskey: bool = True,
     ) -> bool:
         """Đăng nhập bằng form HTML để lấy MoodleSession và sesskey (non-blocking w.r.t clear_session)."""
-        eff_user = settings.UTH_USERNAME if not username else username
-        eff_pwd = (
-            settings.UTH_PASSWORD
-            if (password is None or (not username and password == ""))
-            else password
-        )
-        if is_demo_account(eff_user):
-            with self._get_lock("_session_lock", reentrant=True):
-                canonical = normalize_demo_username(eff_user)
-                self._reset_session_if_account_changed(canonical)
-                if not self.moodle_site_origin or not _verify_demo_credentials_cached(
-                    eff_user, eff_pwd
-                ):
+        active_raw = str(getattr(settings, "UTH_USERNAME", "") or "")
+        active_norm = normalize_demo_username(active_raw).casefold()
+        if username is not None and (
+            not isinstance(username, str) or not username.strip()
+        ):
+            self._last_login_error = "invalid_credentials"
+            return False
+        if password is not None and (
+            not isinstance(password, str) or password == ""
+        ):
+            if username is None or (
+                bool(active_norm)
+                and normalize_demo_username(username).casefold() == active_norm
+            ):
+                with self._get_lock("_session_lock", reentrant=True):
                     self._cookie_jar = CookieJar()
                     self._html_opener = None
                     self._sesskey = ""
                     self._session_owner = ""
-                    self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
+                    self._session_generation = (
+                        int(getattr(self, "_session_generation", 0)) + 1
+                    )
+            self._last_login_error = "invalid_credentials"
+            return False
+
+        eff_user = active_raw if username is None else username
+        target_norm = normalize_demo_username(eff_user).casefold()
+        if password is None:
+            if username is not None and (
+                not active_norm or target_norm != active_norm
+            ):
+                self._last_login_error = "invalid_credentials"
+                return False
+            eff_pwd = getattr(settings, "UTH_PASSWORD", "")
+        else:
+            eff_pwd = password
+
+        if is_demo_account(eff_user):
+            with self._get_lock("_session_lock", reentrant=True):
+                canonical = normalize_demo_username(eff_user)
+                is_mismatched_probe = (
+                    username is not None
+                    and bool(active_norm)
+                    and canonical.casefold() != active_norm
+                )
+                if not is_mismatched_probe:
+                    self._reset_session_if_account_changed(canonical)
+                if not self.moodle_site_origin or not _verify_demo_credentials_cached(
+                    eff_user, eff_pwd
+                ):
+                    if not is_mismatched_probe:
+                        self._cookie_jar = CookieJar()
+                        self._html_opener = None
+                        self._sesskey = ""
+                        self._session_owner = ""
+                        self._session_generation = (
+                            int(getattr(self, "_session_generation", 0)) + 1
+                        )
                     self._last_login_error = "invalid_credentials"
                     return False
-                active_norm = (
-                    str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
-                )
-                if not username or (
+                if username is None or (
                     bool(active_norm) and canonical.casefold() == active_norm
                 ):
                     settings.MOODLE_WS_TOKEN = ""
                     settings.MOODLE_WS_TOKEN_ORIGIN = ""
-                self._cookie_jar = CookieJar()
-                self._html_opener = None
-                self._sesskey = "demoSessKey2026"
-                self._session_owner = canonical
-                self._session_generation = int(getattr(self, "_session_generation", 0)) + 1
+                if not is_mismatched_probe:
+                    self._cookie_jar = CookieJar()
+                    self._html_opener = None
+                    self._sesskey = "demoSessKey2026"
+                    self._session_owner = canonical
+                    self._session_generation = (
+                        int(getattr(self, "_session_generation", 0)) + 1
+                    )
                 self._last_login_error = ""
                 return True
-        if not username:
-            username = settings.UTH_USERNAME
-        if not password:
-            password = settings.UTH_PASSWORD
+
+        username = str(eff_user or "").strip()
+        password = str(eff_pwd or "")
 
         with self._get_lock("_login_lock"):
             with self._get_lock("_session_lock", reentrant=True):
@@ -2489,27 +2529,29 @@ class MoodleClient:
         client_site = moodle_site_from_origin(self.moodle_site_origin)
         if configured_site is None or client_site is None or configured_site != client_site:
             return ""
-        if activity_url:
+        if activity_url is not None and not isinstance(activity_url, str):
+            return ""
+        clean_activity_url = activity_url or ""
+        if clean_activity_url:
             if (
-                not isinstance(activity_url, str)
-                or activity_url != activity_url.strip()
-                or "\\" in activity_url
+                clean_activity_url != clean_activity_url.strip()
+                or "\\" in clean_activity_url
                 or any(
                     ch.isspace() or ord(ch) < 32 or ord(ch) == 127
-                    for ch in activity_url
+                    for ch in clean_activity_url
                 )
-                or moodle_site_from_url(activity_url) != configured_site
+                or moodle_site_from_url(clean_activity_url) != configured_site
             ):
                 return ""
         token = self.get_portal_token(username, password)
         if not token:
-            return activity_url
+            return clean_activity_url
         safe_token = urllib.parse.quote(token, safe="")
-        if activity_url:
+        if clean_activity_url:
             return (
                 f"{configured_site.origin}/login/index.php"
                 f"?token={safe_token}"
-                f"&wantsurl={urllib.parse.quote(activity_url, safe='')}"
+                f"&wantsurl={urllib.parse.quote(clean_activity_url, safe='')}"
             )
         return f"{configured_site.origin}/login/index.php?token={safe_token}"
 

@@ -279,7 +279,7 @@ class SubmissionWorkflow:
                     demo_res = None
                 if isinstance(demo_res, bool):
                     return demo_res
-            for attr in ("username", "_username", "_session_owner"):
+            for attr in ("username", "_username"):
                 raw_user = getattr(candidate, attr, None)
                 if isinstance(raw_user, str) and raw_user.strip():
                     return is_demo_account(raw_user)

@@ -80,12 +80,12 @@ class DataOrchestrator:
 
     def _sync_account_scope(self) -> None:
         """Reset account-scoped caches when `settings.UTH_USERNAME` changes."""
-        current_key = self._current_account_key()
         lock = getattr(self, "_account_state_lock", None)
         if lock is None:
             lock = threading.RLock()
             self._account_state_lock = lock
         with lock:
+            current_key = self._current_account_key()
             if not hasattr(self, "_active_account_key"):
                 self._active_account_key = current_key
                 return

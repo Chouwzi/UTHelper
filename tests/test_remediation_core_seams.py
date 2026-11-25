@@ -233,13 +233,16 @@ def test_seam02_login_session_mismatched_probe_preserves_ws_token_and_case_insen
     assert real_client._session_owner == "StudentA"
 
     # 3. When active `settings.UTH_USERNAME` IS the demo account (even mixed-case),
-    # login_session clears stale global MOODLE_WS_TOKEN — and empty `""` fallback never hits live HTML login!
+    # login_session() with omitted args clears stale global MOODLE_WS_TOKEN, while explicit
+    # empty `""` credentials fail closed offline without substituting stored credentials.
     monkeypatch.setattr(settings, "UTH_USERNAME", "  UTHelper_Demo ")
     monkeypatch.setattr(settings, "UTH_PASSWORD", pw)
     assert probe.login_session("uthelper_demo", pw, force=True) is True
     assert settings.MOODLE_WS_TOKEN == ""
     assert settings.MOODLE_WS_TOKEN_ORIGIN == ""
-    assert probe.login_session("", "", force=True) is True
+    assert probe.login_session(force=True) is True
+    assert probe.login_session("", "", force=True) is False
+    assert probe.last_login_error == "invalid_credentials"
     assert probe.login_session("", "wrong-pw", force=True) is False
 
 
@@ -907,3 +910,253 @@ def test_demo08_submission_workflow_eliminates_config_import_and_enforces_demo_g
     )
     wf_mock_client = SubmissionWorkflow(mock_client, mock_backed_service)  # type: ignore[arg-type]
     assert wf_mock_client.mutate_files(target, add_intent, selected_files=picked).ok is True
+
+
+# ---------------------------------------------------------------------------
+# 7. Round-2 Adversarial Critic Regressions (#37 items 1..5)
+# ---------------------------------------------------------------------------
+
+
+def test_r2_item1_seam01_sync_account_scope_reads_current_key_inside_lock_no_toctou(
+    monkeypatch,
+):
+    monkeypatch.setattr("core.client._urlopen", _forbid_network)
+    monkeypatch.setattr(urllib.request, "build_opener", _forbid_network)
+
+    pw = _reviewer_password()
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "UTH_USERNAME", "alice")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "alice-pw")
+
+    orch = DataOrchestrator()
+    thread1_about_to_lock = threading.Event()
+    errors: list[BaseException] = []
+
+    def alice_tail_sync():
+        try:
+            thread1_about_to_lock.set()
+            orch._sync_account_scope()
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+
+    # Hold `_account_state_lock` on Thread 2 while `settings.UTH_USERNAME` is still `alice`.
+    # Thread 1 starts `_sync_account_scope()` and blocks waiting on `_account_state_lock`.
+    # Before releasing the lock, Thread 2 switches to `uthelper_demo`, runs `clear_caches()`,
+    # and establishes Account B's THNN session.
+    with orch._account_state_lock:
+        t1 = threading.Thread(target=alice_tail_sync)
+        t1.start()
+        assert thread1_about_to_lock.wait(1.0)
+        # Give Thread 1 a moment to reach `with lock:`
+        time.sleep(0.03)
+
+        monkeypatch.setattr(settings, "UTH_USERNAME", "uthelper_demo")
+        monkeypatch.setattr(settings, "UTH_PASSWORD", pw)
+        orch.clear_caches()
+        assert orch.thnn_client.login_session() is True
+        orch.is_logged_in = True
+
+    t1.join(timeout=2.0)
+    assert not t1.is_alive()
+    assert errors == []
+    assert orch._active_account_key == "uthelper_demo"
+    assert orch.thnn_client._sesskey == "demoSessKey2026"
+    assert orch.is_logged_in is True
+
+
+def test_r2_item2_seam02_demo08_mismatched_demo_probe_and_stale_session_owner_do_not_poison_submissions(
+    monkeypatch,
+):
+    monkeypatch.setattr("core.client._urlopen", _forbid_network)
+    monkeypatch.setattr(urllib.request, "build_opener", _forbid_network)
+
+    pw = _reviewer_password()
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "UTH_USERNAME", "StudentA")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "student-a-pw")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "student-a-ws-tok")
+
+    target = SubmissionTarget(
+        "https://courses.ut.edu.vn/mod/assign/view.php?id=123", 456
+    )
+    replace_intent = FileMutationIntent(
+        operation=MutationOperation.REPLACE,
+        selected_files=(SelectedFile("new.pdf", 8, source_path=""),),
+    )
+    picked = (SelectedSubmissionFile("new.pdf", b"%PDF-1.4"),)
+
+    # Path A: Mismatched demo probe on an active real student's MoodleClient
+    client = MoodleClient("https://courses.ut.edu.vn")
+    client._sesskey = "real-student-a-sesskey"
+    client._session_owner = "StudentA"
+    monkeypatch.setattr(
+        client,
+        "download_file",
+        lambda _url: b"old",
+    )
+    monkeypatch.setattr(
+        client,
+        "upload_draft_file_record",
+        lambda name, _content, itemid, filepath: DraftFileRecord(
+            itemid=itemid, filepath=filepath, filename=name
+        ),
+    )
+
+    assert client.login_session("uthelper_demo", pw) is True
+    assert client.login_session("uthelper_demo", "wrong-pw") is False
+    assert client._sesskey == "real-student-a-sesskey"
+    assert client._session_owner == "StudentA"
+    assert client.is_demo_mode is False
+    assert settings.MOODLE_WS_TOKEN == "student-a-ws-tok"
+
+    wf_a = SubmissionWorkflow(
+        client,
+        _StandaloneFakeService(_minimal_editable_snapshot(), client),  # type: ignore[arg-type]
+    )
+    res_a = wf_a.mutate_files(target, replace_intent, selected_files=picked)
+    assert res_a.ok is True
+
+    # Path B: Demo -> Real switch without `clear_session()` leaving stale `_session_owner`
+    monkeypatch.setattr(settings, "UTH_USERNAME", "uthelper_demo")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", pw)
+    assert client.login_session(force=True) is True
+    assert client._session_owner == "uthelper_demo"
+    assert client.is_demo_mode is True
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "2251120001")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "real-2251-pw")
+    assert client.is_demo_mode is False
+
+    wf_b = SubmissionWorkflow(
+        client,
+        _StandaloneFakeService(_minimal_editable_snapshot(), client),  # type: ignore[arg-type]
+    )
+    res_b = wf_b.mutate_files(target, replace_intent, selected_files=picked)
+    assert res_b.ok is True
+
+
+def test_r2_item3_seam02_login_session_rejects_explicit_empty_or_unpaired_credentials_offline(
+    monkeypatch,
+):
+    monkeypatch.setattr("core.client._urlopen", _forbid_network)
+    monkeypatch.setattr(urllib.request, "build_opener", _forbid_network)
+
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "UTH_USERNAME", "2251120001")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "stored-real-secret")
+
+    client = MoodleClient("https://courses.ut.edu.vn")
+    for bad_user, bad_pwd in (
+        ("", ""),
+        ("   ", "stored-real-secret"),
+        ("2251120001", ""),
+        ("", "stored-real-secret"),
+        ("2251120999", None),
+    ):
+        assert client.login_session(bad_user, bad_pwd, force=True) is False
+        assert client.last_login_error == "invalid_credentials"
+
+
+def test_r2_item4_sec_c03_rejects_trailing_query_fragment_delimiters_and_none_activity_url(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "UTH_USERNAME", "2251120001")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "student-pw")
+
+    client = MoodleClient("https://courses.ut.edu.vn")
+    post_calls: list[str] = []
+    monkeypatch.setattr(
+        client,
+        "_post_json",
+        lambda url, _d, timeout=15: post_calls.append(url)
+        or (200, {"success": True, "token": "jwt-ok"}),
+    )
+
+    for tricky_portal_base in (
+        "https://portal-publicapp.ut.edu.vn/api/v1#",
+        "https://portal-publicapp.ut.edu.vn/api/v1?",
+        "https://portal-publicapp.ut.edu.vn/api/v1/?",
+        "https://portal-publicapp.ut.edu.vn/api/v1/#",
+    ):
+        monkeypatch.setattr(settings, "PORTAL_API_BASE", tricky_portal_base)
+        assert client.get_portal_token() == ""
+    assert post_calls == []
+
+    # When `not token`, `build_autologin_url(None)` must return `""`, never `None`
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "")
+    monkeypatch.setattr(
+        settings, "PORTAL_API_BASE", "https://portal-publicapp.ut.edu.vn/api/v1"
+    )
+    assert client.build_autologin_url(None) == ""  # type: ignore[arg-type]
+
+
+def test_r2_item5_sec_c05_resolve_credentials_prevents_cross_account_password_bleed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        settings, "PORTAL_API_BASE", "https://portal-publicapp.ut.edu.vn/api/v1"
+    )
+    monkeypatch.setattr(settings, "UTH_USERNAME", "studentA")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "secret_password_of_A")
+
+    mock_portal = MagicMock()
+    service = AcademicGradeService(portal_client=mock_portal, cache_dir=tmp_path)
+
+    today_str = date.today().isoformat()
+    b_grades_cache, b_progress_cache = service._cache_paths("studentB")
+    b_grades_cache.write_text(
+        json.dumps(
+            {
+                "cached_date": today_str,
+                "updated_at": f"{today_str}T08:00:00",
+                "transcript": [
+                    {
+                        "id": 88,
+                        "tenDot": "HK1 StudentB Private",
+                        "tongKetDot": {"diemTBHocLuc": 9.1},
+                        "diems": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    b_progress_cache.write_text(
+        json.dumps(
+            {
+                "cached_date": today_str,
+                "body": {"canDat": 132, "hienTai": 100},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Calling with `username="studentB"` (`password=None`) while `studentA` is active
+    # must NOT use `studentA`'s password to unlock `studentB`'s cache or hit Portal!
+    assert service.load_academic_data("studentB") == []
+    assert service.load_credit_progress("studentB") is None
+
+    b_grades_cache.unlink()
+    b_progress_cache.unlink()
+    assert service.load_academic_data("studentB") == []
+    assert service.load_credit_progress("studentB") is None
+    mock_portal.fetch_full_transcript.assert_not_called()
+    mock_portal.fetch_credit_progress.assert_not_called()
+
+    # Calling with matching active username (`"StudentA"`, case-insensitive, `password=None`)
+    # still resolves `studentA`'s stored password cleanly.
+    mock_portal.fetch_full_transcript.return_value = [
+        {
+            "id": 89,
+            "tenDot": "HK1 StudentA",
+            "tongKetDot": {"diemTBHocLuc": 8.0},
+            "diems": [],
+        }
+    ]
+    a_semesters = service.load_academic_data("StudentA")
+    assert len(a_semesters) == 1
+    mock_portal.fetch_full_transcript.assert_called_once_with(
+        "StudentA", "secret_password_of_A"
+    )
+

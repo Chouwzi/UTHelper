@@ -27,15 +27,20 @@ logger = logging.getLogger(__name__)
 def _resolve_credentials(
     username: str | None = "", password: str | None = None
 ) -> tuple[str, str]:
+    if username is not None and username != "" and not username.strip():
+        return "", ""
     explicit_username = bool(username and username.strip())
-    raw_user = (
-        username
-        if explicit_username and username is not None
-        else str(getattr(settings, "UTH_USERNAME", "") or "")
-    )
-    resolved_user = raw_user.strip()
-    if password is None or (not explicit_username and password == ""):
+    stored_user = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+    resolved_user = username.strip() if explicit_username and username is not None else stored_user
+    if not explicit_username and (password is None or password == ""):
         resolved_pwd = str(getattr(settings, "UTH_PASSWORD", "") or "")
+    elif password is None:
+        active_norm = normalize_demo_username(stored_user).casefold()
+        target_norm = normalize_demo_username(resolved_user).casefold()
+        if active_norm and target_norm == active_norm:
+            resolved_pwd = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        else:
+            resolved_pwd = ""
     else:
         resolved_pwd = str(password)
     return resolved_user, resolved_pwd
