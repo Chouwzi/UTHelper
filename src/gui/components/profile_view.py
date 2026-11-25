@@ -623,8 +623,8 @@ class ProfileView(ft.Container):
         campus_photo = ft.Container(
             content=ft.Image(
                 src="uth_campus.jpg",
-                width=236,
-                height=134,
+                width=320,
+                height=170,
                 fit=ft.BoxFit.COVER,
                 border_radius=12,
                 anti_alias=True,
@@ -639,7 +639,7 @@ class ProfileView(ft.Container):
                     controls=[self._name_text, self._sid_text, badge],
                     spacing=6,
                     tight=True,
-                    expand=True,
+                    width=340,
                 ),
                 campus_photo,
             ],
@@ -1012,8 +1012,30 @@ class ProfileView(ft.Container):
             border=ft.Border.all(1, C.BORDER),
             bgcolor=C.SURFACE,
             padding=8,
+            on_size_change=self._fit_table_to_host,
         )
         return self._table_host
+
+    def _fit_table_to_host(self, event=None) -> None:
+        """Stretch desktop fee columns to the available pane width on resize."""
+        table = self._table
+        try:
+            host_width = float(getattr(event, "width", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if table is None or host_width <= 0:
+            return
+
+        # Account for the host's border and inner padding. Keeping the table's
+        # width tied to the rendered host makes maximize/restore resize live.
+        target_width = max(0, host_width - 18)
+        if abs((table.width or 0) - target_width) < 1:
+            return
+        table.width = target_width
+        try:
+            table.update()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Mobile fee list + detail bottom sheet
