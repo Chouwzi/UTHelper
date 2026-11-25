@@ -169,7 +169,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before initial Android build."
     }
-    python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "com.uthelper.uthelper"
+    python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics and distribution channel config generation failed before initial Android build."
     }
@@ -194,7 +194,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before final Android build."
     }
-    python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "com.uthelper.uthelper"
+    python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics and distribution channel config generation failed before final Android build."
     }

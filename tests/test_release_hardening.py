@@ -142,7 +142,9 @@ def test_android_build_workflows_install_the_notification_patcher():
         assert "flet-android-notifications-patch --project-root build/flutter" in workflow
 
     build_workflow = _read(".github/workflows/build-android.yml")
-    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in build_workflow
+    assert 'application-id "$APK")" = "io.github.chouwzi.uthelper"' in build_workflow
+    benchmark_workflow = _read(".github/workflows/package-benchmark.yml")
+    assert "'com.uthelper.benchmark' || 'io.github.chouwzi.uthelper'" in benchmark_workflow
 
 
 def test_android_release_uses_canonical_version_code_and_signing_inputs():
@@ -158,9 +160,11 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert "UTH_DISTRIBUTION_CHANNEL=apk_lts" in workflow
     assert "--distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json" in workflow
     assert "--channel apk_lts" in workflow
-    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in workflow
+    assert 'application-id "$APK")" = "io.github.chouwzi.uthelper"' in workflow
     assert 'version-code "$APK")" = "$BUILD_NUMBER"' in workflow
-    assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert config["tool"]["flet"]["android"]["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
     assert "yes | flet build apk" not in workflow
     assert "--yes --verbose" in workflow
     assert "COMPLETED_APKS" not in workflow

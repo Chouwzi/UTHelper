@@ -37,10 +37,22 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "configure":
             let arguments = call.arguments as? [String: Any]
             let settings = arguments?["settings"] as? [String: Any] ?? [:]
+            let enabled = bool(settings["enabled"], default: true)
             defaults.set(settings, forKey: Self.settingsKey)
+            guard enabled else {
+                clearDeadlineNotifications()
+                finish(result, [
+                    "enabled": false,
+                    "permission_granted": false,
+                    "scheduled": 0,
+                    "cancelled": 0,
+                    "error": "",
+                ])
+                return
+            }
             center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
                 self.finish(result, [
-                    "enabled": self.bool(settings["enabled"], default: true),
+                    "enabled": true,
                     "permission_granted": granted,
                     "scheduled": 0,
                     "cancelled": 0,

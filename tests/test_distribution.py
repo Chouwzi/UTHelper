@@ -42,6 +42,7 @@ def test_distribution_channel_self_update_policy(channel, expected_self_update):
 
 
 def test_chplay_profile_urls_and_custom_package_id():
+    assert DEFAULT_ANDROID_PACKAGE_ID == "io.github.chouwzi.uthelper"
     default_profile = build_distribution_profile(DistributionChannel.CHPLAY)
     assert default_profile.android_package_id == DEFAULT_ANDROID_PACKAGE_ID
     assert default_profile.store_url == f"market://details?id={DEFAULT_ANDROID_PACKAGE_ID}"
@@ -146,11 +147,11 @@ def test_resolve_reads_flet_assets_dir_config_for_all_channels(tmp_path):
 @pytest.mark.parametrize(
     "bad_pkg",
     [
-        "com.uthelper.uthelper&referrer=evil",
-        "com.uthelper.uthelper#frag",
+        "io.github.chouwzi.uthelper&referrer=evil",
+        "io.github.chouwzi.uthelper#frag",
         "singleword",
         "123.invalid.pkg",
-        "com.uthelper/../../etc",
+        "io.github.chouwzi/../../etc",
     ],
 )
 def test_uri_injection_in_android_package_id_falls_back_to_default(tmp_path, bad_pkg):

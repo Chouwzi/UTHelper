@@ -42,6 +42,10 @@ _ERROR_MESSAGES = {
     SubmissionErrorCode.FINALIZE_REJECTED: "Đã lưu bản nháp nhưng Moodle chưa nhận nộp bài.",
     SubmissionErrorCode.STATEMENT_NOT_ACCEPTED: "Bạn cần xác nhận cam kết trước khi nộp bài.",
     SubmissionErrorCode.VERIFICATION_FAILED: "Moodle trả về danh sách file khác với thay đổi yêu cầu.",
+    SubmissionErrorCode.DEMO_READ_ONLY: (
+        "Tài khoản xem thử (Demo) chỉ hỗ trợ xem dữ liệu mẫu, "
+        "không gửi bài nộp lên máy chủ UTH."
+    ),
 }
 
 _OUTCOME_MESSAGES = {
