@@ -588,3 +588,28 @@ def test_store_adrs_and_guides_document_all_channels_and_deferred_appstore() -> 
 
     assert "Google Play" in terms and "Microsoft Store" in terms
     assert "Moodle" in terms and "Sentry" in terms and "PolyForm" in terms
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="MSIX verifier requires Windows")
+def test_verify_msix_release_rejects_missing_office_viewer_assets(tmp_path: Path) -> None:
+    staged = _build_staged_msix_dir(tmp_path / "missing-office-msix")
+    proc = _run_ps_script(
+        VERIFY_MSIX_PS1,
+        [
+            "-MsixPath",
+            str(staged),
+            "-Channel",
+            "msstore",
+            "-IdentityName",
+            "UTHelperOrg.UTHelper",
+            "-Publisher",
+            "CN=UTHelper",
+            "-Version",
+            "2.5.1.0",
+            "-StoreProductId",
+            "9NBLGGH4NNS1",
+            "-RequireOfficeViewer",
+        ],
+    )
+    assert proc.returncode != 0
+    assert "office_viewer" in (proc.stdout + proc.stderr)

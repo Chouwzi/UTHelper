@@ -646,7 +646,7 @@ def test_assignment_always_mounts_status_control_before_snapshot(details):
         (
             lambda: None,
             456,
-            "Không thể kết nối Moodle trong ứng dụng. Hãy mở bài tập trong trình duyệt.",
+            "Không thể kết nối Moodle trong ứng dụng. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
         ),
     ],
 )
@@ -665,7 +665,7 @@ def test_assignment_without_native_context_explains_browser_fallback(
     )
 
     assert view._submission_status_value.value == reason
-    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._cta_text.value == "Mở trong ứng dụng"
     assert callable(view._open_btn.on_click)
     assert view._submission_area.visible is False
     assert view._pick_btn.visible is False
@@ -716,37 +716,37 @@ def test_assignment_without_course_id_resolves_native_submission_context() -> No
         (
             "https://courses.ut.edu.vn/mod/quiz/view.php?id=123",
             456,
-            "Đường dẫn này không phải bài tập Moodle. Hãy mở trong trình duyệt.",
+            "Đường dẫn này không phải bài tập Moodle. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             "unknown",
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             0,
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             -1,
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             1.5,
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
         (
             "https://courses.ut.edu.vn/mod/assign/view.php?id=123",
             "1.5",
-            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trong trình duyệt.",
+            "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài.",
             True,
         ),
     ],
@@ -827,9 +827,9 @@ def test_thnn_assignment_with_courses_client_uses_browser_fallback():
 
     assert view._submission_status_value.value == (
         "Moodle cho trang bài tập này chưa được cấu hình. "
-        "Hãy mở bài tập trong trình duyệt."
+        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
     )
-    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._cta_text.value == "Mở trong ứng dụng"
     assert view._submission_area.visible is False
     page.run_task.assert_not_called()
 
@@ -939,7 +939,7 @@ def test_app_controller_rejects_current_client_after_configured_moodle_site_chan
             }
         )
 
-    assert view._cta_text.value == "Mở trong trình duyệt"
+    assert view._cta_text.value == "Mở trong ứng dụng"
     assert view._submission_area.visible is False
     page.run_task.assert_not_called()
 
@@ -964,7 +964,7 @@ def test_bound_client_without_workflow_factory_uses_immediate_browser_fallback()
 
     assert view._submission_status_value.value == (
         "Moodle cho trang bài tập này chưa được cấu hình. "
-        "Hãy mở bài tập trong trình duyệt."
+        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
     )
     page.run_task.assert_not_called()
 

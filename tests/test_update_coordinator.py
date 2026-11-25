@@ -929,3 +929,201 @@ def test_shutdown_unblocks_real_stalled_http_download_promptly(tmp_path):
         server.shutdown()
         server.server_close()
         server_thread.join(1.0)
+
+
+def test_shutdown_marks_detach_before_stop_so_completed_download_is_not_deleted(tmp_path):
+    pkg_path = tmp_path / "UTHelper-2.3.0.apk"
+    pkg_path.write_bytes(b"apk-bytes")
+    download_finished = threading.Event()
+    proceed_to_stop_check = threading.Event()
+    before_detach_downloader = threading.Event()
+    release_detach_downloader = threading.Event()
+
+    class DetachableRacyDownloader:
+        def download(self, _package, *, cancel, progress=None):
+            del cancel, progress
+            download_finished.set()
+            assert proceed_to_stop_check.wait(2.0)
+            return pkg_path
+
+        def detach(self):
+            return None
+
+    state, sink = _event_sink()
+    candidate = _candidate(platform="android")
+    coordinator = UpdateCoordinator(
+        client=_Client(candidate),
+        downloader=DetachableRacyDownloader(),
+        verifier=_Verifier(),
+        launcher=_Launcher(),
+        target=RuntimeTarget("android", "arm64", "sideload"),
+        current_version="2.2.0",
+        event_sink=sink,
+        automatic_enabled=False,
+    )
+    original_detach_downloader = coordinator._detach_downloader
+
+    def blocking_detach_downloader():
+        before_detach_downloader.set()
+        assert release_detach_downloader.wait(2.0)
+        return original_detach_downloader()
+
+    coordinator._detach_downloader = blocking_detach_downloader
+    coordinator.request_download(candidate)
+    assert download_finished.wait(2.0)
+
+    shutdown_result = []
+    shutdown_thread = threading.Thread(
+        target=lambda: shutdown_result.append(coordinator.shutdown(timeout_seconds=1.0))
+    )
+    shutdown_thread.start()
+    assert before_detach_downloader.wait(2.0)
+    # Release _perform_download after _stop.set() but before _detach_downloader() runs.
+    proceed_to_stop_check.set()
+    _wait_for(state, UpdateEventKind.CANCELLED)
+    release_detach_downloader.set()
+    shutdown_thread.join(2.0)
+
+    assert shutdown_result == [True]
+    assert pkg_path.is_file()
+    assert not any(ev.kind is UpdateEventKind.FAILED for ev in state["items"])
+
+
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        "sha256_mismatch",
+        "size_mismatch",
+        "invalid_apk",
+        "package_mismatch",
+        "release_version_mismatch",
+        "installed_signer_mismatch",
+        "manifest_signer_mismatch",
+        "apk_signature_invalid",
+        "release_metadata_invalid",
+    ],
+)
+def test_confirmation_clears_ready_path_and_deletes_staged_file_on_invalid_package_error(
+    tmp_path,
+    failure_reason,
+):
+    candidate = _candidate(platform="android")
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    launcher.supports_cached_package_retry = True
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+    assert downloader.path.is_file()
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(False, failure_reason, status="failed")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert events["items"][-1].message == failure_reason
+    assert not downloader.path.exists()
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_confirmation_clears_ready_path_even_if_corrupt_package_unlink_fails(
+    tmp_path,
+    monkeypatch,
+):
+    candidate = _candidate(platform="android")
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    launcher.supports_cached_package_retry = True
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    original_unlink = Path.unlink
+
+    def failing_unlink(self, missing_ok=False):
+        if self == downloader.path:
+            raise OSError("locked")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(False, "sha256_mismatch", status="failed")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert events["items"][-1].message == "sha256_mismatch"
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_confirmation_clears_ready_path_on_windows_installer_unavailable_reason(tmp_path):
+    candidate = _candidate()
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(
+        False,
+        "Windows installer is unavailable",
+        status="installer_unavailable",
+    )
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+
+    events["items"].clear()
+    events["changed"].clear()
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 2
+    assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_confirmation_preserves_ready_path_on_file_provider_unavailable_when_cached_retry_supported(
+    tmp_path,
+):
+    candidate = _candidate(platform="android")
+    coordinator, _, downloader, launcher, events = _coordinator(
+        tmp_path,
+        candidate=candidate,
+    )
+    launcher.supports_cached_package_retry = True
+    coordinator.request_download(candidate)
+    _wait_for(events, UpdateEventKind.READY_TO_INSTALL)
+    assert downloader.calls == 1
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(False, "file_provider_unavailable", status="failed")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_FAILED)
+    assert events["items"][-1].message == "file_provider_unavailable"
+
+    events["items"].clear()
+    events["changed"].clear()
+    launcher.result = LaunchResult(True, "installer_opened", status="installer_opened")
+    coordinator.confirm_install()
+    _wait_for(events, UpdateEventKind.INSTALL_LAUNCHED)
+    assert downloader.calls == 1
+    assert coordinator.shutdown(timeout_seconds=1.0) is True

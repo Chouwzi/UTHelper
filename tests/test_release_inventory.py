@@ -43,6 +43,7 @@ CHECKS = {
         "apk_signature",
         "native_abis",
         "notification_receivers",
+        "office_viewer_assets",
         "package_id",
         "sha256",
         "version_code",
@@ -298,8 +299,105 @@ def test_inventory_rejects_missing_pinned_identity(tmp_path, suffix):
         verify_release_inventory(release, evidence, VERSION, REPOSITORY)
 
 
+def test_inventory_rejects_apk_evidence_missing_office_viewer_assets(tmp_path):
+    release, evidence = write_valid_release(tmp_path)
+    record_path = evidence / "UTHelper-2.2.0.apk.verification.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["checks"] = [item for item in record["checks"] if item != "office_viewer_assets"]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(InventoryError, match="verification evidence checks"):
+        verify_release_inventory(release, evidence, VERSION, REPOSITORY)
+
+
+def test_verify_android_release_require_office_viewer_schema_passes_inventory(
+    tmp_path, monkeypatch
+):
+    import io
+    import zipfile
+    from scripts import verify_android_release as android_verifier
+
+    release, evidence = write_valid_release(tmp_path)
+    app_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(app_zip_buf, "w") as nested:
+        for asset in android_verifier._REQUIRED_OFFICE_VIEWER_ASSETS:
+            nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+    app_zip_bytes = app_zip_buf.getvalue()
+
+    manifest_xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+        f'package="com.uthelper.uthelper" android:versionCode="2002000" '
+        f'android:versionName="{VERSION}"><application>'
+        + "".join(f'<receiver android:name="{r}" />' for r in android_verifier._RECEIVERS)
+        + "</application></manifest>"
+    )
+    fingerprint = "AB" * 32
+    colon_fp = ":".join(fingerprint[i : i + 2] for i in range(0, 64, 2))
+
+    monkeypatch.setattr(
+        android_verifier,
+        "_resolve_tools",
+        lambda _sdk: (Path("apksigner"), Path("apkanalyzer")),
+    )
+
+    def fake_run(cmd):
+        exe = str(cmd[0])
+        if exe == "apksigner":
+            return f"Signer #1 certificate SHA-256 digest: {colon_fp}"
+        sub = tuple(cmd[1:3])
+        if sub == ("manifest", "application-id"):
+            return "com.uthelper.uthelper"
+        if sub == ("manifest", "version-name"):
+            return VERSION
+        if sub == ("manifest", "version-code"):
+            return "2002000"
+        if sub == ("manifest", "print"):
+            return manifest_xml
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(android_verifier, "_run", fake_run)
+
+    for apk_name, arch, abis in (
+        (f"UTHelper-{VERSION}.apk", "universal", ("arm64-v8a", "armeabi-v7a", "x86_64")),
+        (f"UTHelper-{VERSION}-arm64-v8a.apk", "arm64", ("arm64-v8a",)),
+    ):
+        apk_path = release / apk_name
+        with zipfile.ZipFile(apk_path, "w") as zf:
+            for abi in abis:
+                zf.writestr(f"lib/{abi}/libflutter.so", b"\x7fELF")
+            zf.writestr("assets/app.zip", app_zip_bytes)
+        evidence_path = evidence / f"{apk_name}.verification.json"
+        evidence_path.unlink()
+        android_verifier.verify_android_release(
+            apk=apk_path,
+            channel="apk_lts",
+            version=VERSION,
+            build_number=2002000,
+            package_id="com.uthelper.uthelper",
+            certificate_sha256=fingerprint,
+            commit_sha="1" * 40,
+            workflow_run_id="12345",
+            architecture=arch,
+            android_home=tmp_path,
+            require_office_viewer=True,
+            output=evidence_path,
+        )
+
+    inventory = verify_release_inventory(release, evidence, VERSION, REPOSITORY)
+    apk_checks = [
+        item.evidence.checks for item in inventory.packages if item.name.endswith(".apk")
+    ]
+    assert all("office_viewer_assets" in checks for checks in apk_checks)
+
+
 @pytest.mark.parametrize(
-    "script", ["scripts/release_inventory.py", "scripts/generate_release_manifest.py"]
+    "script",
+    [
+        "scripts/release_inventory.py",
+        "scripts/generate_release_manifest.py",
+        "scripts/package_unsigned_ipa.py",
+    ],
 )
 def test_canonical_release_clis_bootstrap_in_isolated_python(script):
     completed = subprocess.run(

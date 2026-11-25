@@ -111,6 +111,74 @@ def test_portal_client_rejects_login_without_token():
         raise AssertionError("missing Portal token was accepted")
 
 
+def test_portal_client_fetches_current_semester_courses_with_fallback_and_401_retry():
+    paths: list[str] = []
+    login_count = 0
+
+    def opener(request, timeout):
+        del timeout
+        nonlocal login_count
+        paths.append(request.full_url)
+        if request.full_url.endswith("/user/login"):
+            login_count += 1
+            return _Response({"success": True, "token": f"tok-{login_count}"})
+        if request.full_url.endswith("/hoctap/hocky"):
+            if login_count == 1:
+                raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+            return _Response(
+                {
+                    "success": True,
+                    "body": [
+                        {"id": 77, "tenDot": "Học kỳ 1 năm học 2026-2027"},
+                        {"id": 78, "tenDot": "Học kỳ 2 năm học 2026-2027"},
+                    ],
+                }
+            )
+        if request.full_url.endswith("/hoctap/montheoky/78"):
+            # Newest dot has no registered courses yet -> must fall back to id=77
+            return _Response({"success": True, "body": []})
+        if request.full_url.endswith("/hoctap/montheoky/77"):
+            return _Response(
+                {
+                    "success": True,
+                    "body": [
+                        {
+                            "id": 180519,
+                            "maHocPhan": "0120121137",
+                            "tenMonHoc": "Quản trị doanh nghiệp CNTT",
+                            "soTinChi": 3,
+                        },
+                        {
+                            "id": 180520,
+                            "maHocPhan": "0120005107",
+                            "tenMonHoc": "Chủ nghĩa xã hội khoa học",
+                            "soTinChi": 2,
+                        },
+                    ],
+                }
+            )
+        raise AssertionError(f"Unexpected URL: {request.full_url}")
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+    ten_dot, courses = client.fetch_current_semester_courses("student", "secret")
+
+    assert login_count == 2
+    assert ten_dot == "Học kỳ 1 năm học 2026-2027"
+    assert courses == [
+        {
+            "maHocPhan": "0120121137",
+            "tenMonHoc": "Quản trị doanh nghiệp CNTT",
+            "soTinChi": 3,
+        },
+        {
+            "maHocPhan": "0120005107",
+            "tenMonHoc": "Chủ nghĩa xã hội khoa học",
+            "soTinChi": 2,
+        },
+    ]
+    assert any(p.endswith("/hoctap/montheoky/78") for p in paths)
+    assert any(p.endswith("/hoctap/montheoky/77") for p in paths)
+
 def test_portal_client_caches_the_token_per_account_and_clear_token_drops_it():
     def opener(request, timeout):
         del timeout
@@ -284,3 +352,214 @@ def test_portal_client_rejects_mismatched_response_geturl_and_oversized_payload(
     with pytest.raises(PortalProtocolError, match="maximum size"):
         client_huge.fetch_day(date(2026, 8, 11), "student", "secret")
 
+
+def test_portal_client_fetch_week_and_credit_progress_isolate_tokens_per_user():
+    tokens_by_user = {"student1": "tok-1", "student2": "tok-2"}
+    auth_headers = []
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            body = json.loads(request.data)
+            return _Response({"success": True, "token": tokens_by_user[body["username"]]})
+        auth_headers.append((request.full_url, request.get_header("Authorization")))
+        if "hoctap/tiendo" in request.full_url:
+            return _Response({"success": True, "body": {"soTinChiDat": 90}})
+        return _Response({"success": True, "body": []})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    client.fetch_week(date(2026, 8, 11), "student1", "secret1")
+    client.fetch_credit_progress("student1", "secret1")  # Reuses student1 token
+    client.fetch_week(date(2026, 8, 11), "student2", "secret2")  # Must re-login for student2
+
+    assert len(auth_headers) == 3
+    assert auth_headers[0][1] == "Bearer tok-1"
+    assert auth_headers[1][1] == "Bearer tok-1"
+    assert auth_headers[2][1] == "Bearer tok-2"
+
+
+def test_portal_client_fetch_week_and_progress_reauthenticate_once_on_401():
+    login_count = 0
+
+    def opener(request, timeout):
+        del timeout
+        nonlocal login_count
+        if request.full_url.endswith("/user/login"):
+            login_count += 1
+            return _Response({"success": True, "token": f"tok-{login_count}"})
+        if request.get_header("Authorization") == "Bearer tok-1":
+            raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+        if "hoctap/tiendo" in request.full_url:
+            return _Response({"success": True, "body": {"soTinChiDat": 100}})
+        return _Response({"success": True, "body": []})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    assert client.fetch_week(date(2026, 8, 11), "student", "secret") == {}
+    assert login_count == 2
+    assert client.fetch_credit_progress("student", "secret") == {"soTinChiDat": 100}
+    assert login_count == 2  # Still valid cached tok-2
+
+
+def test_portal_client_clear_token_during_login_prevents_stale_token_resurrection():
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1")
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            # Simulate account switch / reset mid-flight while login is running
+            client.clear_token()
+            return _Response({"success": True, "token": "stale-token"})
+        return _Response({"success": True, "body": {"ok": True}})
+
+    client._opener = opener
+    progress = client.fetch_credit_progress("student", "secret")
+    assert progress == {"ok": True}
+    # Because generation incremented mid-login, stale-token must NOT be cached
+    assert client._cached_token("student") == ""
+
+
+def test_portal_client_rejects_gzip_bomb_incrementally_without_expanding_full_payload():
+    import tracemalloc
+    import pytest
+    from core.portal_client import PortalProtocolError, _MAX_PORTAL_RESPONSE_BYTES
+
+    bomb_payload = gzip.compress(b" " * (32 * 1024 * 1024), compresslevel=9)
+    assert len(bomb_payload) < _MAX_PORTAL_RESPONSE_BYTES
+
+    class _BombResponse:
+        def __init__(self):
+            self.headers = Message()
+            self.headers["Content-Encoding"] = "gzip"
+
+        def geturl(self):
+            return "https://portal-publicapp.ut.edu.vn/api/v1/lichhoc/lichTuan"
+
+        def read(self, amt=-1):
+            del amt
+            return bomb_payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "tok"})
+        return _BombResponse()
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(PortalProtocolError, match="maximum size"):
+            client.fetch_week(date(2026, 8, 11), "student", "secret")
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Bounded incremental decompression must abort around 8 MiB, nowhere near 32 MiB
+    assert peak < 16 * 1024 * 1024
+
+
+def test_portal_client_accepts_case_insensitive_gzip_content_encoding():
+    class _UpperGzipResponse(_Response):
+        def __init__(self, payload: dict):
+            super().__init__(payload, compressed=True)
+            del self.headers["Content-Encoding"]
+            self.headers["Content-Encoding"] = "GZIP"
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _UpperGzipResponse({"success": True, "token": "tok"})
+        return _UpperGzipResponse({"success": True, "body": {"canDat": 120, "hienTai": 90}})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+    assert client.fetch_credit_progress("student", "secret") == {"canDat": 120, "hienTai": 90}
+
+
+def test_decompress_gzip_bounded_handles_multi_member_over_256kib():
+    import time
+    from core.portal_client import _MAX_PORTAL_RESPONSE_BYTES, _decompress_gzip_bounded
+
+    member_a = b"A" * (300 * 1024)
+    member_b = b"B" * 10
+    payload = gzip.compress(member_a) + gzip.compress(member_b)
+
+    t0 = time.perf_counter()
+    result = _decompress_gzip_bounded(payload, _MAX_PORTAL_RESPONSE_BYTES)
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 0.5
+    assert result == member_a + member_b
+
+
+def test_decompress_gzip_bounded_rejects_multi_member_gzip_bomb_without_oom():
+    import time
+    import tracemalloc
+    import pytest
+    from core.portal_client import (
+        PortalProtocolError,
+        _MAX_PORTAL_RESPONSE_BYTES,
+        _decompress_gzip_bounded,
+    )
+
+    member_5m = gzip.compress(b"X" * (5 * 1024 * 1024), compresslevel=9)
+    bomb = member_5m + member_5m
+
+    tracemalloc.start()
+    t0 = time.perf_counter()
+    try:
+        with pytest.raises(PortalProtocolError, match="maximum size"):
+            _decompress_gzip_bounded(bomb, _MAX_PORTAL_RESPONSE_BYTES)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert (time.perf_counter() - t0) < 1.0
+    assert peak < 24 * 1024 * 1024
+
+
+def test_decompress_gzip_bounded_rejects_truncated_and_trailing_garbage_streams():
+    import pytest
+    from core.portal_client import (
+        PortalProtocolError,
+        _MAX_PORTAL_RESPONSE_BYTES,
+        _decompress_gzip_bounded,
+    )
+
+    ok_gz = gzip.compress(b'{"success": true, "ok": 1}')
+
+    for bad_stream in (ok_gz[:-8], ok_gz[:-1], ok_gz + b"garbage"):
+        with pytest.raises(PortalProtocolError, match="not valid gzip"):
+            _decompress_gzip_bounded(bad_stream, _MAX_PORTAL_RESPONSE_BYTES)
+
+    class _TruncatedResponse:
+        def __init__(self):
+            self.headers = Message()
+            self.headers["Content-Encoding"] = "gzip"
+
+        def geturl(self):
+            return "https://portal-publicapp.ut.edu.vn/api/v1/user/login"
+
+        def read(self, amt=-1):
+            del amt
+            return ok_gz[:-8]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _TruncatedResponse(),
+    )
+    with pytest.raises(PortalProtocolError, match="not valid gzip"):
+        client.fetch_day(date(2026, 8, 11), "student", "secret")

@@ -307,6 +307,7 @@ class Settings(BaseModel):
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
     MOODLE_LOGIN_URL: str = "https://courses.ut.edu.vn/login/index.php"
     PORTAL_API_BASE: str = "https://portal-publicapp.ut.edu.vn/api/v1"
+    PORTAL_WEB_API_BASE: str = "https://portal.ut.edu.vn/api/v1"
     
     # Cài đặt chung của ứng dụng
     THEME: str = Field(
@@ -315,6 +316,7 @@ class Settings(BaseModel):
     )
     SETTINGS_SCHEMA_VERSION: int = Field(default=5, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
+    COURSES_SYNC_INTERVAL_HOURS: int = Field(default=6, description="Chu kỳ làm tươi nền danh mục môn học (giờ)")
     # Deprecated compatibility fields. Runtime scheduling uses only
     # CHECK_INTERVAL_MINUTES; keep these for one migration window so an older
     # settings file can still be read without silently losing its values.

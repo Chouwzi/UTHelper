@@ -26,7 +26,13 @@ class DataOrchestrator:
     
     def __init__(self):
         self.client = MoodleClient()
-        self.moodle_service = MoodleService(self.client.call_ws_api)
+        self.moodle_service = MoodleService(
+            self.client.call_ws_api,
+            grade_report_fetcher=self.client.fetch_grade_report_html,
+            grade_report_error_getter=lambda: getattr(
+                self.client, "last_grade_report_error", ""
+            ),
+        )
         self.thnn_client = MoodleClient("https://thnn.ut.edu.vn")
         self.thnn_service = MoodleService(self.thnn_client.call_ajax_api)
         self._last_thnn_fetch_ts = 0.0
@@ -48,6 +54,11 @@ class DataOrchestrator:
         self._courses_cache: Optional[List[Dict]] = None
         # Giám sát điểm số (Grade monitoring)
         self.grade_monitor = GradeMonitor()
+        # Điểm theo môn (tab Môn học) - đồng bộ vào cùng chu kỳ cập nhật với Tổng quan
+        from core.course_grade_monitor import CourseGradeMonitor
+        self.course_grade_monitor = CourseGradeMonitor()
+        self._course_grades_lock = threading.Lock()
+        self.latest_course_grades: list = []
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -189,6 +200,19 @@ class DataOrchestrator:
             return ws_result
         logger.error("Không thể lấy dữ liệu từ WS API.")
         return []
+
+    def refresh_course_grades(self):
+        """Tải điểm các môn đang học, lưu snapshot và trả (danh sách môn, thay đổi).
+
+        Được gọi trong chu kỳ cập nhật Tổng quan và khi bấm làm mới ở tab Môn học.
+        Khoá để hai luồng không báo trùng cùng một thay đổi.
+        """
+        from core.course_grades_service import fetch_current_courses_with_grades
+        with self._course_grades_lock:
+            courses = fetch_current_courses_with_grades(self)
+            changes = self.course_grade_monitor.update(courses) if courses else []
+            self.latest_course_grades = courses
+            return courses, changes
 
     def check_grade_changes(self) -> List:
         """Check for grade changes using GradeMonitor.
@@ -1068,8 +1092,14 @@ class DataOrchestrator:
     def _fetch_detail_via_ws(self, activity_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Lấy chi tiết bài tập qua WS API - không cần session, không kick browser."""
         # Xác định cmid và course_id từ activity_data
-        url = activity_data.get("url", "")
+        url = str(activity_data.get("url") or "")
         activity_type = activity_data.get("type", "other")
+        if (
+            activity_data.get("site_identity") == "thnn"
+            or urlsplit(url).netloc.lower().endswith("thnn.ut.edu.vn")
+        ):
+            # Tránh gửi nhầm cmid/course_id của THNN sang Moodle WS của courses.ut.edu.vn.
+            return None
         
         # Extract cmid từ URL: /mod/assign/view.php?id=CMID
         cmid = None

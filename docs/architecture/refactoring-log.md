@@ -69,6 +69,14 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-08-24 | `develop` | Dual-Layer AnimatedSwitcher Transitions | Thiết kế kiến trúc 2 tầng chuyển cảnh AnimatedSwitcher độc lập: Layer 0 `tab_switcher` thực hiện chuyển cảnh fade 2 chiều mượt mà 160ms cho các tab chính (Dashboard, Lịch, Cài đặt, Bảng điểm); Layer 1 `detail_switcher` đóng vai trò overlay độc lập mở/đóng mượt thẻ chi tiết bài tập mà không unmount Dashboard/Lịch, vừa bảo toàn 100% vị trí cuộn vừa giữ trọn vẹn hiệu ứng mở/đóng 2 chiều mượt mà | Đạt 1576 passed, 25 skipped |
 | 2026-08-24 | `develop` | Clean Up Subheader Status Text | Bỏ phần đếm tiến độ nộp bài `X/Y đã nộp` / `Đã nộp hết` ở dòng trạng thái đồng bộ (`SyncStatusIndicator`) trên thanh subheader để tránh trùng lặp thông tin, giữ giao diện tinh gọn, không bị tràn/đè chữ lên các nút điều hướng (Lịch, Bảng điểm, Làm mới) trên màn hình nhỏ | Đạt 1586 passed, 25 skipped |
 | 2026-09-11 | `feature/cross-platform-performance` | Fix Detail Countdown, Startup Parallel Sync & Late Submission Grouping | Khắc phục countdown DetailView bị đơ khi Dashboard giữ visible nền; kích hoạt fetch Moodle song song ngay khi khởi động (vẫn nạp cache tức thì); gộp bài tập quá hạn còn hạn nộp muộn vào nhóm Cấp bách (`critical`), badge góc phải `[ KHẨN CẤP ]`, tag góc trái `[ NỘP MUỘN ]`, đếm ngược `Còn X ngày/giờ nộp muộn` và sửa triệt để lỗi gán nhầm badge `[ AN TOÀN ]` cho bài quá hạn | Đạt 1600 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-17 | `feature/courses-tab` | Môn học / Courses & THNN Unified Workspace | Tích hợp workspace Môn học hợp nhất Courses & THNN (`core/courses/*`, `CoursesTabView`, `DocumentReaderView`, `ArchiveExplorerView`), điều hướng thích ứng 5 tab `AdaptiveNavShell` (`NavigationBar` <600px / `NavigationRail` >=600px), `CoursesCoordinator`, phím tắt `Ctrl+K`/`/`/`Esc`, cửa sổ Desktop co giãn `1120x760` (tối thiểu `420x560`), và thống kê/dọn cache xem trước + cache môn học trong `SettingsView` | Đạt 1785 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-17 | `feature/courses-tab` | Courses UX Feedback, PDF Scroll Fix, Rich Word/PPTX & In-App WebView | Khắc phục cuộn lên PDF bị phóng to (`DocumentReaderView` bỏ `InteractiveViewer`, dùng `ListView` + cuộn ngang khi zoom); chuẩn hóa `/ux-feedback` (skeleton + `PaneLoadingOverlay` + `PaneErrorOverlay` + `SnackBar` tải file, bỏ header lặp ở `PaneAssignmentView`/`DetailView`, hiển thị `Không giới hạn`); nâng cấp render `.docx`/`.doc`/`.pptx`/`.ppt` (`AlternateContent`, OMML math, hyperlink, numbering, bảng gộp ô/ẩn viền, layout placeholder, group transform, crop ảnh, SmartArt, Chart); mở trực tiếp mọi liên kết HTTP(S) bằng `CoursesWebViewPane` ngay trong ứng dụng | Đạt 1801 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | WebView2 Native Fix, Quiz Review UX, High-Fidelity Word OOXML & Fast Download/Cache Engine | Sửa dò Edge WebView2 0-arg trên Windows Desktop (`CoursesWebViewPane` + `WindowsWebView2Dock` nạp cookie bất đồng bộ, đồng bộ 60fps, khử triệt để rò rỉ JS/CSS thô trên SPA ngoài như Zalo/Google Meet và HTML Moodle); tái thiết kế toàn diện Xem lại bài làm Quiz (`CourseActivityService` + `QuizActivityView`: đánh số tuần tự `Câu 1..N`, gỡ tiền tố GIFT `::CODE::[html]`, bóc tách lựa chọn A/B/C/D + đối chiếu `.rightanswer`, thẻ tổng quan điểm/độ chính xác, bộ lọc `Tất cả`/`Câu sai`/`Câu đúng` & lưới nhảy nhanh câu hỏi); nâng cấp engine Word OOXML độ chính xác cao (`theme1.xml`, kế thừa đệ quy `styles.xml`, đánh số phân cấp `%1.%2.`, `footnotes`/`endnotes`, kích thước ảnh `wp:extent`, bảng `tblGrid`/`vMerge`/Quốc hiệu, trang giấy A4 thu phóng & `Bản in A4`); tối ưu tốc độ tải & đa tầng cache (tải phân mảnh 64 KB kèm tiến trình `%` + `MB/s`, gộp tải trùng `SingleFlight`, đồng bộ song song `courses` + `thnn`, bỏ gọi thừa `mod_page`, RAM cache `CourseCacheStore`, LRU cache `ConvertedDocument`, dựng trước tài liệu ngoài luồng UI và prefetch nền thông minh) | Đạt 1805 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Fix Live WebView2 Py3.14, Cloudflare HTTP 403 Moodle Sync & Responsive Word Auto-Scale | Cài đặt và khai báo bắt buộc `webview2-Microsoft.Web.WebView2.Core==3.2.1` cho Windows (`sys_platform == 'win32'`) trên cả môi trường Python 3.14, đồng thời gia cố `WindowsWebView2Dock` (dò cây tiến trình cha-con `python.exe <-> flet.exe`, khóa chủ sở hữu `GWLP_HWNDPARENT`, tự động bám sát biên phải/dưới theo `GetClientRect` 60fps); khôi phục `urllib.request.urlopen` chuẩn trong `core/client.py` khắc phục triệt để lỗi Cloudflare chặn `HTTP 403` trên `POST` WS API làm treo `Đang đồng bộ với Moodle...`, kèm fallback trạng thái an toàn trong `DetailView`; bổ sung tự động co giãn tỷ lệ trang Word/Slide/PDF (`DocumentReaderView.sync_bounds` + `fit_ratio`) vừa khít 100% bề ngang Pane 3 không mất lề phải | Đạt 1806 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Apple HIG Courses Redesign, Grades Bento UI, 0ms PDF Dark/Light & Portal Current-Term Sync | Tích hợp API Portal môn đăng ký học kỳ hiện tại (`PortalClient.fetch_current_semester_courses`: `/hoctap/hocky` + `/hoctap/montheoky/{idDot}`) đồng bộ song song 3 luồng trong `CourseCatalogService` (đối chiếu `maHocPhan`/`tenMonHoc` có khóa học kỳ chống nhầm môn học lại, lưu bền vững `CourseCacheStore`), mặc định lọc `Kỳ hiện tại (N)` kèm huy hiệu `{credits} TC` trên `CoursesTabView`/`CourseListPane` và cho phép chuyển thủ công sang `Tất cả` hoặc kỳ bất kỳ; tái thiết kế toàn diện tab `Điểm môn` theo chuẩn Apple HIG Bento + Inset-Grouped (`CourseDetailPane`: thẻ tổng quan điểm trung bình có trọng số/tổng kết + xếp loại `Xuất sắc`/`Khá · Tốt` + KPI, tự bóc trọng số `(20%...)`/`(40%...)` từ tiêu đề UTH, khử nhiễu `0.00 %` & `-`, xếp mục đã chấm lên đầu và gom mục chưa chấm vào ngăn thu gọn `Chưa có điểm / Bài tự luyện`); nâng cấp toàn diện giao diện Môn học theo Apple Cupertino Segmented Pill Control, icon squircle ngữ nghĩa, chọn thẻ `O(1)` tại chỗ (`_card_map`) không dựng lại danh sách; triệt tiêu hoàn toàn độ trễ đổi Dark/Light trên PDF & tài liệu (`_DARK_LUMA_LUT` C-speed, PNG `compress_level=1`, RAM LRU 28 trang `peek_cached_page_png`, pre-warm nền chế độ đối nghịch và `AnimatedSwitcher` 150ms mượt mà); sửa dứt điểm lỗi Flutter `ErrorWidget` mảng xám do truyền `ft.Border` vào `ExpansionTile.shape` (`OutlinedBorder`) và `ft.Padding` vào `Container.margin` (`Margin`), kèm test khóa kiểu MRO cho toàn bộ điều khiển Flet | Đạt 1812 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Polish Apple HIG Visual Restraint on Grades & Quiz Review | Tiết chế màu sắc và đường kẻ theo chuẩn Apple HIG (`CourseDetailPane` + `QuizActivityView`): gỡ bỏ hoàn toàn các vạch dọc màu xanh/đỏ bên trái mỗi dòng điểm & câu hỏi, bỏ thanh `ProgressBar` ngang trong thẻ Hero Điểm môn, dưới từng con điểm và trong thẻ tổng quan Quiz Review; chuyển điểm số/KPI/huy hiệu trọng số về mực chính trung tính sắc nét (`C.TEXT_PRIMARY` / `C.SURFACE_ELEVATED`) kết hợp đường phân tách mảnh `Divider` tinh gọn, chỉ giữ sắc thái màu ngữ nghĩa cho duy nhất nhãn xếp loại tổng quan và điểm cảnh báo thấp (`< 5.0`) | Đạt 1812 passed, 25 skipped; `ruff check src tests` pass |
+| 2026-11-18 | `feature/courses-tab` | Fix Moodle Synthetic index.html Raw HTML Leak & Inline Label Cards | Loại bỏ tệp nội bộ ảo `index.html`/`structure` của Moodle trên `mod_page`/`mod_label`/`mod_book` (`providers.py`, `real_module_attachments`), ẩn hoàn toàn các `mod_label` khoảng trắng rỗng (`<div class="no-overflow"><p>   </p></div>`), hiển thị trực tiếp nội dung thông báo & nút liên kết Meet/URL của `mod_label` ngay trong từng chương (`CourseDetailPane._label_inline_card`), định tuyến `page`/`book`/`label` đã lưu cache sang `RichContentActivityView`/inline reader thay vì tải `index.html`, và bổ sung bộ chuyển đổi `.html`/`.htm` sang Markdown + HTML sạch chống rò rỉ thẻ HTML thô trong `DocumentReaderView` | Đạt 1814 passed, 25 skipped; `ruff check src tests` pass |
+
 | 2026-11-18 | `feature/86-class-schedule-notification` | Refactor Class-Schedule Reconcile Use Case | Chuyển use case `_reconcile_class_schedule_notifications` (~99 dòng) từ `AppController` sang `NotificationManager.reconcile_class_schedule_notifications` (thêm `asyncio.Lock` tuần tự hóa các lần reconcile, re-check danh tính tài khoản sau mỗi await để không ghi đè lịch của tài khoản mới); `AppController` chỉ còn delegate qua `_fetch_tomorrow_sessions` + `identity_getter` | Test suite xanh, `ruff check src tests scripts` pass |
 | 2026-11-19 | `feature/86-class-schedule-notification` | Harden Class-Schedule Notification Races (Review round 4-5) | Trong `NotificationManager.reconcile_class_schedule_notifications`: snapshot danh tính/tài khoản ngay khi tạo task, bỏ qua guard danh tính đối với `clear_only=True`, gắn `credentials_available` vào `enabled`, và bắt riêng `ScheduleAuthenticationError` để đặt `enabled=False` + dọn lịch cũ thay vì nuốt lỗi rồi vẫn lên lịch từ cache. `TodayScheduleCoordinator.ensure_today`/`refresh("startup")` chỉ dùng cache khi cả username lẫn password đều có, nhánh credentials_changed gọi `refresh("credentials_changed")` thay vì `ensure_today`, `_on_login_success` xếp `clear_only` trước `refresh("login")`. `PortalClient` thêm token generation counter để `clear_token()` không thể bị một fetch chậm khôi phục. Native: nhánh `logout` của Android/iOS chỉ dọn dữ liệu Moodle (lịch Portal chuyển qua `schedule_class_sessions([], enabled=false)`), lần teardown cũng gỡ banner class đã hiển thị trên tray. | Đạt 1671 passed, 25 skipped; `ruff check src tests scripts extensions/flet_uth_background_sync/tests` pass |
 | 2026-11-21 | `feature/store-distribution-chplay-msstore` | Store M1 Security, Privacy & Autostart UI Hardening | Loại bỏ lưu plaintext secret trên Android trong `src/config.py` qua `SecretStoreBackend` / `AndroidSecretBackend` (`AppSecretVault` `AndroidKeyStore`) và startup migration an toàn trong `AppController._startup_android_sequence`; vệ sinh log lỗi `TelegramNotifier` / `DiscordNotifier` và bắt buộc `https://` cho webhook; pin redirect & `https://` cùng giới hạn payload 8 MiB trong `PortalClient`; siết chặt `windows_update._launch_elevated_handoff` (bỏ fallback `%TEMP%`, kiểm tra symlink/reparse point, tạo thư mục với `SE_DACL_PROTECTED`, ghi file `O_EXCL`, `System32` cwd); đưa `_autostart_status` ra ngoài `_sw_start_minimized_container` để hiển thị trạng thái StartupTask khi tắt; cập nhật `docs/PRIVACY.md`. | Đạt 270/270 owned + boundary tests (373/373 gồm packaging/UI); `ruff check src tests` pass |
@@ -76,6 +84,10 @@ Tài liệu này ghi lại các phân tích cấu trúc, quyết định kỹ th
 | 2026-11-21 | `codex/84-embedded-quiz` | Embedded Quiz M2 Integration, WebView Hardening & Bootstrap Fix | Merge `origin/develop` (`9788310`, `--no-ff`), giải quyết sạch 3 conflict (`.github/workflows/build-android.yml`, `.github/workflows/ci.yml`, `refactoring-log.md`); chặn subframe không phải `https://`/`about:blank` trên Android bằng `regexToCancelSubFramesLoading`, tắt DevTools (`isInspectable: false`), sửa rò rỉ main-frame `onCreateWindow -> false` trên Windows/iOS qua offstage cancelling sink + kiểm tra `onLoadStart`, đồng bộ origin parity `TrustedMoodleUri`, retry xóa thư mục WebView2 + `UthQuizSessionCleaner` dọn profile/cookies khi đổi tài khoản/logout, sửa treo `uv` trampoline (`PYTHONHOME`/`UV_INTERNAL__PYTHONHOME`) + timeout/low-disk/opt-out/`sys.path` rollback trong `quiz_client_bootstrap.py` & `src/main.py`, polish UX SEB/closed và guard `build-msstore.yml`/`verify_windows_bundle.py`. | **2340 passed, 25 skipped**, Ruff pass, Flutter (`flet_uth_quiz`) 23/23 pass, `verify_windows_bundle.py` pass |
 | 2026-11-21 | `codex/84-embedded-quiz` | Embedded Quiz M2 Iteration 2 Hardening | Loại bỏ các file sinh bởi Flutter (`.flutter-plugins-dependencies`, `pubspec.lock`, `.flutter-plugins`, `.packages`, plugin registrant) khỏi `_client_fingerprint()` để `py src/main.py` luôn dùng lại bản Windows client đã cache; phát hiện SEB/closed/exhausted ngay trên phản hồi POST `startattempt.php` trong `QuizPreparedEntry.enter()` và đưa `requires_safe_exam_browser` vào nhánh unavailable của `QuizPlayerView`; dọn persisted quiz sessions trong `AppController._complete_login_success` khi đổi tài khoản và player đang ẩn; siết `quizSubframeCancelRegex` (`(?![\s\S])`, `[^\x00-\x1f\x7f\\]*`, chặn `\x80-\x9f` ở authority, đối chiếu Java 21 + Dart) và thêm monotonic counter `_profileFallbackCounter` + kiểm tra live `activePaths` trong `sweepQuizProfileDirectories`. | **2348 passed, 25 skipped**, Ruff pass, Flutter (`flet_uth_quiz`) 25/25 pass, `verify_windows_bundle.py --expected-version 2.5.1` pass |
 | 2026-11-21 | `codex/84-embedded-quiz` | Embedded Quiz M2 Iteration 3 MSVC STL1011 Fix | Điều tra lỗi biên dịch Windows `STL1011` (`error C2338` trên `<experimental/coroutine>`) ở `flutter_inappwebview_windows` (`flutter_inappwebview: 6.1.5`, bản stable mới nhất; bản `6.2.0-beta.3`/`0.7.0-beta.3` vẫn dùng `cxx_std_17` và WIL `1.0.250325.1` có `#include <experimental/coroutine>` trong `wil/cppwinrt_helpers.h`). Bổ sung an toàn `/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` vào biến môi trường `CL` (append không ghi đè cờ sẵn có) trong `.github/workflows/build-msstore.yml`, `.github/workflows/release.yml`, `.github/workflows/package-benchmark.yml`, `scripts/build_windows_release.ps1` và `src/platform_utils/quiz_client_bootstrap.py` (`_with_msvc_experimental_coroutine_cl_flag`); cập nhật hướng dẫn `docs/guides/windows-packaging.md`, `docs/guides/store-distribution-submission.md` và thêm regression tests trong `tests/test_quiz_packaging.py`, `tests/test_release_hardening.py`. | **2355 passed, 25 skipped**, Ruff pass, Flutter (`flet_uth_quiz`) analyze + 25/25 pass, `ensure_windows_quiz_client` + `prepare_windows_bundle.py` + `verify_windows_bundle.py --expected-version 2.5.1` pass |
+| 2026-11-22 | `fix/nav-settings-mobile-layout` | Milestone 1: Navigation Latency, Hover, Settings Snap-back & Mobile Layouts (F1–F9) | Khắc phục độ trễ 3s & kẹt hover khi chuyển `Lịch -> Bảng điểm` trên Desktop (F1), độ trễ 3s mở `Lịch` trên Mobile (F2), độ trễ 0.2–0.5s chuyển tab (F3), lỗi nhảy ngược về `Cài đặt` khi thoát sang tab khác & lựa chọn `"not_asked"` của `privacy_section` (F4), rớt dòng nhãn `NavigationBar` (`Tổng quan`, `Bảng điểm`) (F5), cắt chip học kỳ & thiếu `on_resize` trên Mobile ở `Môn học` (F6), rớt dòng tiêu đề `Bảng điểm` (F7), lệch/khuất `Hồ sơ học tập` & nhãn `Giữ Nhịp` trên Radar (F8), và tràn/khuất chữ trong dialog `Tính GPA mong muốn` & `MetricDetailSheet` (F9). File đã chạm: `src/gui/app_controller.py`, `src/gui/view_manager.py`, `src/gui/core/theme.py`, `src/gui/components/courses/adaptive_nav.py`, `src/gui/components/courses/course_list_pane.py`, `src/gui/components/courses/_shared.py`, `src/gui/components/calendar_view.py`, `src/gui/components/grade_overview_view.py`, `src/gui/components/settings_view.py`, `src/gui/components/settings/privacy_section.py`, `src/gui/components/academic_radar/{grade_list_view,radar_card,radar_chart,gpa_target_card,graduation_gpa_card,metric_detail_sheet}.py`, cùng regression tests trong `tests/{test_courses_app_integration,test_courses_m3_mobile_ui,test_grade_overview_view,test_rail_navigation,test_settings_view_state,test_terms_dialog,test_theme_accessibility,test_view_manager_calendar}.py`. | **2906 passed, 26 skipped**; `ruff check src tests` pass |
+| 2026-11-22 | `fix/nav-settings-mobile-layout` | Milestone 1 CI Fix: Theme Isolation & `_rebuild_colors` Guards | Khắc phục lỗi CI Python 3.12/3.13/3.14 trên PR #126 tại `test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings`: đồng bộ khôi phục và cô lập `load_theme_from_settings()` trong `tests/test_rail_navigation.py` (tránh lệch `C` với default `COLOR_*` khi runner không có `settings.json`), bổ sung kiểm chứng ép `_rebuild_colors` thật khi thoát Cài đặt, và phòng vệ `getattr(..., None)` cho các control tùy chọn trong `AppController._rebuild_colors` (`src/gui/app_controller.py`) để an toàn với partial controller double mà vẫn giữ nguyên hành vi. | CI suite & `ruff check src tests` pass |
+| 2026-11-22 | `feature/grades-gpa-two-tab-popup` | Milestone 2: Current-Semester GPA Fallback, 2-Tab Course Popup & Scroll Fix (F10–F12) | Tính fallback `gpa_10`, `gpa_4` (qua `course_point4`) và `credits_earned` cho học kỳ hiện tại khi `tongKetDot` của Portal rỗng/thiếu trong `src/core/academic_radar/calculator.py` & `gpa_planner.py` (giữ Portal summary là nguồn ưu tiên và trả `None` khi chưa có môn hợp lệ có điểm cuối) (F10); bảo toàn `0.0`, `"isDat": None`, `class_code`, `pass_status` và các trường Portal chưa map vào `extra_portal_fields` (`src/core/academic_radar/{models,normalizer}.py`), trích xuất renderer điểm Moodle dùng chung `src/gui/components/courses/grade_rows.py` từ `course_detail_pane.py`, bổ sung lookup `CourseCacheStore` + fetch theo yêu cầu `CourseCatalogService` (dự phòng `CourseGradeMonitor`) trong `AppController` & `course_grade_table.py`, và nâng cấp popup môn học thành 2 tab `Portal` \| `Course` responsive mobile không lặp lại `QT/Thi/TK` (`course_components_dialog.py`, `grade_overview_view.py`) (F11); đặt `autofocus=False` cho `KeyboardListener` trên 6 dialog của `academic_radar`/`GradeOverviewView`, chuyển tiếp `on_dismiss`, thêm guard giữ/khôi phục đúng vị trí cuộn `GradeOverviewView._scrollable_content` và `GradeOverviewView.handle_back()` vào `AppController._navigate_back()` để chống giật scroll lên đầu khi đóng popup (F12). File đã chạm: `src/core/academic_radar/{calculator,gpa_planner,models,normalizer}.py`, `src/gui/app_controller.py`, `src/gui/components/{course_grade_table,grade_overview_view}.py`, `src/gui/components/courses/{course_detail_pane,grade_rows}.py`, `src/gui/components/academic_radar/{course_components_dialog,expected_grade_dialog,gpa_detail_sheet,metric_detail_sheet,radar_card}.py`, cùng regression tests trong `tests/{test_academic_radar_calculator,test_academic_radar_service,test_grade_overview_view,test_gui_app_controller}.py`. | **2958 passed, 26 skipped** (bao gồm `tests/`, `extensions/flet_uth_quiz/tests/`, `extensions/flet_uth_background_sync/tests/`); `ruff check src tests` pass |
+| 2026-11-22 | `feature/grades-gpa-two-tab-popup` | Milestone 2 Iteration 2: Hardening Edge Cases, Mobile KV Layout & Modal Scroll Guard Races | Phòng vệ `summary=None` và chuẩn hóa `_optional_float` trong `calculate_total_power` (`calculator.py`), đồng bộ `_parse_float` & `CourseEligibilityResolver.resolve` với `bool`/`nan`/`inf`/dấu phẩy/tín chỉ `"-"` (`normalizer.py`, `eligibility_resolver.py`) (F10); không để `CourseGradeMonitor` cũ che khuất `CourseSummary` đã khớp khi cache rỗng và yêu cầu `len(s_code) >= 6` khi khớp tiền tố (`app_controller.py`, `course_grade_table.py`); cân bằng tỷ lệ flex `2:3` + `ELLIPSIS` trong `_build_kv_row` cho màn hình 360px và suy diễn `Kết quả` qua `course_point4 >= PASS_POINT` khi `pass_status=None` (`course_components_dialog.py`) (F11); gỡ `_closed_dialog_offsets` để `_end_modal_scroll_guard` lũy đẳng, chỉ khôi phục scroll khi `_open_dialog_tokens` rỗng, xóa `_active_dialog_closer` ngay khi bắt đầu đóng qua `handle_back()`/`on_closing`, gọi `_notify_dismiss()` khi `pop_dialog()` fallback, và đồng bộ `inset_padding`/`content_padding` mobile cho `GpaDetailSheet` & `ExpectedGradeDialog` (`grade_overview_view.py`, `course_components_dialog.py`, `metric_detail_sheet.py`, `radar_card.py`, `gpa_detail_sheet.py`, `expected_grade_dialog.py`) (F12), cùng regression tests trong `tests/{test_academic_radar_calculator,test_academic_radar_service,test_grade_overview_view,test_gui_app_controller}.py`. | **2964 passed, 26 skipped** (bao gồm `tests/`, `extensions/flet_uth_quiz/tests/`, `extensions/flet_uth_background_sync/tests/`); `ruff check src tests` pass; `test_architecture_boundaries.py` 5/5 pass |
 
 
 ---
@@ -1974,6 +1986,53 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   number `2004001`) for the corrected build source. Native success and release
   publication must be confirmed by the protected workflow.
 
+## Môn học / Courses & THNN Unified Workspace (2026-11-17)
+
+- **Scope & Boundaries (`feature/courses-tab`)**:
+  - Kept `core/courses/*` pure of `gui` imports (`models`, `shortname_parser`,
+    `cache_store`, `preview_cache`, `providers`, `catalog_service`,
+    `archive_service`, `document_converter`, `local_preview_server`).
+  - Added `src/gui/components/courses/adaptive_nav.py` (`AdaptiveNavShell`,
+    `NAV_DESTINATIONS`, `RAIL_BREAKPOINT = 600`, `RAIL_WIDTH = 88`) coordinating
+    the 5-tab `NavigationBar` (`< 600px`) and `NavigationRail` (`>= 600px`).
+  - Added `src/gui/controllers/courses_coordinator.py` (`CoursesCoordinator`)
+    to decouple `AppController` from `PreviewFileCache`, `ArchiveService`,
+    `LocalPreviewServer`, `DocumentReaderView`/`ArchiveExplorerView` overlays,
+    optional `UthQuizWebView` fallback, `FilePicker().save_file`, and safe
+    external launch guards (routing executable extensions to Save As).
+  - Updated `src/gui/view_manager.py` (`show_courses`, destination sync,
+    `courses_view` origin tracking behind `detail_switcher`),
+    `src/gui/components/desktop_window_header.py` (optional maximize button),
+    `src/main.py` and `src/gui/app_controller.py` (resizable `1120x760` desktop
+    bounds, `on_resize` responsiveness, `RAIL_WIDTH` filter menu offset,
+    `Ctrl+K`/`/`/`Esc` shortcuts, `_navigate_back` priority, theme propagation,
+    and disconnect cleanup), and `src/gui/components/settings_view.py`
+    (cache stats and cleanup for `PreviewFileCache` and `courses_catalog_*` /
+    `course_tree_*` / `courses_cache_*`).
+- **Verification**:
+  - Added `tests/test_courses_app_integration.py` and updated
+    `tests/test_desktop_window_header.py` and `tests/test_startup_visibility.py`.
+  - `python -m pytest tests -q --tb=short`: **1785 passed, 25 skipped**.
+  - `ruff check src tests`: all checks passed (0 errors).
+
+## Môn học V2: Native Readers, Authenticated In-App WebView & Pane-3 UX (2026-11-17)
+
+- **Scope & Boundaries (`feature/courses-tab`)**:
+  - **Dependencies (`pyproject.toml`)**: Added `pypdf>=6.9.0`, `xlrd>=2.0.2`, `olefile>=0.47` to base dependencies; `webview2-Microsoft.Web.WebView2.Core==3.2.1` + `pypdfium2>=5.9.0` to `windows` / `[tool.flet.windows]`; `flet-webview==0.86.5` + `pypdfium2>=5.9.0` to `[tool.flet.android]`; `flet-webview==0.86.5` to `[tool.flet.ios]`.
+  - **Native PDF & Document Support (`core/courses/*`)**:
+    - Created `src/core/courses/pdf_renderer.py` (`PdfDocumentSession` with `pypdfium2` + `PIL` primary backend and `pypdf` fallback, YCbCr dark-mode luminance inversion, in-PDF text search, outline extraction, and bounded `96 MiB` PNG LRU cache under `preview_cache/rendered_pdf/`; cleanup wired in `SettingsView._do_clear_data_cache`).
+    - Extended `archive_service.py` with `.7z` inspection & extraction strictly via `7z`/`7za` (`find_windows_7z_cli`).
+    - Extended `document_converter.py` with `DocxRichBlock`, `PptxSlideRich` (inline raster media & tables), and OLE2 `.doc` / `.xls` / `.ppt` support.
+    - Extended `providers.py`, `ws_functions.py`, `moodle_service.py`, `client.py`, and `catalog_service.py` with live THNN fixes (JSON-string `core_courseformat_get_state`, `/grade/report/user/index.php` HTML gradebook parsing, `pluginfile.php` resource resolution), session cookie export, form submission helpers, and `CourseActivityService` (`src/core/courses/activity_service.py`).
+    - Extended `LocalPreviewServer` with SSRF-guarded `/session/{bridge_token}/{source}/...` reverse proxy (`GET`/`HEAD`/`POST`, `X-Frame-Options` stripping, same-origin HTML link/form rewriting).
+  - **Pane-3 Default UX & In-App Views (`gui/components/courses/*`, `CoursesCoordinator`)**:
+    - Refactored `CoursesTabView` so all viewers and activities open inside Pane 3 (`_workspace_stack`) by default with Panes 1 & 2 visible, smooth 220ms `width`/`opacity` expand/collapse toggle (`3` <-> `2+3`, `Ctrl+\` / `F11`, `Esc`), overlay disposal on course switch, and `on_tab_hidden()` / `on_tab_shown()` lifecycle hooks in `ViewManager`.
+    - Upgraded `DocumentReaderView` (native multi-page PDF reader with 5-page progressive hydration, paginated/filterable Excel `120x40` view, rich DOCX/PPTX), added `CoursesWebViewPane` (`WindowsWebView2Dock` + `flet_webview` + HTML fallback), and added native Pane-3 `AttendanceActivityView`, `GroupActivityView`, `QuizActivityView`, `ForumActivityView`, `RichContentActivityView`, and `PaneAssignmentView`.
+- **Verification**:
+  - Added `tests/test_courses_pdf_and_legacy_docs.py` and `tests/test_courses_activities_and_webview.py`.
+  - `python -m pytest tests -q --tb=short`: **1795 passed, 25 skipped**.
+  - `ruff check src tests`: all checks passed (0 errors).
+
 ## Theme preview mode synchronization (2026-11-16)
 
 - Theme previews already applied draft colors globally, but `set_page_theme`
@@ -2146,6 +2205,74 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   `0.2000000000116s` exceeded the test's `0.2s` limit. Ruff is not installed in
   the local environment.
 
+## Courses integration, offline Office previews and mobile reader (2026-11-21)
+
+- Preserved the existing course work in an isolated topic checkout, then merged
+  remote course and develop history. Grade loading retains both adaptive navigation
+  and develop's theme refresh after attachment.
+- Replaced extracted Office text as the primary WebView path with pinned offline
+  DOCX pages and PPTX SVG slides. Bundled licenses/notices, locked build and asset
+  hashes; validated package expansion before rendering and local tokenized URLs.
+- Added optional local Windows Office PDF export off the UI thread. Documents
+  stay on device, macro execution is disabled, original save/open actions remain
+  original bytes, active Office sessions are left untouched and link options are
+  restored. Static layout limits and rendering boundaries are recorded in ADR0005.
+- The reader now mounts a host's actual Flet control and owns host bounds,
+  suspension, theme and disposal. Missing session clients retain an in-app recovery
+  pane; only an explicit external icon opens the browser.
+- Phone PDF search collapses, bookmarks use a modal sheet, page images pinch zoom,
+  wide fallback tables scroll and pagination wraps. Corrected E2E palette cleanup
+  to restore its incoming palette instead of changing unrelated tests' defaults.
+- Verification: 187 focused course/UI cases passed; full course integration suite
+  subsequently passed **2072 tests, 25 skipped**. Actual local Office exported
+  synthetic DOCX/PPTX to two-page PDFs. Local Chrome at 390px displayed original
+  packages with slide geometry/navigation/notes and no JavaScript errors. Windows
+  host rendered the DOCX in its exact-title fixture window. Startup binding now
+  waits for that window instead of selecting an unrelated Flutter window, handles
+  64-bit process snapshots, and has positive/ambiguity regressions. Further native
+  interactions are blocked by an unrelated Windows privacy-permission dialog;
+  wide/mobile browser fixture and native/device acceptance remain distinct.
+
+- Follow-up review found the Windows host continued navigation after its cookie
+  provider failed or disposal occurred during authentication. It now retains the
+  successful cookie/navigation path, reports refresh failure before navigation,
+  and stops disposed work. Each pane uses a separate InPrivate profile so a prior
+  account's shared browser storage cannot supply authentication.
+- Initial Linux CI exposed an undeclared test dependency: mobile host contracts
+  import the real `flet_webview` wrapper. CI installs the pinned wrapper alongside
+  pytest; runtime platform dependency choices are unchanged. Focused host/session
+  regression suite: **27 passed**, Ruff clean; full/CI checks are rerun on the
+  follow-up commit.
+
+- Course quiz start now has a dedicated app-entry callback, separate from history/
+  review WebViews, for integration with the native quiz branch. Its primary action
+  is unavailable at a known exhausted limit, while in-progress/overdue attempts,
+  fresh attempts and unlimited quizzes remain available. Module and quiz instance
+  identifiers remain distinct. Native entry remains authoritative when metadata
+  changes. Windows popup navigation also reuses the outer HTTP(S) URL guard.
+  Baseline verification failed eight new cases; the bounded repair passes all
+  thirteen callback/session/popup cases. Native callback wiring is validated in
+  the cross-branch integration checkout.
+
+- Linux CI exposed another fixture race: the assignment scenario expected a
+  background fetch to finish before its initiating callback returned, and its
+  short-lived asyncio loop could cancel the scheduled job. The fake now queues
+  and explicitly drains fetch/retry jobs, preserving the real persistent-loop
+  contract. CI reports the whole suite instead of stopping at its first failure.
+- The full Linux CI run then identified two Windows fixture boundary errors: a
+  fake dock imported real Win32 modules, and a Windows-routing check left the
+  runner's platform as Linux. The fixtures now model those boundaries explicitly;
+  all eleven focused packaging/host cases pass. No production runtime was made
+  unavailable to satisfy these checks.
+
+- Review against the real course activity service found that attempt states are
+  localized before reaching the course quiz view. The prior English-only check
+  could disable a resumable attempt at its limit. The view now recognizes both
+  raw and localized states and treats only known terminal states as proof of
+  exhaustion; unknown states proceed to the authoritative entry check. Three
+  positive regressions failed on the previous commit; all ten cases now pass,
+  including a service-to-view check preserving module/quiz identifiers.
+
 ## Preserve class reminders after a transient timetable failure (2026-11-21)
 
 - A failed request for tomorrow's timetable was logged, then reconciliation
@@ -2227,47 +2354,289 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `flutter analyze --no-pub && flutter test --no-pub` (`extensions/flet_uth_quiz/flutter/flet_uth_quiz`): **No issues found!**, **23/23 tests passed!**.
   - Built real Windows client via `quiz_client_bootstrap.ensure_windows_quiz_client(Path('.'))`, prepared & verified `build/windows` via `prepare_windows_bundle.py` + `verify_windows_bundle.py` (**passed**). Live quiz `784921` was left untouched (1 attempt remaining).
 
+## Responsive class schedule review (2026-11-21)
+
+- Replaced the fixed-width, horizontally scrolling timetable with a one-day
+  agenda below 920 px and seven day columns on wider screens. The agenda and
+  week view retain date selection across reflow and use day or week navigation
+  according to the current width.
+- Schedule summaries show the session time, subject, class code, and room. The
+  existing detail view continues to carry lecturer, campus, notes, outline, and
+  Portal/Zoom links. Portal fetch, cache, account namespace, refresh, and
+  notification paths were left intact.
+- Headless Chrome against the Flet WebRenderer at 390×844 and 1120×850 showed
+  no horizontal page overflow. Synthetic fixture captures covered long course
+  and room names, next-day keyboard navigation, empty day/week, loading, and
+  light/dark themes. The detail dialog closed on Escape and restored focus to
+  its invoking action. Chromium exposed the dialog as `alertdialog` with an
+  empty accessible name even though its title is present in the semantics text;
+  that Flet web semantics limitation remains. Native/device visual acceptance
+  was not recorded because a Windows system permission dialog occluded native
+  captures.
+- Focused source regressions: **74 passed**. The first full-suite run reported
+  1,697 passed, 25 skipped, and one settings-test fixture failure; the fixture
+  now models both Portal clients and the schedule cache, and its focused test
+  passes. The full suite was not rerun after that fixture repair. Ruff is not
+  installed in the local environment.
+
+## M3 Part A: PR #99 hardening, in-app WebView default, and schedule/courses/radar UX & accessibility (2026-11-21)
+
+- **Gitflow Merge & Repo Hygiene**:
+  - Merged `origin/develop` (`1af2fef`, post-M1 + M2) into `feature/Lich-hoc` with `--no-ff` (`0470b52`), preserving all M1 Store/Security (`SecretStoreBackend`, `AndroidKeyStore`, `distribution.py`, `android_updates.py`, `PortalClient` origin/8 MiB hardening, `_startup_android_sequence`, transient-failure reminder guard) and M2 Quiz (`QuizSessionLease`, `QuizPlayerView`, `quiz_client_bootstrap`, `FLET_FORCE_WEB_SERVER`, `extensions/flet_uth_quiz`) work, keeping both `'courses_view'` and `'quiz_player_view'` in `AppController._rebuild_colors` and retaining all prior log entries.
+  - Removed 4 stray tracked files at repository root (`cd`, `git`, `py`, `COMMAND_BUILD.md`).
+  - Fixed `packaging/windows/Package.wxs:42` (`DesktopShortcut` `<RegistryValue Root="HKCU" ...>`) so per-user MSIX/WiX shortcut registration matches `InstallScope="perUser"` without requiring HKLM elevation.
+- **Security, Token Isolation, Session/Cache & PR #99 Fixes**:
+  - Added `src/core/url_validation.py` (`validate_https_url`, `is_trusted_uth_lms_url`) enforcing strict `https://`, clean host, no embedded credentials, no control characters, and trusted UTH origins for LMS links.
+  - Refactored `PortalClient.fetch_week` and `fetch_credit_progress` (`src/core/portal_client.py`) to use `_current_generation()`, `_cached_token(username)`, `_login(...)`, and `_store_token(...)` with M1's `_SamePortalOriginRedirectHandler` and `_MAX_PORTAL_RESPONSE_BYTES`.
+  - Wrapped `MoodleClient.fetch_grade_report_html` (`src/core/client.py`) in `with self._session_lock:`, added `_session_owner` / `clear_session()` / `_reset_session_if_account_changed()`, and exposed `fetch_grade_report_html` / `last_grade_report_error` on `MoodleService` (`src/core/moodle_service.py`, `src/core/data_orchestrator.py`, `src/core/course_grades_service.py`) so `CourseGradesService` never reaches into `orchestrator.client`.
+  - Namespaced `CourseGradeMonitor` (`course_grades_snapshot_<digest>.json`, single grade-change alert vs duplicate `%` alert) and `AcademicGradeService` (`portal_grades_cache_<digest>.json`, `portal_progress_cache_<digest>.json`, `SafeFileIO`, username redacted from `logger.info`), fixed `"heSo"` proportional factor conversion in `normalizer.py`, and deduplicated retaken courses by highest `credit_grade` in `gpa_planner.py`.
+  - Guarded `_portal_week_client`, `_week_schedule_cache`, and `calendar_view.reset_schedule` with `getattr(...)` across `_complete_login_success` and `_on_settings_saved` in `src/gui/app_controller.py`; eliminated redundant N+1 HTML grade scraping in `_check_grades_background`; fixed `ScheduleWeekView._prefetch_async` generation checks inside loop and post-sleep and cleared `_weeks`/`_live_at` on `ScheduleAuthenticationError`.
+- **In-App WebView Default & Explicit External Opt-Out**:
+  - Added `src/gui/components/in_app_webview.py` (`InAppWebViewDialog` + `supports_native_webview`) and `flet-webview==0.86.5` in `pyproject.toml` (`[tool.flet.android.dependencies]` / `ios.dependencies`). Native `flet_webview.WebView` opens on Android/iOS/macOS; Windows/Web uses a bounded HTTPS preview reader with an explicit `"Mở bằng trình duyệt ngoài"` opt-out button (never silently launching the external browser).
+  - Routed `ScheduleWeekView`, `CalendarView`, `DetailView` (`"Mở trong ứng dụng"`, Markdown links, and post-submission links), and `AppController` links through `on_open_url` by default with explicit `Icons.OPEN_IN_NEW_ROUNDED` external opt-out buttons (`44x44`, `ft.Semantics`), keeping `UthQuizPlayer` same-origin quiz pinning intact.
+- **Responsive Layout, Theme Propagation & Accessibility**:
+  - Updated `ScheduleWeekView` (`update_theme`, `_initial_layout_width` subtracting `_RAIL_WIDTH`, responsive clamped `_show_outline` & `_show_session_details` modals with `modal=True`, `semantics_label`, `Escape`, focus restore, `height=44` retry), `CalendarView` (skip `_render_week()` in `"schedule"` mode, `height=44` mode pills, `expand=True` week strip cells), `CoursesView` & `ViewManager` (`update_theme()`, compact 3-tile summary bar via `expand=True` + tightened padding/2-line labels, `set_stale_notice()`), `GradeOverviewView` & `academic_radar/*` (`<404px` dynamic radar chart scaling, clamped scrollable modals/sheets, explicit error retry, info dialog), `DesktopWindowHeader`, `TodaySchedulePanel`, `DetailView`, and `AppController` (`_sync_rail_active()` on Calendar/Grades close, mobile `44x44` header targets).
+  - **Flet Web Semantics Note**: Verified in Chromium (`Flet 0.86.5` WebRenderer) that `AlertDialog(..., semantics_label=...)` maps the inner dialog surface to `SemanticsRole.alertDialog` (`dhB`) alongside an outer `namesRoute` semantics node carrying the label; pairing `semantics_label` on both `AlertDialog` and its `title` ensures assistive tech announces the dialog title cleanly.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2423 passed, 26 skipped** (0 failed).
+  - Playwright + Flet ASGI Web verification (`360x800`, `390x844`, `1120x850`, dark `midnight_blue` & light `steel_light`): **PASS** (`0` console/page errors, `0` horizontal overflow across Schedule, Session Details, Outline, Calendar, Courses, Grades, Detail, and `InAppWebViewDialog`; `Escape` dismisses modals and `InAppWebViewDialog` opens in-app without leaving the page; `trình duyệt ngoài` icon buttons exposed in Chromium AXTree).
+
+## M3 Part A Iteration 2b: Verifier & Challenger Remediation (2026-11-21)
+
+- **ScheduleWeekView Prefetch & Resize Shrink (`src/gui/components/schedule_week_view.py`)**:
+  - Tracked `_prefetch_task` and `_prefetch_generation` so `reset()` cancels any running prefetch task, clears `_prefetching` / `_prefetch_generation`, and restarts the 9-week `±4` background prefetch immediately when `visible=True`, while `finally:` only clears state when `_prefetch_generation in (None, generation)`.
+  - Updated `_on_size_change()` to re-render on any shrink in wide mode (`width < previous_width` and `width >= 920`) or width delta `>= 8px`.
+- **PortalClient Streaming Gzip Bomb Protection (`src/core/portal_client.py`)**:
+  - Replaced single-shot `gzip.decompress(raw)` with `_decompress_gzip_bounded()` using `zlib.decompressobj(16 + zlib.MAX_WBITS)` in bounded chunks (`step = 64 KiB`, output slice `min(256 KiB, remaining)`), aborting immediately at `_MAX_PORTAL_RESPONSE_BYTES` (`8 MiB`) and matching `Content-Encoding` case-insensitively (`"gzip" in ...lower()`).
+- **In-App WebView SSRF & Markdown URI Sanitization (`src/core/url_validation.py`, `src/gui/components/in_app_webview.py`, `src/gui/core/utils.py`)**:
+  - Added `validate_public_https_url()` in `src/core/url_validation.py` rejecting `localhost`, `.localhost`, `.local`, literal unsafe IPs, and DNS-resolved loopback/private/link-local/multicast/unspecified/reserved/non-global IPs (`ipaddress.ip_address` + `socket.getaddrinfo`, including IPv4-mapped IPv6). Wired into `InAppWebViewDialog`, `_fetch_https_preview`, and `_HttpsOnlyRedirectHandler`.
+  - Added case-insensitive `on_page_started` and `on_url_change` scheme/host validation on native `flet_webview.WebView` that closes the dialog if an untrusted URL appears.
+  - Sanitized `<a href=...>` and `<img src=...>` in `html_to_markdown()` so only clean `http://`/`https://` URLs (plus internal `cache/images/<sha256>.<ext>` assets for cached Moodle images) are emitted as Markdown links/images, stripping `javascript:`, `data:`, `vbscript:`, and `file:` URIs to plain text.
+- **DetailView Copy, Academic Radar Modal Escape & Code Hygiene**:
+  - Aligned `DetailView.update_detail()` CTA text (`"Mở trong ứng dụng"`) and non-SEB/non-THNN notice strings with the in-app WebView default while keeping `_header_open_btn` labeled `"Mở bằng trình duyệt ngoài"`.
+  - Added `Escape` `KeyboardListener` and `page.pop_dialog()` dismissal (with overlay fallback) to `GradeOverviewView._show_planner_dialog`, `ExpectedGradeDialog`, `GpaDetailSheet`, `show_course_components_dialog`, and `MetricDetailSheet`.
+  - Removed the dead 2-mode branch in `CalendarView.update_theme` and duplicate `grades_btn` update in `ViewManager.show_grades`.
+  - Added `subject_code` (`maHocPhan`) to `CourseGradeItem` / `SemesterNormalizer` so `cumulative_gpa4` and `calculate_overall_gpa` deduplicate retaken courses across different `maLopHocPhan` sections.
+- **Verification**:
+  - Added regression tests across `tests/test_schedule_week_view.py`, `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_detail_theme.py`, `tests/test_grade_overview_view.py`, `tests/test_academic_radar_service.py`, and updated `tests/test_submission_race_condition.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2444 passed, 26 skipped** (0 failed).
+  - Playwright + Flet Web ASGI verification (`360x800`, `390x844`, `1120x850`, dark & light across `DetailView`, `ScheduleWeekView`, `CoursesView`, `GradeOverviewView`): **PASS** (`0` overflow, `0` console/page errors, `DetailView` AXTree exposes `"Mở trong ứng dụng"` without `"Mở trong trình duyệt"` and opens `InAppWebViewDialog` in-app).
+
+## M3 Part A Iteration 3b: Challenger & Secondary Reviewer Remediation (2026-11-21)
+
+- **PortalClient Multi-Member & Truncated Gzip Hardening (`src/core/portal_client.py`)**:
+  - Rewrote `_decompress_gzip_bounded()` with a zero-copy `cursor` loop checking `if decomp.eof:` **before** `decomp.unconsumed_tail` so multi-member streams exceeding `256 KiB` advance cleanly to the next member instead of looping infinitely or growing `decomp.unused_data` unboundedly, added a zero-progress guard plus strict `cursor > member_start` check, avoided calling `decomp.flush()` after `decomp.eof`, and verified `decomp.eof` after stream completion so truncated gzip streams (e.g., missing 8-byte CRC32/ISIZE trailer) raise `PortalProtocolError`.
+- **Alternative IPv4 Literal SSRF Blocking (`src/core/url_validation.py`)**:
+  - Added `_parse_literal_ip()` and pure-Python POSIX `inet_aton` fallback `_parse_posix_inet_aton()` before `resolve_dns` in `validate_public_https_url()` so decimal, octal, hex, and short 1/2/3/4-part IPv4 literals (e.g., `2130706433`, `0177.0.0.1`, `0x7f000001`, `0x7f.0.0.1`, `127.1`, `0`, `2852039166`, and trailing-dot forms) resolve to canonical dotted-quads immediately (`< 1ms`) without calling `socket.getaddrinfo`, blocking them in both `validate_public_https_url(..., resolve_dns=False)` and `InAppWebViewDialog`.
+- **UI/UX & Markdown Defense-in-Depth Polish (`src/gui/components/academic_radar/radar_card.py`, `src/gui/components/detail_view.py`, `src/gui/core/utils.py`)**:
+  - Wrapped `AcademicRadarCard._show_radar_info` dialog content in `ft.KeyboardListener(autofocus=True)` for `Escape` dismissal via `page.pop_dialog()` (with overlay fallback), matching all other `academic_radar` and `GradeOverviewView` modals.
+  - Aligned `DetailView` THNN fallback notice copy with the in-app CTA and top-right external browser button.
+  - Escaped `[` and `]` inside Markdown link labels in `html_to_markdown._link_repl`.
+- **Verification**:
+  - Added regression tests in `tests/test_portal_client.py`, `tests/test_url_validation.py`, `tests/test_in_app_webview.py`, `tests/test_grade_overview_view.py`, and `tests/test_detail_theme.py`.
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests/test_architecture_boundaries.py tests/test_repository_governance.py -q --tb=short`: **11 passed**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2458 passed, 26 skipped** (0 failed).
+
+## M3 Part B Iteration 1b: Merge `origin/develop`, Cross-Feature Integration, Security & UX Remediation (2026-11-22)
+
+- **Merge & Packaging / CI Parity (`pyproject.toml`, `.github/workflows/`, `scripts/verify_*`)**:
+  - Merged `origin/develop` (`08efdbed`) into `codex/courses-mobile-review` via `--no-ff` merge commit, preserving M1 (`DistributionProfile`, AndroidKeyStore secret vault, CH Play stripping & 16 KB alignment), M2 (`QuizPlayerView`, `flet_uth_quiz`, `quiz_client_bootstrap.py`), and M3A (`ScheduleWeekView`, `InAppWebViewDialog`, `url_validation.py`, `PortalClient` generation-guarded tokens & bounded gzip, `CourseGradeMonitor`, `GradeOverviewView`, `DesktopWindowHeader` semantics, `calendar_view.py` 44×44dp/semantics) alongside M3B (`AdaptiveNavShell`, `CoursesCoordinator`, offline `office_viewer/`, `WindowsOfficeBridge`, `EmbeddedWebViewHost`).
+  - Restored `network_security_config.xml` at `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/src/main/res/xml/network_security_config.xml` and removed the misplaced directory-rename path.
+  - Kept `version = "2.5.1"`, `httpx>=0.28.1`, `flet-uth-quiz==0.1.0`, `target_sdk_version = 36`, Android `allowBackup="false"`, `usesCleartextTraffic="false"`, `networkSecurityConfig="@xml/network_security_config"`, and deduplicated `pillow>=13.0.0` to core dependencies.
+  - Added `'src/assets/office_viewer/**'` triggers to `build-android.yml` & `build-msstore.yml` and extended `scripts/verify_windows_bundle.py`, `scripts/verify_msix_release.ps1`, and `scripts/verify_android_release.py` to assert the 9 core `office_viewer/` static assets.
+- **Core Client & Portal Parity (`src/core/portal_client.py`, `src/core/client.py`)**:
+  - Updated `PortalClient.fetch_current_semester_courses()` to use `_current_generation()`, `_cached_token(username)`, `_store_token(..., generation)`, and 401 retry parity with `fetch_day`/`fetch_week`.
+  - Retained `urllib` in `src/core/client.py` and guarded M3B session helpers (`get_sesskey`, `get_session_cookies`, `submit_session_form`, `open_session_raw`, `open_session_url`, `download_session_file`) under `self._session_lock` and `self._reset_session_if_account_changed()`, plus bounded `max_bytes` in `download_file()`.
+- **Cross-Feature Integration Wiring (`src/gui/app_controller.py`, `src/gui/view_manager.py`, `src/gui/components/grade_overview_view.py`, `src/gui/controllers/courses_coordinator.py`)**:
+  - Wired `Courses <-> Quiz` (`on_start_quiz=self._start_course_quiz`, `_on_quiz_player_closed`, `_on_course_quiz_entry_unavailable`, mobile `nav_shell.set_immersive(True)` handling unmounted `bar.page` safely, `QuizPlayerView.request_close` on nav switch & exit, and account-switch cleanup across `quiz_player_view`, `course_grade_monitor`, and `courses_coord`).
+  - Wired `GradeOverviewView` `"Môn học"` (`on_open_courses`) -> `course_grades_view` (`CoursesView`) via `ViewManager` without altering the `"grades"` rail state, and fixed `_header_compact_padding` initialization in `_build_header_container()` for mobile layout startup.
+- **Security & UX Hardening (`local_preview_server.py`, `embedded_webview_host.py`, `webview_pane.py`, `courses_state.py`, `windows_office_bridge.py`, `office_viewer_service.py`, `pptx_host.js`, `document_reader_view.py`, `course_detail_pane.py`)**:
+  - Isolated `/session/` onto its own loopback HTTP server port separate from `/viewer/`, added `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy: same-origin`, and `_SESSION_HTML_CSP` on `_serve_session()` and 302 redirects, escaped `<base href>`, and replaced `startswith` with `_is_same_moodle_origin_url()`.
+  - Enforced `url_validation`-aligned HTTPS / active-loopback URL validation (`safe_http_url`, `_validate_webview_url`), `flet_webview` `prevent_links` + start/change URL checks, `WindowsWebView2Dock` `navigation_starting` scheme cancellation, `/viewer/` popup lockout, `are_dev_tools_enabled = False`, `are_host_objects_allowed = False`, `_lock`-protected `_pending_scripts`/disposal, mid-init `ctrl.close()`, stale `uth*` profile cleanup, HTTPS `is_secure = True` cookie promotion, `SetWindowLongPtrW.argtypes`/`restype`, and `CoursesWebViewPane` Flet-thread marshaling + removal of the redundant `80.0` bottom inset.
+  - Added `WaitForSingleObject(handle, 3000)`, `TemporaryDirectory(..., ignore_cleanup_errors=True)`, and System32 PowerShell preference in `windows_office_bridge.py`; rejected ZIP symlinks/special files and forged central-directory XML expansion in `office_viewer_service.py`; stripped `animate`/`set` and `data:image/svg+xml` hrefs in `pptx_host.js` while retaining `<foreignObject>` slide text rendering.
+  - Wired `on_error` Tier B native fallback in `DocumentReaderView._build_webview`, skipped redundant `PdfDocumentSession.render_page_png(0)` when `pdf_in_webview=True`, hid `_night_btn` for WebView2 PDFs, added `DocumentReaderView.handle_key_event` (`Esc`/page/search), switched `CourseDetailPane` Moodle WebView triggers to `LANGUAGE_ROUNDED`, and wrapped `_segment_pills` content in `ft.Semantics`.
+- **Verification**:
+  - Added regression tests across `tests/test_courses_app_integration.py`, `tests/test_courses_reader_and_preview_server.py`, `tests/test_embedded_webview_session_isolation.py`, `tests/test_office_viewer_service.py`, `tests/test_chplay_packaging.py`, and `tests/test_msstore_packaging.py`, and updated `tests/test_release_hardening.py` and `tests/test_gui_app_controller.py`.
+  - Verified with full `pytest`, `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and `flutter analyze && flutter test` on `flet_uth_quiz`.
+
+## M3 Part B Iteration 2: Security, Integration & UX Polish Remediation (2026-11-22)
+
+- **Viewer Token Case & Missing-Account Quiz Re-Auth (`src/gui/components/courses/embedded_webview_host.py`, `src/gui/app_controller.py`)**:
+  - Updated `WindowsWebView2Dock._is_navigation_uri_allowed()` to normalize only scheme and netloc while preserving exact case-sensitive `/viewer/<token>/` matching (fixing mixed-case `secrets.token_urlsafe(24)` self-navigation rejections) and blocking `..` path traversal.
+  - Updated `AppController._start_course_quiz()` to pass an `async` retry callback for `state == "missing_account"` and guarded `retry_callback()` in `_show_quiz_auth_dialog()` with `inspect.isawaitable(...)`.
+- **Office ZIP Bomb & WebView HTML-Fallback / Blocked-URL Hardening (`src/core/courses/office_viewer_service.py`, `src/gui/components/courses/webview_pane.py`)**:
+  - Updated `is_supported_office_package()` to stream-verify all non-directory ZIP entries against `_MAX_TOTAL_UNCOMPRESSED_BYTES`, preventing forged `file_size` headers on non-XML media entries from bypassing ZIP-bomb bounds.
+  - Hardened `CoursesWebViewPane`: validated `_navigate_link()` and `extracted_links` against `safe_http_url()` or active `LocalPreviewServer.is_active_loopback_origin()`, restricted `_load_authenticated_html_fallback()` loopback fetches strictly to active preview origins with `_SameOriginRedirectHandler`, and enforced `Blocked disallowed WebView URL:` errors in `_on_host_error()` by disposing the host and rendering a blocked-URL card.
+- **Session Bridge, PDF Fallback & Semantics Polish (`src/core/courses/local_preview_server.py`, `src/gui/components/courses/document_reader_view.py`, `src/gui/components/courses/course_detail_pane.py`)**:
+  - Stripped pre-existing `<base ...>` tags before injecting `<base href>` in `_rewrite_session_html()` and added `_SESSION_HTML_CSP` to 302 session redirects.
+  - Restored `self._night_btn.visible = True` when `DocumentReaderView._build_body()` falls through synchronously from WebView PDF to `_build_native_pdf_body()`.
+  - Added `exclude_semantics=True` to `CourseDetailPane._segment_semantics` pills to avoid duplicate accessible labels.
+- **Verification**:
+  - Added regression tests in `tests/test_embedded_webview_window_binding.py`, `tests/test_courses_app_integration.py`, `tests/test_office_viewer_service.py`, `tests/test_courses_activities_and_webview.py`, and `tests/test_courses_reader_and_preview_server.py`.
+
+## M3 Part B Iteration 3: Packaging `compileall -b` Fix (`olefile` -> `xlrd.compdoc.CompDoc`) (2026-11-22)
+
+- **Root Cause & Dependency Removal (`pyproject.toml`, `src/core/courses/document_converter.py`)**:
+  - Removed `"olefile>=0.47"` from `[project.dependencies]` in `pyproject.toml` (its unimported Python 2 legacy module `olefile/olefile2.py` failed `python -m compileall -b` under Python 3.14 with `SyntaxError: invalid hexadecimal literal` at `0xFFFFFFFAL`, aborting `serious_python` packaging across CH Play, APK LTS, MS Store MSIX, and iOS).
+  - Replaced `_olefile.OleFileIO` in `_convert_legacy_doc()` and `_convert_legacy_ppt()` with `xlrd.compdoc.CompDoc(data, logfile=io.StringIO())`, reading each stream (`"WordDocument"`, `"1Table"`/`"0Table"`, `"PowerPoint Document"`) at most once via `get_named_stream(...)`, enforcing `[:_MAX_LEGACY_STREAM_BYTES]`, handling missing/`None` streams and `(_CompDocError, OSError, ValueError, struct.error, IndexError, AssertionError, TypeError)` cleanly, and retaining `_xlrd` optional-import fallback.
+- **Verification**:
+  - Added regular-FAT / mini-stream (`< 4096 B`) CFB, malformed CFB, `capsys` stdout-silence, `_MAX_LEGACY_STREAM_BYTES`, and no-`olefile` regressions in `tests/test_courses_pdf_and_legacy_docs.py` plus dependency guard assertions in `tests/test_courses_m1_webview_packaging.py`.
+  - Verified with full `pytest` (`2891 passed, 26 skipped`), `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and isolated Python 3.14 `compileall -b -q` across `[project.dependencies]`.
+
+## M3 Part B Iteration 4: `CompDoc` Bounded Cycle-Safe Reader & Malformed-CFB Hardening (2026-11-22)
+
+- **Hardening (`src/core/courses/document_converter.py`)**:
+  - Added `_open_compdoc_safe()` pre-validating `len(data) >= 512`, `_OLE2_MAGIC`, and `ssz >= 3` before constructing `_CompDoc(data, logfile=io.StringIO())`, preventing `ZeroDivisionError` in `CompDoc.__init__` when `ssz < 2` (`nent == 0`) or `ssz == 2` (`nent - 1 == 0`).
+  - Replaced `ole.get_named_stream(...)` in `_convert_legacy_doc()` and `_convert_legacy_ppt()` with `_read_compdoc_stream_bounded(ole, name, _MAX_LEGACY_STREAM_BYTES)`, which validates `etype == 2`, non-negative stream/sector sizes, caps `target_bytes = min(d.tot_size, max_bytes)` before allocating, walks `SAT`/`SSAT` iteratively with a `visited` cycle set, `0 <= s < max_sid` bounds, `EOCSID` (`-2`) termination, system-sector overlap protection, and immediate exit when `remaining <= 0`.
+  - Added `_precheck_ole2_xls()` in `_convert_legacy_xls()` to reject malformed `ssz < 3` headers and cyclic `SSAT` mini-stream chains before `xlrd.open_workbook(...)`, capped `_collect_ppt_binary_slides()` recursion at `_MAX_PPT_CONTAINER_DEPTH = 64`, and added `ZeroDivisionError` and `RecursionError` to `_convert_legacy_doc()` and `_convert_legacy_ppt()` exception tuples.
+- **Verification**:
+  - Added `test_legacy_ole2_adversarial_ssat_cycles_ssz_dir_cycles_and_bounded_reader` and `_CompDoc = None` fallback coverage in `tests/test_courses_pdf_and_legacy_docs.py` (cyclic `SSAT` on `.doc`/`.ppt`/`.xls`, `ssz` 0/1/2, cyclic `left_DID`, 1000-level PPT container, premature `EOCSID`, oversized `tot_size = 0x7FFFFFFF`, negative `tot_size`, out-of-bounds `SSAT`, cyclic `SAT`, storage `etype=1`, zero stdout).
+  - Verified post-commit with full `pytest` (`2892 passed, 26 skipped`), `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `git diff --check`, and isolated Python 3.14 `compileall -b -q` across `[project.dependencies]`.
+
+## M3 Part B Iteration 5: `_precheck_ole2_xls` `"Book"` Bypass & `xlrd` Silent `logfile` Remediation (2026-11-22)
+
+- **Fixes (`src/core/courses/document_converter.py`)**:
+  - Removed the unconditional `break` in `_precheck_ole2_xls()` (`for qname in ("Workbook", "Book"):`) so both `"Workbook"` and `"Book"` entries are validated unconditionally whenever present, preventing an empty `"Workbook"` (`tot_size = 0`, `first_SID = -2`) from bypassing `SSAT`-cycle detection on `"Book"` when `xlrd.book.Book.biff2_8_load` falls through on falsy `b""`.
+  - Passed `logfile=io.StringIO()` to `_xlrd.open_workbook(file_contents=data, on_demand=True, logfile=io.StringIO())` in `_convert_legacy_xls()` so `xlrd` / `CompDoc` diagnostic warnings never leak to `stdout`.
+- **Verification**:
+  - Added `test_legacy_xls_empty_workbook_with_cyclic_book_ssat_and_silent_logfile` in `tests/test_courses_pdf_and_legacy_docs.py` covering empty `"Workbook"` + 2-node cyclic `SSAT` (`0 -> 1 -> 0`) `"Book"` (`< 1.0s`, zero stdout) and trailing non-512-byte `.xls` `xlrd.open_workbook` silence (`capsys.readouterr().out == ""`).
+  - Verified post-commit with `ruff check src tests scripts`, `tests/test_architecture_boundaries.py`, `tests/test_courses_pdf_and_legacy_docs.py`, full `pytest` (`tests`, `extensions/flet_uth_quiz/tests`, `extensions/flet_uth_background_sync/tests`), `git diff --check`, and clean `git status --short`.
+
+## M4 Final Integration: Release Gate, LTS Auto-Updater & Dependabot Hardening (2026-11-22)
+
+- **Release Inventory & Tag Pipeline Parity (`scripts/release_inventory.py`, `scripts/package_unsigned_ipa.py`, `.github/workflows/release.yml`, `.github/workflows/build-ios.yml`, `tests/test_release_inventory.py`, `tests/test_package_unsigned_ipa.py`, `tests/e2e_store_distribution/harness.py`)**:
+  - Added `"office_viewer_assets"` to `_EXPECTED[".apk"][3]` in `scripts/release_inventory.py` to match `scripts/verify_android_release.py --require-office-viewer` emitted by `.github/workflows/release.yml`, preventing `InventoryError` during `publish-exact-release`.
+  - Updated `tests/test_release_inventory.py` and `tests/e2e_store_distribution/harness.py` with `"office_viewer_assets"`, added end-to-end schema verification from `verify_android_release(..., require_office_viewer=True)` into `verify_release_inventory()` (plus missing-check failure coverage), and added `scripts/package_unsigned_ipa.py` to isolated `python -I` CLI bootstrap coverage.
+  - Aligned `.github/workflows/release.yml`: installed `"flet[cli]==0.86.5"` explicitly in `build-signed-android` and `build-unsigned-ios`, ran `scripts/prepare_android_flutter_project.py --project-root build/flutter --channel apk_lts --target-sdk 36` after `flet-android-notifications-patch`, and added `--require-office-viewer` (`verify_ios_app_office_viewer_assets`) to `scripts/package_unsigned_ipa.py` + `release.yml` + `build-ios.yml` with tests in `tests/test_package_unsigned_ipa.py`.
+- **`apk_lts` / `exe_lts` Auto-Updater Reliability Fixes (`src/core/update_coordinator.py`, `src/gui/app_controller.py`, `ApkUpdateDownloadManager.kt`, `ApkUpdateInstaller.kt`)**:
+  - Fixed `UpdateCoordinator.shutdown()` race (`pr82-shutdown-detach-race`) by marking `self._detached_downloader = True` under `self._lock` before `self._stop.set()` when `_downloader.detach` is callable, with regression test in `tests/test_update_coordinator.py`.
+  - Hardened `AppController._open_external_update_url()` to pin strict `https://github.com/Chouwzi/UTHelper/releases/...` URLs (default/443 port, no userinfo/query/fragment/`..`), separated `_update_manual_download` from `_update_ready` on `MANUAL_DOWNLOAD_REQUIRED` so subsequent `UPDATE_AVAILABLE` cannot overwrite `"Mở trang tải"` with `"Cài đặt"`, and cleared `_update_ready = False` on `INSTALL_FAILED` when `_update_open_release_page` is `True` or `event.message` is `source_unavailable` / `Windows installer is unavailable` / `installer_unavailable` / `sha256_mismatch` / `size_mismatch` (`tests/test_gui_app_controller.py`).
+  - Synchronized `ApkUpdateDownloadManager` (`start`, `status`, `cancel`) with `lock`, handled nullable `DownloadManager.query(...)` cursors without NPE (returning `"download_manager_unavailable"` in `query()` / `null` in `findRequestId()`), and ranked `findRequestId()` candidates by status (`STATUS_RUNNING` > `STATUS_PENDING` > `STATUS_PAUSED` > `STATUS_SUCCESSFUL` > `STATUS_FAILED`).
+  - Preserved valid pre-existing `stagedApk` on `CancellationException` in `ApkUpdateInstaller.verifyLocalAndOpen()` while still deleting `stagedApk` on validation/metadata failures, and added bounded stale `update-*.apk` / `.part` cleanup in `cacheDir/verified_updates` and `ExternalFilesDir` excluding active `DownloadManager` destinations (`ApkUpdateDownloadManagerTest.kt`, `ApkUpdateInstallerFlowTest.kt`).
+- **Dependabot Pin Governance (`.github/dependabot.yml`)**:
+  - Added explicit `ignore:` rules for intentionally pinned toolchain/ABI/plugin dependencies across `pub` (`flet`), `pip` (`flet`, `winrt-Windows.ApplicationModel`, `flet-android-notifications`, `webview2-Microsoft.Web.WebView2.Core`), and `gradle` (`androidx.room:*`, `org.jetbrains.kotlin:kotlin-gradle-plugin`, `androidx.core:core-ktx`, `androidx.work:work-runtime-ktx`) while preserving `tests/test_repository_governance.py`.
+- **Verification**:
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2904 passed, 26 skipped** (0 failed).
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - Android Gradle (`chplay` `testDebugUnitTest bundleReleaseAar`, `classes.jar` scan: 96 classes / 0 updater leaks) and `apk_lts` unit tests (`ApkUpdateDownloadManagerTest` 5/5, `ApkUpdateInstallerTest` 9/9, `ApkUpdateInstallerFlowTest` 3/3 non-`FileProvider` tests; note the 2 pre-existing `FileProvider.getUriForFile` tests in `ApkUpdateInstallerFlowTest` hit AndroidX `core:1.17.0` `SimplePathStrategy.belongsToRoot` hardcoded `'/'` on Windows host JVM and run on Ubuntu CI).
+
+## M4 Final Integration Iteration 2: Updater Retry Loop, Null DownloadManager Cleanup & Defense-in-Depth Remediation (2026-11-22)
+
+- **Auto-Updater & Packaging Fixes**:
+  - `src/core/update_coordinator.py`: In `_perform_confirmation()`, when `INSTALL_FAILED` reports non-retryable package integrity/metadata errors (`sha256_mismatch`, `size_mismatch`, `invalid_apk`, `package_mismatch`, `release_version_mismatch`, `installed_signer_mismatch`, `manifest_signer_mismatch`, `apk_signature_invalid`, `release_metadata_invalid`), safely unlink the invalid staged file (catching `OSError`) and clear `self._ready_path = None`; also clear `self._ready_path = None` for `source_unavailable` / `installer_unavailable` / `Windows installer is unavailable` while preserving `supports_cached_package_retry` semantics for `permission_required`, `bridge_failed`, and `file_provider_unavailable`.
+  - `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/variants/apk_lts/kotlin/com/uthelper/backgroundsync/update/ApkUpdateInstaller.kt`: Updated `cleanupStaleUpdateFiles()` to return early when `DownloadManager` or `manager.query(DownloadManager.Query())` returns `null`, preventing blind deletion of active `update-*.apk` files in `ExternalFilesDir`.
+  - `src/gui/app_controller.py`: Hardened `_open_external_update_url()` to reject `0x7F..0x9F` DEL/C1 control characters, raw or percent-decoded backslashes (`\`), and percent-decoded `..` path segments.
+  - `scripts/package_unsigned_ipa.py`: Updated `verify_ios_app_office_viewer_assets()` to reject symlink members (`stat.S_ISLNK(member.external_attr >> 16)`) and directory entries inside nested `app.zip` bundles.
+- **Tests Added / Hardened**:
+  - `tests/test_update_coordinator.py`: Added parameterized invalid-package retry tests, unlink-`OSError` resilience test, `Windows installer is unavailable` test, `file_provider_unavailable` cached-retry preservation test, and tightened `test_shutdown_marks_detach_before_stop_so_completed_download_is_not_deleted` to block deterministically before `_detach_downloader()` runs.
+  - `tests/test_gui_app_controller.py`: Added DEL/C1/backslash/`%2e%2e` hostile URL assertions and full `AppController` + `UpdateCoordinator` `sha256_mismatch` -> `"Thử lại"` re-download integration test.
+  - `tests/test_package_unsigned_ipa.py`: Added `test_inspector_rejects_symlink_in_nested_app_zip`.
+  - `extensions/flet_uth_background_sync/.../ApkUpdateInstallerFlowTest.kt`: Added `preservesExternalUpdateApksWhenDownloadManagerQueryReturnsNull` (using `NullCursorShadowDownloadManager`) and `preservesExternalUpdateApksWhenDownloadManagerServiceIsNull`.
+- **Verification**:
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2918 passed, 26 skipped** (0 failed).
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - Android Gradle: `chplay` `testDebugUnitTest bundleReleaseAar` (`BUILD SUCCESSFUL`, 0 leaked updater classes) and `apk_lts` `bundleReleaseAar` + `ApkUpdateDownloadManagerTest` (5/5) + `ApkUpdateInstallerTest` (9/9) + `ApkUpdateInstallerFlowTest` (5/5 non-`FileProvider` tests including null-cursor & null-service preservation).
+
+## Post-M4 Hotfix & UI Polish: Windows Quiz Client NuGet Auto-Bootstrap, Settings Tab-Switch Guard & Overview Dashboard Redesign (2026-11-22)
+
+- **Windows Source Checkout `nuget.exe` Provisioning, Cold-Build Timeout & CMake Recovery (`src/platform_utils/quiz_client_bootstrap.py`, `tests/test_quiz_packaging.py`)**:
+  - Fixed `NUGET-NOTFOUND` (`MSB3073` exit `9009` in `flutter_inappwebview_windows_DEPENDENCIES_DOWNLOAD.vcxproj`) on Windows developer machines without standalone `nuget.exe` on `PATH`: added `_ensure_windows_nuget_executable()` checking `UTHELPER_NUGET_EXE`, `PATH`, Chocolatey/WinGet/Scoop shims, and `%LOCALAPPDATA%\UTHelper\build-tools\nuget\v7.3.1\nuget.exe` (with fallback to `build/.tools/nuget/v7.3.1/nuget.exe`), auto-downloading official `nuget.exe` `v7.3.1` over HTTPS (`_HttpsOnlyRedirectHandler`) and verifying its `MZ` PE header + SHA-256 (`08ec6563b4a1ddd113d42531067539ffcd0c2d9632d839ad4eb58a0d5ddf1919`) before prepending to `build_env["PATH"]`.
+  - Added `_clear_stale_windows_cmake_nuget_cache()` to evict `build/flutter/build/windows` whenever an earlier failed run cached `NUGET-NOTFOUND` in `CMakeCache.txt`, raised `_QUIZ_CLIENT_BUILD_TIMEOUT_SECONDS` from `600` to `1800` to accommodate cold `serious_python` + CMake/MSVC compilation, and verified `ensure_windows_quiz_client()` live end-to-end on Windows 11 26H2 + Visual Studio Build Tools 2026 (`VC\v180`) producing `build/windows/UTHelper.exe`.
+- **Settings Theme Dirty State & Navigation Tab-Switch Confirmation Guard (`src/gui/components/settings_view.py`, `src/gui/app_controller.py`, `tests/test_settings_grid_navigation.py`, `tests/test_rail_navigation.py`)**:
+  - Updated `SettingsView._on_theme_select()` and `_handle_reset_defaults()` to recompute `self._unsaved_dot.visible = self.has_changes()`, refresh `self._update_save_button_state()` (unlocking `"Lưu thay đổi"` when selecting a new theme and relocking `"Đã lưu"` when reverting to baseline), and keep color preview swatch squares synced via `_sync_color_swatch_boxes()`.
+  - Added `SettingsView.request_close(on_closed=...)` and guarded `AppController._navigate_destination()` when `settings_view.visible` is `True`: clicking `"settings"` again preserves unsaved edits without reloading, leaving clean Settings reconciles persisted theme/urgencies via `_leave_settings_and_navigate()`, and leaving dirty Settings snaps `AdaptiveNavShell` (`NavigationRail` & `NavigationBar`) back to `"settings"` while presenting the `"Chưa lưu cài đặt"` confirmation dialog (`Hủy` stays in Settings; `Bỏ thay đổi` reverts baseline theme and navigates to target tab; `Lưu` persists settings and navigates to target tab).
+- **`Tổng quan` Dashboard UI Redesign & `ActivityCard` Hierarchy Polish (`src/gui/app_controller.py`, `src/gui/components/activity_card.py`, `tests/test_desktop_window_header.py`, `tests/test_activity_badges.py`, `tests/test_gui_app_controller.py`)**:
+  - Removed the redundant 4-card rounded KPI stat row (`_build_stat_row` / `_stat_row` / `_update_stat_tiles`: `Khẩn cấp` / `Sắp đến hạn` / `An toàn` / `Quá hạn`) and hidden the duplicate bottom `_footer` counter strip so the activity stream starts immediately without visual clutter.
+  - Unified `_build_dashboard_header()` across wide desktop (`>=980px`), compact desktop (`600..979px`), and mobile (`<600px`): paired crisp `"Tổng quan"` title + live `SyncStatusIndicator` on the left with a contextual `"Xóa lọc"` button (`_reset_filters_btn`) and tactile bordered `"Làm mới"` (`refresh_btn`) button on the right (restoring missing Refresh access on wide desktop and removing duplicate navigation icons already served by `AdaptiveNavShell`).
+  - Locked `_header_container`, `_update_banner`, `_filter_container`, `_content_area` + `ActivityCard`, and `_sidebar_title` + `TodaySchedulePanel` onto a single pixel-exact horizontal keyline (`16px + gutter` desktop / `12px` mobile), added an inline search clear button (`_search_clear_btn`) + empty-state `"Đặt lại bộ lọc"` action (`_empty_clear_filter_btn`), and clarified the activity-type filter trigger label from `"Tất cả"` to `"Loại bài"`.
+  - Refined `ActivityCard`: replaced `1px` solid wireframe badge boxes with soft translucent semantic pills (`with_opacity(0.11, color)`), suppressed duplicate `"ĐANG MỞ"` / `"QUÁ HẠN"` lifecycle chips while preserving `"CHƯA MỞ"` / `"SẮP MỞ"` / `"NỘP MUỘN"`, and calmed completed items (`Đã làm` / `Đã nộp` / `Đã chấm`) to use neutral `C.BORDER` card framing without redundant urgency/progress chrome so active unsubmitted deadlines stand out immediately across all 9 themes.
+- **Verification**:
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2926 passed, 25 skipped** (0 failed).
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - Live Windows source checkout build (`ensure_windows_quiz_client` on Windows 11 26H2 + Visual Studio Build Tools 2026 `VC\v180` + verified `nuget.exe v7.3.1`): `build/windows/UTHelper.exe` built & verified (`exit 0`).
+  - Live Flet Web + Playwright visual smoke verification (`steel_light` Desktop `1280x820` and Mobile `390x844`): verified removal of the 4 KPI stat cards, pixel-exact horizontal alignment, unified header Refresh button, and calm completed vs active `ActivityCard` hierarchy.
+
+## Post-M4 Bugfix & UX Polish: Untimed Quiz Detail Crash, Settings-to-Tab AnimatedSwitcher Invariant & Card Hover/Selection State (2026-11-22)
+
+- **Fix `"Không thể tải chi tiết đầy đủ"` Crash on Untimed Quizzes & Null Metadata (`src/gui/components/detail_view.py`, `src/core/data_orchestrator.py`, `src/gui/app_controller.py`, `tests/test_app_controller_detail_navigation.py`)**:
+  - Diagnosed from live `app.log` traceback (`DetailView.update_detail` line `1410`): `ActivityDetail` defaults `attempts_allowed: Optional[str] = None` and `time_limit: Optional[str] = None`, causing `time_limit not in info` to raise `TypeError: 'in <string>' requires string as left operand, not NoneType` on every untimed Moodle quiz with `quiz_info` entries (and silently dropping `quiz_info` when `attempts_allowed` or `time_limit` was `""`). Normalized both fields safely and guarded `if attempts and attempts in info` / `if time_limit and time_limit in info`.
+  - Hardened `DetailView.show_loading()` and `DetailView.update_detail()` against `details=None`, string/numeric/ISO `cutoff_date` (`_parse_cutoff_datetime`), `datetime` `open_time` (`_coerce_open_time_str`), and `None` fields in `attendance_records`, harmonized `DetailView._badge_ctrl` to soft tinted semantic pills, and guarded `DataOrchestrator._fetch_detail_via_ws()` to skip `site_identity == "thnn"` / `thnn.ut.edu.vn` URLs so THNN `cmid`s are never sent to `courses.ut.edu.vn` WS.
+- **Fix `Settings -> Bảng điểm / Môn học / Lịch` Navigation & `AnimatedSwitcher` Visibility Invariant (`src/gui/app_controller.py`, `src/gui/view_manager.py`, `tests/test_rail_navigation.py`)**:
+  - Diagnosed from retained diagnostic envelope `be36b20a-7296-49a2-b685-cbb463cf6ac4`: `_leave_settings_and_navigate()` previously set `settings_view.visible = False` and called `_update_footer()` -> `page.update()` *before* switching `tab_switcher.content` away from `settings_view`, triggering Flet's `ValueError('AnimatedSwitcher.content must be provided and visible')` and aborting navigation before `_show_grades()` ran.
+  - Extracted `_perform_destination_navigation()`, added `update_page: bool = True` to `_refresh_ui()` / `_update_footer()`, and reordered all `ViewManager` tab transitions (`show_dashboard`, `show_courses`, `show_calendar`, `show_settings`, `show_grades_loading`, `show_course_grades_loading`, `close_*`) to set `target_view.visible = True` and `tab_switcher.content = target_view` *before* hiding outgoing views, guaranteeing `tab_switcher.content.visible is True` at every `page.update()`.
+- **Add `ActivityCard` Pointer Hover & Active Split-View Selection State (`src/gui/components/activity_card.py`, `src/gui/app_controller.py`, `src/gui/view_manager.py`, `tests/test_activity_badges.py`)**:
+  - Added `on_hover` elevation (`C.SURFACE_HOVER`, subtle accent border & soft shadow) and `set_selected(bool)` active open state (`1.5px C.ACCENT` border, `4px C.ACCENT` indicator bar, soft shadow, and `"Đang xem ›"` pill) to `ActivityCard`.
+  - Wired `AppController._set_selected_activity()` / `_clear_selected_activity()` across `_show_detail_async()`, `_refresh_ui()`, `_render_cards_only()`, and `ViewManager._clear_detail_layer()` / `close_detail()` so split-view desktop clearly highlights the card currently open in `DetailView` and clears selection automatically on close or tab switch.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2929 passed, 26 skipped** (0 failed).
+  - Live Flet Web + Playwright verification (`1280x820` `steel_light`): verified untimed quiz detail rendering without error banner, `"Đang xem ›"` selected card & hover state in split-view, and clean `Settings -> Bảng điểm` transition.
+
+## Post-M4 Bugfix: `DetailView` Header `Semantics.content` Red Flash on Card Open (2026-11-22)
+
+- **Fix `Semantics.content must be provided and visible` Flash (`src/gui/components/detail_view.py`, `tests/test_app_controller_detail_navigation.py`)**:
+  - Diagnosed from user screenshot on card open: `DetailView._init_layout()` previously wrapped `self._header_open_btn` inside an anonymous `ft.Semantics(label="Mở bằng trình duyệt ngoài", button=True, content=self._header_open_btn)` whose `visible` remained `True`, while `DetailView.show_loading()` set `self._header_open_btn.visible = False` during the ~0.2–0.4s `fetch_full_details` round-trip (and `update_detail()` kept `self._header_open_btn.visible = False` when `browser_available` was `False` or `_embedded_in_pane` was `True`). On the Flutter client (`flet 0.86.5`), `SemanticsControl` checks `content != null && content.isVisible` and rendered the red `ErrorControl("Semantics.content must be provided and visible")` chip in the top-right header.
+  - Stored `self._header_open_semantics` with initial `visible=False` matching `self._header_open_btn.visible = False`, and added `DetailView._set_header_open_visible(target_view, visible)` so showing enables `btn.visible = True` before `semantics.visible = True` and hiding disables `semantics.visible = False` and `btn.visible = False` across `show_loading()` and `update_detail()`.
+  - Audited all `ft.Semantics(...)` and `visible_control()` wrappers across `src/gui/` and confirmed no other control toggles inner `.content.visible = False` while leaving an outer `ft.Semantics` visible.
+  - Added `test_detail_view_never_leaves_visible_semantics_with_hidden_content` in `tests/test_app_controller_detail_navigation.py` walking the entire `DetailView` control tree across `init`, `show_loading`, `update_detail` (valid & empty URLs), and `embedded_in_pane=True`.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2930 passed, 26 skipped** (0 failed).
+
+## Post-M4 UI/UX Redesign & WebView Integration: `ScheduleWeekView` Toolbar, Bold Today Column, Custom Session Detail Modal & Native In-App WebView (2026-11-22)
+
+- **`ScheduleWeekView` Toolbar & Bold Current-Day Highlight (`src/gui/components/schedule_week_view.py`, `tests/test_schedule_week_view.py`)**:
+  - Replaced plain `"Tuần trước"` / `"Tuần sau"` text buttons with a bordered stepper container (`_stepper_box`) pairing `44x44` `CHEVRON_LEFT_ROUNDED` / `CHEVRON_RIGHT_ROUNDED` `IconButton`s (`ft.Semantics` & `tooltip` switching between `"Tuần trước"`/`"Tuần sau"` on desktop and `"Ngày trước"`/`"Ngày sau"` on narrow layouts) and a single-line `"Hôm nay"` pill button.
+  - Replaced `"Tải lại lịch học"` text button with a `44x44` `REFRESH_ROUNDED` `IconButton` inside a bordered `C.SURFACE` square (`_refresh_action_box`, matching `Tổng quan`) anchored at the right corner of a non-wrapping `MainAxisAlignment.SPACE_BETWEEN` `_nav_row` aligned with the `14px` horizontal grid keylines.
+  - Strengthened the current-day column highlight in `_render_week_body()`: today's header uses solid `C.ACCENT` background with `C.ON_ACCENT` `W_700` weekday/date labels (meeting WCAG AA across all 9 themes) and wraps the column in a `1.5px C.ACCENT` border with `with_opacity(0.08, C.ACCENT)` tinted wash.
+- **Custom `"Chi tiết buổi học"` & `"Đề cương chi tiết học phần"` Modals (`src/gui/components/schedule_week_view.py`)**:
+  - Replaced the unstyled Portal-copy card and fixed `460px` dialog height (which left large empty bottom whitespace) with an intrinsic `AlertDialog(scrollable=True)` (`content_padding=0`, `C.BG` shell + `C.SURFACE` cards): header eyebrow `"CHI TIẾT BUỔI HỌC"` + semantic phase badge (`Sắp diễn ra` / `Đang học` / `Đã kết thúc` / `Tạm ngưng`) + `44x44` close `X`, hero subject + `Mã lớp` / `Mã HP` chips, structured `THỜI GIAN` / `PHÒNG HỌC & CƠ SỞ` / `GIẢNG VIÊN` / `GHI CHÚ` rows with `34x34` soft-tinted icon badges, bordered `"Đề cương chi tiết học phần"` button (with back-to-detail navigation and `ft.Markdown` `on_tap_link` opening links in-app), and prominent primary `"Mở khóa học LMS"` / `"Truy cập Zoom"` buttons cleanly separated from `44x44` external-browser `OPEN_IN_NEW_ROUNDED` boxes (plus automatic inline `https://` link extraction from `room`/`note`).
+- **Cross-Platform In-App WebView Overlay for Schedule & Detail Links (`src/gui/app_controller.py`, `src/gui/view_manager.py`)**:
+  - Diagnosed why links in `"Chi tiết buổi học"` previously launched the external browser on Windows: `InAppWebViewDialog` lacked Windows WebView2 support (`supports_native_webview` returned `False` on Windows and rendered an external-browser fallback prompt), and the old inline external icon sat on the right edge of the `LMS` row.
+  - Added `_app_webview_host` / `_app_webview_pane` to `AppController`'s `main_stack` overlays so `_open_url_in_app()` pops any active modal dialog and mounts `CoursesWebViewPane` (`WindowsWebView2Dock` Edge WebView2 on Windows + `flet_webview.WebView` on Android/iOS/macOS), injecting authenticated Moodle `session_client` + `preview_server` for `courses.ut.edu.vn` / `thnn.ut.edu.vn` URLs (`moodle_site_from_url`), handling history/close on `Escape`/Back (`_navigate_back`), syncing bounds on resize, and disposing cleanly across tab switches, account switches, and shutdown.
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz extensions/flet_uth_background_sync`: **All checks passed!**.
+  - `pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short`: **2933 passed, 26 skipped** (0 failed).
+  - Live headless Flet Web + Chrome DevTools visual smoke (`steel_light` Desktop `1280x820`, Mobile `390x844`, and open `"Chi tiết buổi học"` modal): verified single-line toolbar alignment, right-corner Refresh icon, solid `C.ACCENT` today highlight, and compact custom session detail modal.
+
+## CI Hardening: Manual `workflow_dispatch` Installable Debug-Test ARM64 APK Option (2026-11-22)
+
+- **Branch & Scope**: `ci/android-manual-test-apk` — `.github/workflows/build-android.yml`, `tests/test_release_hardening.py`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - Extended `workflow_dispatch.inputs` in `.github/workflows/build-android.yml` with `apk_arch` (`arm64-v8a` default / `universal`), `apk_signing` (`debug-test` default / `unsigned-diagnostic`), and `apk_namespace` (`isolated`=`com.uthelper.qa` default / `original`=`com.uthelper.uthelper`), while keeping `sign_upload` intact for CH Play AAB.
+  - Strictly gated `debug-test` installable mode to `CHANNEL == apk_lts` and `GITHUB_EVENT_NAME == workflow_dispatch` (both in shell resolution and upload `if:` conditions), so all `pull_request` and `push` runs remain 100% unchanged (universal `com.uthelper.uthelper`, intentionally signature-invalidated with `UNSIGNED_DIAGNOSTIC_ONLY.txt` and verified non-installable via `apksigner verify`).
+  - In `debug-test` mode, verified exact native ABI contents (`arm64-v8a`-only vs `universal`), verified valid Gradle debug signature via `apksigner verify --verbose --print-certs`, emitted companion `DEBUG_TEST_ONLY.txt` outside the APK, and uploaded `android-debug-test-<arch>-<namespace>-<sha>` without touching any production release signing secrets (`ANDROID_KEYSTORE_*` remains exclusive to `release.yml`).
+  - Added regression test `test_android_manual_dispatch_supports_installable_debug_test_apk_without_weakening_pr_guardrails` in `tests/test_release_hardening.py`.
+- **Verification**:
+  - `python -m pytest tests -q --tb=short`: **2895 passed, 26 skipped** (0 failed).
+  - `ruff check src tests scripts`: **All checks passed!**.
+  - Validated `.github/workflows/build-android.yml` with `yaml.safe_load`, `bash -n`, embedded Python `ast.parse`, live bash/Python matrix simulation across `pull_request`/`push`/`workflow_dispatch`/`chplay` cases, and `scripts/validate_gitflow_pr.py --event-name pull_request --base develop --head ci/android-manual-test-apk` (accepted).
+
+## Android Startup Crash Fix: Bump Retracted `jni 1.2.0` Override to `jni 1.2.1` (2026-11-22)
+
+- **Branch & Scope**: `fix/android-jni-1.2.1` — `pyproject.toml`, `tests/test_release_hardening.py`, `docs/architecture/refactoring-log.md`.
+- **Root Cause**:
+  - Live device crash on Android launch: `java.lang.ClassNotFoundException: Didn't find class "Landroid/content/Context;"`.
+  - Confirmed via run `45028377141` (`! jni 1.2.0 (overridden) (retracted, 1.2.1 available)`) and pub.dev tarball diff (`jni 1.2.0 -> 1.2.1`): `jni 1.2.0` (published 2026-11-18, retracted 2026-11-19) introduced `JType.className` and removed `L...;` descriptor stripping in `Jni.findClass()`. Older generated bindings such as `path_provider_android 2.3.1` (`lib/src/path_provider.g.dart:L7279`, `signature => r'Landroid/content/Context;'` without `className`) fell back to passing `"Landroid/content/Context;"` directly to `ClassLoader.loadClass`.
+  - `jni 1.2.1` keeps `JReference.nonNullPointer` (required by `jni_flutter 1.1.0`) while restoring `L...;` descriptor stripping in `Jni.findClass()`.
+- **Changes**:
+  - Updated `[tool.flet.flutter.pubspec.dependency_overrides]` in `pyproject.toml` from `jni = "1.2.0"` to `jni = "1.2.1"`.
+  - Added regression test `test_pyproject_pins_fixed_non_retracted_jni_override` in `tests/test_release_hardening.py`.
+- **Verification**:
+  - `pytest tests/test_release_hardening.py tests/test_chplay_packaging.py tests/test_repository_governance.py tests/test_release_metadata.py extensions/flet_uth_background_sync/tests extensions/flet_uth_quiz/tests -q --tb=short`: **168 passed** (0 failed).
+  - `ruff check src tests scripts`: **All checks passed!**.
+
+
+
 ## iOS App Store packaging preparation (2026-11-22)
 
-- Added distinct `ios_app_store` and `ios_lts` distribution channels. iOS now
-  defaults to the App Store profile, which disables GitHub self-updates; the
-  explicit LTS profile retains sideload update behavior.
-- Added the app-owned `packaging/ios/PrivacyInfo.xcprivacy` manifest for the
-  diagnostic data and required-reason APIs used by the app, kept ATS enabled,
-  and added `scripts/prepare_ios_app_store.py` to validate and install the
-  manifest in the built app bundle.
-- Updated iOS simulator and unsigned LTS archive workflows to emit their
-  respective distribution channels and validate the packaged privacy
-  manifest. The simulator job now runs the dedicated iOS packaging tests.
-- Added distribution, runtime-target, privacy-manifest, ATS, and workflow
-  contract tests; updated the store submission and privacy guides.
-- **Verification**: focused iOS/distribution/release/update tests passed
-  (**147 passed**); `ruff check src tests scripts` passed; `git diff --check`
-  passed. Full local suite: **2347 passed, 36 skipped, 7 failed**. Six failures
-  were Windows MSIX subprocess tests whose child PowerShell process could not
-  find the local Python executable on `PATH`; one existing quiz player timing
-  test failed on Windows. The iOS-specific test set passed.
-
-## iOS App Store, Keychain, and iPhone compatibility follow-up (2026-11-22)
-
-- Added optional numeric `app_store_id` distribution metadata and Apple App
-  Store deep links (`itms-apps://` with HTTPS fallback). The iOS build reads the
-  GitHub Actions `APP_STORE_ID` variable; it remains unset until the app is
-  published.
-- Declared `ITSAppUsesNonExemptEncryption = false` in the iOS build metadata and
-  made the bundle preparation validator require the generated Info.plist flag.
-- Added Keychain-backed iOS app-secret read/write/clear calls to the Swift
-  background-sync plugin using `WhenUnlockedThisDeviceOnly`; generalized the
-  Python mobile secret backend and legacy plaintext migration to iOS while
-  retaining the Android compatibility names.
-- Added the plugin's `PrivacyInfo.xcprivacy` to its CocoaPods resource bundle.
-- Kept the mobile app content inside Flet `SafeArea` and removed redundant
-  dashboard header top padding so content clears the notch/Dynamic Island and
-  home indicator without a second fixed inset.
-- Updated privacy and store documentation for Keychain behavior, encryption
-  declaration, and the not-yet-assigned App Store ID.
-- **Verification**: focused distribution, iOS packaging, config, GUI controller,
-  background-sync, and plugin contract suites passed (**249 passed**); `ruff
-  check src tests scripts extensions/flet_uth_background_sync` and
-  `git diff --check` passed. Native Swift plugin compilation is covered by the
-  macOS iOS build workflow and must be confirmed by the PR check.
+- Added distinct `ios_app_store` and `ios_lts` distribution channels. iOS defaults to the App Store profile, which disables GitHub self-updates; explicit LTS retains sideload updates.
+- Added the app-owned `packaging/ios/PrivacyInfo.xcprivacy` manifest and `scripts/prepare_ios_app_store.py`; kept ATS enabled and wired simulator/LTS archive validation.
+- Added optional numeric `app_store_id` metadata and `itms-apps://` / HTTPS links; the workflow reads GitHub Actions variable `APP_STORE_ID`, intentionally unset until publication.
+- Declared `ITSAppUsesNonExemptEncryption = false` and validate the generated Info.plist value.
+- Added iOS Keychain storage for app secrets in the Swift plugin using `WhenUnlockedThisDeviceOnly`; generalized Python mobile secret migration while preserving Android compatibility aliases.
+- Packaged the plugin `PrivacyInfo.xcprivacy` in its CocoaPods resource bundle and kept mobile content within Flet SafeArea for notch/Dynamic Island/home indicator.
+- Verification before merge: 249 focused tests passed; Ruff and `git diff --check` passed; GitHub iOS, Android, MSIX, Python 3.12-3.14, lint, and security checks passed.

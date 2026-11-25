@@ -62,3 +62,53 @@ def test_safe_file_io_windows_permission_error_retry(tmp_path):
         res = SafeFileIO.write_json_atomic(test_file, {"test": "ok"}, max_retries=3, initial_delay=0.01)
         assert res is True
         assert mock_replace.call_count == 2
+
+
+def test_get_memory_lock_is_stable_across_leaf_existence_and_case(tmp_path):
+    target = tmp_path / "Sample_Cache.json"
+    lock_before = get_memory_lock(target)
+    lock_dot_segment = get_memory_lock(tmp_path / "." / "Sample_Cache.json")
+    target.write_text("{}", encoding="utf-8")
+    lock_existing = get_memory_lock(target)
+    target.unlink()
+    lock_after_unlink = get_memory_lock(target)
+
+    assert lock_before is lock_dot_segment
+    assert lock_before is lock_existing
+    assert lock_before is lock_after_unlink
+
+    if os.path.normcase("A") == os.path.normcase("a"):
+        lock_alt_case = get_memory_lock(Path(str(target).lower()))
+        assert lock_before is lock_alt_case
+
+
+def test_read_json_safe_waits_for_memory_lock_during_atomic_write(tmp_path):
+    target = tmp_path / "rw_race.json"
+    SafeFileIO.write_json_atomic(target, {"seeded": 1})
+
+    read_snapshots = []
+    errors = []
+
+    def writer():
+        try:
+            for idx in range(40):
+                SafeFileIO.write_json_atomic(target, {"seeded": 1, "seq": idx})
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    def reader():
+        try:
+            for _ in range(80):
+                snap = SafeFileIO.read_json_safe(target, dict)
+                read_snapshots.append(snap)
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(writer), pool.submit(reader), pool.submit(reader)]
+        for fut in futures:
+            fut.result()
+
+    assert errors == []
+    assert read_snapshots
+    assert all(isinstance(snap, dict) and snap.get("seeded") == 1 for snap in read_snapshots)

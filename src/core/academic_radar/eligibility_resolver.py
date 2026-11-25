@@ -1,7 +1,23 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 from core.academic_radar.models import CourseEligibility
+
+
+def _safe_float(val: Any) -> float | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped or stripped == "-":
+            return None
+        val = stripped.replace(",", ".")
+    try:
+        numeric = float(val)
+    except (ValueError, TypeError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 # Known conditional subject code prefixes or specific codes verified in UTH curriculum
@@ -31,10 +47,14 @@ class CourseEligibilityResolver:
             )
 
         # Priority 2: Zero-credit / conditional courses
-        credits = float(course_data.get("soTinChi") or course_data.get("credits") or 0.0)
+        parsed_credits = _safe_float(course_data.get("soTinChi"))
+        if parsed_credits is None:
+            parsed_credits = _safe_float(course_data.get("credits"))
+        if parsed_credits is None:
+            parsed_credits = _safe_float(course_data.get("stc"))
         code = str(course_data.get("maLopHocPhan") or course_data.get("maHocPhan") or course_data.get("course_code") or "").strip()
 
-        if credits == 0.0:
+        if parsed_credits == 0.0:
             return CourseEligibility(
                 status="conditional",
                 reason="Học phần điều kiện (0 tín chỉ)",
@@ -47,7 +67,7 @@ class CourseEligibilityResolver:
             )
 
         # Priority 3: Standard academic courses
-        if credits > 0.0:
+        if parsed_credits is not None and parsed_credits > 0.0:
             return CourseEligibility(
                 status="academic",
                 reason="Học phần tính điểm học lực tích lũy",

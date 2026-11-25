@@ -771,6 +771,7 @@ class SettingsView(ft.Container):
             if hasattr(self, "_on_form_field_change"):
                 self._on_form_field_change()
         tb.on_change = _on_change
+        tb._swatch_box = box
         label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
         self._themed_texts.append(label_txt)
         return tb, ft.Row([label_txt, box_click, tb], spacing=10, tight=True)
@@ -1093,9 +1094,14 @@ class SettingsView(ft.Container):
             # after every external theme callback so no broader repaint can tint
             # the swatches with the active application palette.
             self._rebuild_theme_cards()
-            # Show unsaved indicator
+            # Sync dirty indicator and unlock/lock Save button based on baseline diff
+            changed = self.has_changes()
             if hasattr(self, '_unsaved_dot'):
-                self._unsaved_dot.visible = True
+                self._unsaved_dot.visible = changed
+            if hasattr(self, "_update_save_button_state") and callable(
+                getattr(self, "_update_save_button_state")
+            ):
+                self._update_save_button_state()
             # Force full page repaint
             self._page.update()
             log.info("[THEME] page.update() completed successfully")
@@ -1408,6 +1414,23 @@ class SettingsView(ft.Container):
         except Exception:
             pass
 
+    def _sync_color_swatch_boxes(self) -> None:
+        """Keep color preview squares aligned with programmatic TextField updates."""
+        for attr in (
+            "_c_tb_critical",
+            "_c_tb_warning",
+            "_c_tb_safe",
+            "_c_tb_quiz",
+            "_c_tb_ass",
+            "_c_tb_att",
+            "_c_tb_open",
+            "_c_tb_other",
+        ):
+            tb = getattr(self, attr, None)
+            box = getattr(tb, "_swatch_box", None) if tb is not None else None
+            if box is not None:
+                box.bgcolor = tb.value
+
     def _apply_theme_colors(self, theme_key: str):
         """Fill color text fields from preset values."""
         preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["midnight_blue"])
@@ -1419,6 +1442,7 @@ class SettingsView(ft.Container):
         self._c_tb_att.value = preset["attendance"]
         self._c_tb_open.value = preset["open"]
         self._c_tb_other.value = preset["other"]
+        SettingsView._sync_color_swatch_boxes(self)
 
     def _rebuild_theme_cards(self):
         """Restore preset previews and update selection state in place."""
@@ -1547,7 +1571,13 @@ class SettingsView(ft.Container):
         self._dnd_end_field.value = "7"
         self._update_profile_summary()
         self._update_dnd_summary()
-        
+        if hasattr(self, "_unsaved_dot"):
+            self._unsaved_dot.visible = self.has_changes()
+        if hasattr(self, "_update_save_button_state") and callable(
+            getattr(self, "_update_save_button_state")
+        ):
+            self._update_save_button_state()
+
         self.update()
 
     async def _handle_test_login(self, e):
@@ -1772,17 +1802,50 @@ class SettingsView(ft.Container):
         self._debug_info_text.update()
 
     def _do_clear_data_cache(self):
-        """Clear offline activities data cache."""
+        """Clear offline activities, courses catalog, and document preview caches."""
         try:
+            from config import _USER_DATA_DIR
+            from core.courses.preview_cache import PreviewFileCache
             from core.data_cache import DataCache
+
             cache = DataCache()
             cache.clear()
+            preview_cache = PreviewFileCache(
+                cache_dir=_USER_DATA_DIR / "preview_cache"
+            )
+            preview_cache.clear()
+            for subdir_name in ("external", "rendered_pdf"):
+                subdir = preview_cache.cache_dir / subdir_name
+                if subdir.is_dir():
+                    for item in subdir.iterdir():
+                        if item.is_file():
+                            try:
+                                item.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+            for pattern in (
+                "courses_catalog_*.json",
+                "course_tree_*.json",
+                "courses_cache_*.json",
+                "courses_catalog_*.lock",
+                "course_tree_*.lock",
+                "courses_cache_*.lock",
+            ):
+                for path in _USER_DATA_DIR.glob(pattern):
+                    if path.is_file():
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
             self._debug_info_text.value = "Cache offline đã xóa. Dữ liệu sẽ được tải lại từ Moodle."
             self._debug_info_text.color = C.SAFE
         except Exception as ex:
             self._debug_info_text.value = f"Lỗi xóa data cache: {ex}"
             self._debug_info_text.color = C.CRITICAL
-        self._debug_info_text.update()
+        try:
+            self._debug_info_text.update()
+        except Exception:
+            pass
 
     def _do_show_notif_history(self):
         """Show recent notification history entries."""
@@ -2247,8 +2310,17 @@ class SettingsView(ft.Container):
     def _do_show_cache_stats(self):
         """Show cache sizes and statistics."""
         import os
+        from pathlib import Path
         from config import _USER_DATA_DIR
+        from core.courses.preview_cache import PreviewFileCache
         from core.safe_file_io import SafeFileIO
+
+        def _safe_file_size(p: Path) -> int:
+            try:
+                return p.stat().st_size
+            except OSError:
+                return 0
+
         stats = []
         for label, fname in [("Cache thông báo", "notifications_cache.json"),
                               ("Lịch sử thông báo", "notification_history.json"),
@@ -2265,6 +2337,34 @@ class SettingsView(ft.Container):
             else:
                 stats.append(f"{label}: trống")
 
+        preview_cache = PreviewFileCache(cache_dir=_USER_DATA_DIR / "preview_cache")
+        preview_files = [
+            p
+            for p in preview_cache.cache_dir.rglob("*")
+            if p.is_file() and not p.name.startswith(".tmp.")
+        ]
+        if preview_files:
+            preview_size = sum(_safe_file_size(p) for p in preview_files)
+            stats.append(
+                f"Cache xem trước tài liệu: {len(preview_files)} tệp ({preview_size:,} B)"
+            )
+        else:
+            stats.append("Cache xem trước tài liệu: trống")
+
+        course_cache_files: list[Path] = []
+        seen_course_paths: set[Path] = set()
+        for pattern in ("courses_catalog_*.json", "course_tree_*.json", "courses_cache_*.json"):
+            for p in _USER_DATA_DIR.glob(pattern):
+                if p.is_file() and p not in seen_course_paths:
+                    seen_course_paths.add(p)
+                    course_cache_files.append(p)
+        if course_cache_files:
+            course_size = sum(_safe_file_size(p) for p in course_cache_files)
+            stats.append(
+                f"Cache môn học: {len(course_cache_files)} tệp ({course_size:,} B)"
+            )
+        else:
+            stats.append("Cache môn học: trống")
 
         detail = self._orchestrator.get_cached_details_snapshot() if hasattr(self._orchestrator, 'get_cached_details_snapshot') else {}
         stats.append(f"Detail cache (RAM): {len(detail)} mục")
@@ -2273,7 +2373,10 @@ class SettingsView(ft.Container):
             stats.append(f"Settings: {os.path.getsize(str(sp)):,} B")
         self._debug_cache_stats.value = "\n".join(stats)
         self._debug_cache_stats.color = C.TEXT_PRIMARY
-        self._debug_cache_stats.update()
+        try:
+            self._debug_cache_stats.update()
+        except Exception:
+            pass
 
     # Force data refresh
     def _do_force_refresh(self):
@@ -2477,6 +2580,7 @@ class SettingsView(ft.Container):
         self._c_tb_att.value = snapshot.color_attendance
         self._c_tb_open.value = snapshot.color_open
         self._c_tb_other.value = snapshot.color_other
+        SettingsView._sync_color_swatch_boxes(self)
         self._username_field.value = snapshot.uth_username
         self._password_field.value = snapshot.uth_password
         self._sw_always_on_top.value = snapshot.always_on_top
@@ -2486,6 +2590,15 @@ class SettingsView(ft.Container):
         self._sw_start_minimized.value = snapshot.start_minimized
         self._sw_minimize_to_tray.value = snapshot.minimize_to_tray
         self._sw_auto_update.value = snapshot.auto_update_enabled
+        if snapshot.crash_reporting_consent == "not_asked":
+            dd_options = getattr(self._dd_crash_reporting_consent, "options", None)
+            if isinstance(dd_options, list) and not any(
+                getattr(opt, "key", None) == "not_asked" for opt in dd_options
+            ):
+                dd_options.insert(
+                    0,
+                    ft.dropdown.Option("not_asked", "Chưa chọn (đang tắt)"),
+                )
         self._dd_crash_reporting_consent.value = snapshot.crash_reporting_consent
         self._sw_bg_check.value = snapshot.background_check_android
         self._sw_email.value = snapshot.enable_gmail
@@ -2624,7 +2737,8 @@ class SettingsView(ft.Container):
 
             self._original_theme = snapshot.theme
             self._apply_snapshot_to_controls(snapshot)
-            self._refresh_section_colors()
+            if getattr(self, "_rendered_palette", None) != semantic_palette():
+                self._refresh_section_colors()
 
             self._known_courses = set()
             if hasattr(self, '_orchestrator'):
@@ -2692,7 +2806,7 @@ class SettingsView(ft.Container):
             # values in diagnostics; Back must still offer the safe discard path.
             return True
 
-    def _discard_and_close(self) -> None:
+    def _discard_and_close(self, on_closed=None) -> None:
         """Restore the complete persisted baseline before closing Settings."""
         if self._baseline_snapshot is not None:
             baseline = self._baseline_snapshot
@@ -2708,16 +2822,26 @@ class SettingsView(ft.Container):
                 self._unsaved_dot.visible = False
             if hasattr(self, "_save_status"):
                 self._save_status.value = ""
+            if hasattr(self, "_update_save_button_state") and callable(
+                getattr(self, "_update_save_button_state")
+            ):
+                self._update_save_button_state()
             self.update()
-        self._on_close_cb()
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
+        close_cb()
 
-    async def _handle_back(self, e):
+    async def request_close(self, on_closed=None) -> None:
+        """Guard leaving Settings (Back button or tab switch) when unsaved edits exist."""
+        await SettingsView._handle_back(self, None, on_closed=on_closed)
+
+    async def _handle_back(self, e, on_closed=None):
         import logging
         _log = logging.getLogger("settings.dialog")
         _log.debug("Settings Back requested; has_changes=%s", self.has_changes())
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
         if self._loading and not self.has_changes():
             self.cancel_pending_load()
-            self._on_close_cb()
+            close_cb()
             return
         if self.has_changes():
             def close_dlg(e):
@@ -2728,12 +2852,23 @@ class SettingsView(ft.Container):
             def discard_and_close(e):
                 _log.debug("Settings changes discarded")
                 self._page.pop_dialog()
-                self._discard_and_close()
+                if on_closed is None:
+                    self._discard_and_close()
+                else:
+                    SettingsView._discard_and_close(self, on_closed=on_closed)
 
             def save_and_close(e):
                 _log.debug("Settings save requested from Back dialog")
                 self._page.pop_dialog()
-                self._page.run_task(self._save_and_close_if_valid, e)
+                if on_closed is None:
+                    self._page.run_task(self._save_and_close_if_valid, e)
+                else:
+                    self._page.run_task(
+                        SettingsView._save_and_close_if_valid,
+                        self,
+                        e,
+                        on_closed,
+                    )
 
             confirm_dlg = ft.AlertDialog(
                 title=ft.Row(controls=[
@@ -2757,13 +2892,14 @@ class SettingsView(ft.Container):
             self._page.show_dialog(confirm_dlg)
             _log.debug("Settings discard dialog opened")
         else:
-            self._on_close_cb()
+            close_cb()
 
-    async def _save_and_close_if_valid(self, e) -> bool:
+    async def _save_and_close_if_valid(self, e, on_closed=None) -> bool:
         """Close Settings only after validation and persistence succeed."""
         if not await self._save(e):
             return False
-        self._on_close_cb()
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
+        close_cb()
         return True
 
     async def _save(self, e) -> bool:

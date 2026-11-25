@@ -44,6 +44,7 @@ on:
       - '.github/workflows/build-msstore.yml'
       - 'src/core/distribution.py'
       - 'src/assets/icon.png'
+      - 'src/assets/office_viewer/**'
 
 concurrency:
   group: build-msstore-${{ github.ref }}
@@ -202,12 +203,13 @@ jobs:
           ./scripts/package_msix.ps1 @packArgs
 
           $verifyArgs = @{
-            MsixPath     = $outputMsix
-            Channel      = "msstore"
-            IdentityName = $identityName
-            Publisher    = $publisher
-            Version      = $msixVersion
-            Output       = $evidenceJson
+            MsixPath            = $outputMsix
+            Channel             = "msstore"
+            IdentityName        = $identityName
+            Publisher           = $publisher
+            Version             = $msixVersion
+            Output              = $evidenceJson
+            RequireOfficeViewer = $true
           }
           if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
             $verifyArgs.StoreProductId = $storeProductId

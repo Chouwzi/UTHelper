@@ -8,7 +8,8 @@ param(
     [string]$Output = "",
     [switch]$RunWack,
     [string]$WackReportPath = "",
-    [int]$WackTimeoutSeconds = 900
+    [int]$WackTimeoutSeconds = 900,
+    [switch]$RequireOfficeViewer
 )
 
 $ErrorActionPreference = "Stop"
@@ -341,6 +342,33 @@ try {
         }
         if ($null -eq $observedProductId -and $null -ne $fileProductId) {
             $observedProductId = $fileProductId
+        }
+    }
+
+    $officeViewerDir = Join-Path $inspectRoot "app\assets\office_viewer"
+    if ($RequireOfficeViewer -or (Test-Path -LiteralPath $officeViewerDir -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $officeViewerDir -PathType Container)) {
+            throw "MSIX verification failed: app\assets\office_viewer directory is missing"
+        }
+        $requiredOfficeViewerAssets = @(
+            "docx_host.html",
+            "docx_host.js",
+            "docx-preview.min.js",
+            "jszip.min.js",
+            "pptx_host.html",
+            "pptx_host.js",
+            "pptx_engine.js",
+            "viewer.css",
+            "viewer_common.js"
+        )
+        foreach ($assetName in $requiredOfficeViewerAssets) {
+            $assetPath = Join-Path $officeViewerDir $assetName
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+                throw "MSIX verification failed: required office_viewer asset is missing: $assetName"
+            }
+            if ((Get-Item -LiteralPath $assetPath).Length -le 0) {
+                throw "MSIX verification failed: office_viewer asset is empty: $assetName"
+            }
         }
     }
 

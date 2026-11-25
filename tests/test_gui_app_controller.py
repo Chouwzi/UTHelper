@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
 import pytest
@@ -14,8 +14,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 import gui.app_controller as app_controller_module
 from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
-from core.update_coordinator import UpdateEvent, UpdateEventKind
-from core.update_models import ReleasePackage
+from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
+from core.update_models import LaunchResult, ReleasePackage
 from gui.app_controller import (
     AppController,
 )
@@ -51,7 +51,7 @@ def test_dashboard_filter_models_share_counts_and_short_trigger_labels():
 
     assert urgency[0].trigger_label == "Mức độ"
     assert urgency[1].count == 1
-    assert activity_type[0].trigger_label == "Tất cả"
+    assert activity_type[0].trigger_label == "Loại bài"
     assert activity_type[1].count == 4
     assert courses[0].trigger_label == "Môn học"
     assert [option.key for option in courses] == ["all", "Course A", "Course B"]
@@ -760,6 +760,9 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     controller.orchestrator = None
     controller._data_cache = None
     controller._portal_client = SimpleNamespace(clear_token=Mock())
+    controller._portal_week_client = SimpleNamespace(clear_token=Mock())
+    controller._week_schedule_cache = SimpleNamespace(set_namespace=Mock())
+    controller.calendar_view = SimpleNamespace(reset_schedule=Mock())
     coordinator = SimpleNamespace(
         replace_cache=Mock(), ensure_today=Mock(), refresh=Mock()
     )
@@ -796,6 +799,12 @@ def test_settings_saved_updates_identity_before_scheduling_any_task(monkeypatch)
     # namespace happens to hold (ensure_today would publish it as READY).
     assert scheduled[1][0] is coordinator.refresh
     assert scheduled[1][1] == ("credentials_changed",)
+    controller._portal_client.clear_token.assert_called_once()
+    controller._portal_week_client.clear_token.assert_called_once()
+    controller._week_schedule_cache.set_namespace.assert_called_once_with(
+        f"{settings.PORTAL_API_BASE}|new-user"
+    )
+    controller.calendar_view.reset_schedule.assert_called_once()
     coordinator.ensure_today.assert_not_called()
     coordinator.replace_cache.assert_called_once()
 
@@ -926,13 +935,18 @@ def test_shared_back_navigation_returns_to_dashboard_from_every_child_view():
         controller.detail_view = SimpleNamespace(visible=False)
         controller.calendar_view = SimpleNamespace(visible=False)
         controller.grade_overview_view = SimpleNamespace(visible=False)
+        controller.course_grades_view = SimpleNamespace(visible=False)
+        controller.courses_view = SimpleNamespace(visible=False)
         controller._close_detail = AsyncMock()
         controller._close_calendar = AsyncMock()
         controller._close_grades = AsyncMock()
+        controller._close_course_grades = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
 
         cases = (
             (controller.settings_view, controller.settings_view._handle_back),
             (controller.detail_view, controller._close_detail),
+            (controller.course_grades_view, controller._close_course_grades),
             (controller.calendar_view, controller._close_calendar),
             (controller.grade_overview_view, controller._close_grades),
         )
@@ -1756,3 +1770,598 @@ def test_android_startup_sequence_preserves_legacy_json_when_vault_write_fails(
     finally:
         config.register_secret_backend(None)
 
+
+def test_complete_login_success_resets_schedule_and_course_grade_state():
+    import config
+
+    calls = []
+    controller = AppController.__new__(AppController)
+    controller._portal_client = SimpleNamespace(clear_token=lambda: calls.append("clear_portal_day"))
+    controller._portal_week_client = SimpleNamespace(clear_token=lambda: calls.append("clear_portal_week"))
+    controller._week_schedule_cache = SimpleNamespace(
+        set_namespace=lambda ns: calls.append(("cache_ns", ns))
+    )
+    controller.calendar_view = SimpleNamespace(reset_schedule=lambda: calls.append("reset_schedule"))
+    controller._settings_identity = ("old_user", "old_pw")
+    controller.orchestrator = SimpleNamespace(
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: calls.append("clear_moodle")),
+        clear_detail_cache=lambda: calls.append("clear_detail"),
+        _userid_cache=99,
+        client=SimpleNamespace(clear_session=lambda: calls.append("clear_client_session")),
+        thnn_client=SimpleNamespace(clear_session=lambda: calls.append("clear_thnn_session")),
+        course_grade_monitor=SimpleNamespace(
+            set_namespace=lambda ns: calls.append(("grade_ns", ns))
+        ),
+        latest_course_grades=["stale"],
+    )
+    controller.quiz_player_view = SimpleNamespace(visible=False)
+    controller._today_schedule_coordinator = SimpleNamespace(
+        replace_cache=lambda c: calls.append(("today_cache", c._path.name)),
+        refresh="refresh_fn",
+    )
+    controller._today_schedule_component = SimpleNamespace(
+        set_state=lambda s: calls.append(("today_state", s.status))
+    )
+    controller._load_data_async = AsyncMock()
+    controller._safe_run_task = lambda fn, *args, **kwargs: calls.append(("task", getattr(fn, "__name__", str(fn)), args, kwargs))
+
+    old_user, old_pass = config.settings.UTH_USERNAME, config.settings.UTH_PASSWORD
+    try:
+        config.settings.UTH_USERNAME = "student99"
+        config.settings.UTH_PASSWORD = "pw"
+        asyncio.run(controller._complete_login_success())
+    finally:
+        config.settings.UTH_USERNAME = old_user
+        config.settings.UTH_PASSWORD = old_pass
+
+    assert "clear_portal_day" in calls
+    assert "clear_portal_week" in calls
+    assert ("cache_ns", f"{config.settings.PORTAL_API_BASE}|student99") in calls
+    assert "reset_schedule" in calls
+    assert ("grade_ns", f"{config.settings.MOODLE_BASE_URL}|student99") in calls
+    assert "clear_client_session" in calls
+    assert "clear_thnn_session" in calls
+    assert controller.orchestrator.latest_course_grades == []
+
+
+def test_check_grades_background_skips_n_plus_1_html_scrape_when_courses_hidden():
+    ws_calls = []
+    html_calls = []
+    controller = AppController.__new__(AppController)
+    controller.orchestrator = SimpleNamespace(
+        check_grade_changes=lambda: ws_calls.append(True) or [],
+        refresh_course_grades=lambda: html_calls.append(True) or ([], []),
+    )
+    controller.notifier = SimpleNamespace(dispatch_grade_alert=AsyncMock())
+    controller.courses_view = SimpleNamespace(visible=False)
+
+    asyncio.run(controller._check_grades_background())
+    assert ws_calls == [True]
+    assert html_calls == []
+
+
+def test_close_calendar_and_grades_sync_rail_active_and_show_grades_reports_error():
+    syncs = []
+    errors = []
+    controller = AppController.__new__(AppController)
+    controller.view_manager = SimpleNamespace(
+        close_calendar=AsyncMock(side_effect=lambda: syncs.append("close_cal")),
+        close_grades=AsyncMock(side_effect=lambda: syncs.append("close_grades")),
+        show_grades_loading=lambda: syncs.append("loading"),
+        show_grades_error=lambda msg: errors.append(msg),
+    )
+    controller._diag_screen = lambda s: syncs.append(("screen", s))
+    controller._diag_breadcrumb = lambda *args, **kwargs: None
+    controller._sync_rail_active = lambda: syncs.append("sync_rail")
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=MagicMock(side_effect=RuntimeError("Portal down"))
+    )
+
+    asyncio.run(controller._close_calendar())
+    asyncio.run(controller._close_grades())
+    asyncio.run(controller._show_grades(force_refresh=False))
+
+    assert "close_cal" in syncs
+    assert "close_grades" in syncs
+    assert syncs.count("sync_rail") == 3
+    assert len(errors) == 1
+    assert "Portal" in errors[0]
+
+
+def test_detail_view_routes_links_in_app_by_default_and_external_opt_out():
+    from gui.components.detail_view import DetailView
+
+    in_app = []
+    external = []
+    page = SimpleNamespace(
+        width=390,
+        height=800,
+        dialogs=[],
+        show_dialog=lambda _d: None,
+        update=lambda: None,
+    )
+    view = DetailView(
+        page,
+        lambda: None,
+        on_open_url=lambda u, t: in_app.append((u, t)),
+        on_open_external=lambda u: external.append(u),
+    )
+    view._current_url = "https://courses.ut.edu.vn/mod/assign/view.php?id=55"
+    view._current_data = {"title": "Bài tập 1"}
+
+    asyncio.run(view._open_in_app(None))
+    asyncio.run(view._open_external(None))
+    asyncio.run(
+        view._handle_link_tap(
+            SimpleNamespace(data="https://courses.ut.edu.vn/mod/page/view.php?id=9")
+        )
+    )
+    asyncio.run(
+        view._handle_link_tap(SimpleNamespace(data="http://courses.ut.edu.vn/insecure"))
+    )
+
+    assert in_app == [
+        ("https://courses.ut.edu.vn/mod/assign/view.php?id=55", "Bài tập 1"),
+        ("https://courses.ut.edu.vn/mod/page/view.php?id=9", "Bài tập 1"),
+    ]
+    assert external == ["https://courses.ut.edu.vn/mod/assign/view.php?id=55"]
+
+
+def test_open_external_update_url_validates_github_releases_strictly():
+    launched = []
+    controller = _update_event_controller()
+    controller._safe_run_task = lambda fn, *args, **kwargs: (launched.append(fn), True)[1]
+
+    assert (
+        controller._open_external_update_url(
+            "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1"
+        )
+        is True
+    )
+    assert len(launched) == 1
+
+    for bad_url in (
+        "http://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://evil.example/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://user@github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://github.com:444/Chouwzi/UTHelper/releases/tag/v2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1?next=evil",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1#frag",
+        "https://github.com/Other/Repo/releases/tag/v2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/../issues",
+        "https://github.com/Chouwzi/UTHelper/releases/%2e%2e/issues",
+        "https://github.com/Chouwzi/UTHelper/releases/%2e%2e%5cissues",
+        "https://github.com/Chouwzi/UTHelper/releases/tag\\v2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/%5cv2.5.1",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1\x7f",
+        "https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1\x85",
+        "javascript:alert(1)",
+    ):
+        assert controller._open_external_update_url(bad_url) is False
+    assert len(launched) == 1
+
+
+def test_manual_download_required_is_not_overwritten_by_subsequent_update_available():
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    dialogs = []
+    controller._show_update_confirmation = lambda: dialogs.append("confirm")
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED, controller._update_candidate)
+        )
+    )
+    assert controller._update_ready is False
+    assert controller._update_manual_download is True
+    assert controller._update_btn.content == "Mở trang tải"
+    assert controller._update_text.value == "Có bản cập nhật"
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+        )
+    )
+    assert controller._update_ready is False
+    assert controller._update_btn.content == "Mở trang tải"
+    assert controller._update_text.value == "Có bản cập nhật"
+    controller._request_update_download()
+    assert dialogs == ["confirm"]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_release_page"),
+    [
+        ("sha256_mismatch", False),
+        ("size_mismatch", False),
+        ("installed_signer_mismatch", True),
+        ("installer strategy is not allowed", True),
+    ],
+)
+def test_install_failed_clears_update_ready_for_mismatches_and_release_page_errors(
+    reason, expected_release_page
+):
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    controller._update_ready = True
+    requested = []
+    controller._update_coordinator = SimpleNamespace(
+        request_download=lambda candidate: requested.append(candidate)
+    )
+    controller._show_update_confirmation = lambda: requested.append("confirm")
+
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(
+                UpdateEventKind.INSTALL_FAILED,
+                controller._update_candidate,
+                message=reason,
+            )
+        )
+    )
+    assert controller._update_ready is False
+    assert controller._update_open_release_page is expected_release_page
+
+    # A subsequent UPDATE_AVAILABLE must not show "Cài đặt" for a failed package.
+    asyncio.run(
+        controller._apply_update_event(
+            UpdateEvent(UpdateEventKind.UPDATE_AVAILABLE, controller._update_candidate)
+        )
+    )
+    assert controller._update_btn.content == "Cập nhật"
+    controller._request_update_download()
+    assert requested == [controller._update_candidate]
+
+
+def test_app_controller_retry_after_sha256_mismatch_redownloads_with_real_coordinator(tmp_path):
+    from datetime import datetime, timezone
+    import threading
+    from core.update_models import (
+        ReleaseManifest,
+        RuntimeTarget,
+        UpdateCandidate,
+        VerificationResult,
+    )
+
+    controller = _update_event_controller()
+    controller._distribution_profile = SimpleNamespace(supports_github_self_update=True)
+    package = ReleasePackage(
+        platform="android",
+        architecture="arm64",
+        package_type="apk",
+        install_channel="sideload",
+        url="https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
+        sha256="a" * 64,
+        size=7,
+        signer_identity="com.uthelper.uthelper",
+        certificate_fingerprint="b" * 64,
+        install_strategy={"kind": "android_package_installer"},
+    )
+    candidate = UpdateCandidate(
+        manifest=ReleaseManifest(
+            schema_version=2,
+            release_version="2.5.1",
+            minimum_supported_version="2.0.0",
+            published_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+            release_notes_url="https://github.com/Chouwzi/UTHelper/releases/tag/v2.5.1",
+            packages=(package,),
+        ),
+        package=package,
+        automatic_install_allowed=False,
+        required_update=False,
+    )
+    controller._update_candidate = candidate
+    events_seen = []
+    ready_event = threading.Event()
+    failed_event = threading.Event()
+
+    def _sink(ev):
+        events_seen.append(ev)
+        controller._on_update_event(ev)
+        if ev.kind is UpdateEventKind.READY_TO_INSTALL:
+            ready_event.set()
+        elif ev.kind is UpdateEventKind.INSTALL_FAILED:
+            failed_event.set()
+
+    def _run_task(coro_fn, *args, **kwargs):
+        asyncio.run(coro_fn(*args, **kwargs))
+        return True
+
+    controller._safe_run_task = _run_task
+    pkg_path = tmp_path / "UTHelper-2.5.1.apk"
+
+    class _FakeDownloader:
+        def __init__(self):
+            self.calls = 0
+
+        def download(self, _package, *, cancel, progress=None):
+            del cancel, progress
+            self.calls += 1
+            pkg_path.write_bytes(b"corrupt" if self.calls == 1 else b"valid")
+            return pkg_path
+
+    class _FakeVerifier:
+        def verify(self, _path, _candidate):
+            return VerificationResult(True)
+
+    class _FakeLauncher:
+        supports_cached_package_retry = True
+
+        def __init__(self):
+            self.result = LaunchResult(False, "sha256_mismatch", status="failed")
+
+        def launch(self, _path, _package):
+            return self.result
+
+        def cancel(self):
+            return None
+
+    class _FakeClient:
+        def fetch_candidate(self, _version, _target, *, cancel=None):
+            del cancel
+            return candidate
+
+    downloader = _FakeDownloader()
+    launcher = _FakeLauncher()
+    coordinator = UpdateCoordinator(
+        client=_FakeClient(),
+        downloader=downloader,
+        verifier=_FakeVerifier(),
+        launcher=launcher,
+        target=RuntimeTarget("android", "arm64", "sideload"),
+        current_version="2.5.0",
+        event_sink=_sink,
+        automatic_enabled=False,
+    )
+    controller._update_coordinator = coordinator
+
+    try:
+        coordinator.request_download(candidate)
+        assert ready_event.wait(2.0)
+        assert downloader.calls == 1
+        assert controller._update_ready is True
+
+        coordinator.confirm_install()
+        assert failed_event.wait(2.0)
+        assert controller._update_ready is False
+        assert controller._update_btn.content == "Thử lại"
+        assert not pkg_path.exists()
+
+        ready_event.clear()
+        launcher.result = LaunchResult(True, "installer_opened", status="installer_opened")
+        controller._request_update_download()
+        assert ready_event.wait(2.0)
+        assert downloader.calls == 2
+        assert controller._update_ready is True
+    finally:
+        assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_lookup_moodle_course_grades_cached_and_async_with_semester_disambiguation(tmp_path):
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.courses.cache_store import CourseCacheStore
+    from core.courses.models import (
+        CourseGradeItem as CoreMoodleGradeItem,
+        CourseSummary,
+    )
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="test|user")
+    old_course = CourseSummary(
+        id=101,
+        source="courses",
+        fullname="[HKI_2024-2025] Lập trình Python (012000101)",
+        shortname="HKI_2024-2025_012000101",
+        display_name="Lập trình Python",
+        course_code="012000101",
+        semester_label="HKI 2024-2025",
+        last_synced_at=100,
+    )
+    cur_course = CourseSummary(
+        id=202,
+        source="courses",
+        fullname="[HKI_2025-2026] Lập trình Python (012000101)",
+        shortname="HKI_2025-2026_012000101",
+        display_name="Lập trình Python",
+        course_code="012000101",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    uncached_course = CourseSummary(
+        id=303,
+        source="courses",
+        fullname="[HKI_2025-2026] Mạng máy tính (012000201)",
+        shortname="HKI_2025-2026_012000201",
+        display_name="Mạng máy tính",
+        course_code="012000201",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    store.save_catalog([old_course, cur_course, uncached_course], synced_at=200)
+    store.save_course_detail(
+        "courses",
+        101,
+        sections=[],
+        grades=[CoreMoodleGradeItem(id=1, item_name="Old Grade", grade_formatted="5.0")],
+        synced_at=100,
+    )
+    store.save_course_detail(
+        "courses",
+        202,
+        sections=[],
+        grades=[CoreMoodleGradeItem(id=2, item_name="New Grade", grade_formatted="9.5")],
+        synced_at=200,
+    )
+
+    loaded_calls = []
+
+    class _FakeCatalogService:
+        def refresh_catalog(self, include_thnn=False):
+            return [old_course, cur_course, uncached_course]
+
+        def load_course_grades(self, source, course_id, force=False):
+            loaded_calls.append((source, course_id, force))
+            grades = [CoreMoodleGradeItem(id=3, item_name="Lab 1", grade_formatted="8.0")]
+            store.save_course_detail(source, course_id, sections=[], grades=grades, synced_at=300)
+            return grades
+
+    controller = AppController.__new__(AppController)
+    controller._course_cache_store = store
+    controller._course_catalog_service = _FakeCatalogService()
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: []),
+    )
+
+    portal_python = RadarCourseGradeItem(
+        course_id="1",
+        course_code="012000101",
+        course_name="Lập trình Python",
+        credits=3,
+        subject_code="0120001",
+        class_code="012000101",
+    )
+    res_cached = controller._lookup_moodle_course_grades_cached(
+        portal_python, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res_cached.course_id == 202
+    assert res_cached.source == "courses"
+    assert res_cached.needs_async_fetch is False
+    assert [g.item_name for g in res_cached.grades] == ["New Grade"]
+
+    # Matched summary with empty detail.grades triggers async fetch
+    portal_net = RadarCourseGradeItem(
+        course_id="2",
+        course_code="012000201",
+        course_name="Mạng máy tính",
+        credits=3,
+        subject_code="0120002",
+        class_code="012000201",
+    )
+    res_pending = controller._lookup_moodle_course_grades_cached(
+        portal_net, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res_pending.course_id == 303
+    assert res_pending.grades == []
+    assert res_pending.needs_async_fetch is True
+
+    res_async = asyncio.run(
+        controller._fetch_moodle_course_grades_async(
+            portal_net, "Học kỳ 1 năm học 2025-2026"
+        )
+    )
+    assert loaded_calls == [("courses", 303, False)]
+    assert res_async.needs_async_fetch is False
+    assert [g.item_name for g in res_async.grades] == ["Lab 1"]
+
+
+def test_navigate_back_closes_grade_overview_dialog_before_closing_grades():
+    async def scenario():
+        from unittest.mock import AsyncMock, Mock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(visible=False, _handle_back=AsyncMock())
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.course_grades_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(
+            visible=True,
+            handle_back=Mock(return_value=True),
+        )
+        controller._close_grades = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
+
+        assert await controller._navigate_back() is True
+        controller.grade_overview_view.handle_back.assert_called_once_with()
+        controller._close_grades.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_lookup_moodle_course_grades_cached_does_not_shadow_matched_course_with_legacy_monitor(
+    tmp_path,
+):
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.course_grade_scraper import CourseGradeReport, GradeRow
+    from core.course_grades_service import CourseWithGrades
+    from core.courses.cache_store import CourseCacheStore
+    from core.courses.models import CourseSummary
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="test|shadow")
+    matched_summary = CourseSummary(
+        id=501,
+        source="courses",
+        fullname="[HKI_2025-2026] Cơ sở dữ liệu (012005501)",
+        shortname="HKI_2025-2026_012005501",
+        display_name="Cơ sở dữ liệu",
+        course_code="012005501",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    store.save_catalog([matched_summary], synced_at=200)
+
+    stale_monitor_course = CourseWithGrades(
+        course_id=99,
+        name="Cơ sở dữ liệu",
+        shortname="HKI_2023-2024_OLD",
+        report=CourseGradeReport(
+            course_id=99,
+            rows=[GradeRow(name="Old Exam", grade="5.0", percentage="50 %")],
+        ),
+    )
+
+    controller = AppController.__new__(AppController)
+    controller._course_cache_store = store
+    controller._course_catalog_service = SimpleNamespace()
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[stale_monitor_course],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: [stale_monitor_course]),
+    )
+
+    portal_db = RadarCourseGradeItem(
+        course_id="501",
+        course_code="012005501",
+        course_name="Cơ sở dữ liệu",
+        credits=3,
+        subject_code="0120055",
+        class_code="012005501",
+    )
+    res = controller._lookup_moodle_course_grades_cached(
+        portal_db, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res.course_id == 501
+    assert res.source == "courses"
+    assert res.grades == []
+    assert res.needs_async_fetch is True
+
+
+def test_match_portal_course_to_summary_rejects_short_summary_course_code_prefix():
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.courses.models import CourseSummary
+    from gui.components.course_grade_table import match_portal_course_to_summary
+
+    portal_course = RadarCourseGradeItem(
+        course_id="12",
+        course_code="012000901",
+        course_name="Lập trình C",
+        credits=3,
+        subject_code="0120009",
+        class_code="012000901",
+    )
+    short_code_summary = CourseSummary(
+        id=10,
+        source="courses",
+        fullname="[HKI_2025-2026] Nhập môn AI (01)",
+        shortname="HKI_2025-2026_01",
+        display_name="Nhập môn AI",
+        course_code="01",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    assert (
+        match_portal_course_to_summary(
+            portal_course,
+            [short_code_summary],
+            semester_name="Học kỳ 1 năm học 2025-2026",
+        )
+        is None
+    )
