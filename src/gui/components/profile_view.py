@@ -45,7 +45,6 @@ from core.student_profile import (
     summarize_tuition,
 )
 from gui.core.theme import C
-from gui.components.uth_campus_photo import campus_photo_src
 
 logger = logging.getLogger(__name__)
 
@@ -623,7 +622,7 @@ class ProfileView(ft.Container):
         # corner, then the 2-column info grid underneath.
         campus_photo = ft.Container(
             content=ft.Image(
-                src=campus_photo_src(),
+                src="uth_campus.jpg",
                 width=236,
                 height=134,
                 fit=ft.BoxFit.COVER,
