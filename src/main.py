@@ -50,7 +50,9 @@ def _boot_log(msg):
 
 _boot_log(f"Python {sys.version}")
 _boot_log(f"Platform: {sys.platform}")
-_boot_log(f"Android: {hasattr(sys, '_ANDROID_')}")
+_boot_log(
+    f"Android: {hasattr(sys, '_ANDROID_') or 'android' in sys.platform.lower() or 'ANDROID_BOOTLOGO' in os.environ}"
+)
 
 # Platform-aware data directories
 try:

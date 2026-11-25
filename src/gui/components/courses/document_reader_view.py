@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import inspect
 import json
 from pathlib import Path
 import re
 import threading
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import flet as ft
 
@@ -50,6 +52,22 @@ _MAX_NATIVE_TABLE_COLS = 40
 _WHITESPACE_RE = re.compile(r"\s+")
 _MONO_FONT = "Consolas, 'Courier New', monospace"
 _SERIF_FONT = "Georgia, 'Times New Roman', Cambria, serif"
+
+
+def _with_viewer_theme_param(url: str, mode: str) -> str:
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        query_items = [
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "theme"
+        ]
+        query_items.append(("theme", "dark" if mode == "dark" else "light"))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query_items), parts.fragment)
+        )
+    except Exception:
+        return url
 
 
 def _split_markdown_by_outline(
@@ -557,10 +575,26 @@ class DocumentReaderView(ft.Container):
         self._dark_reader = not self._dark_reader
         self._sync_night_button()
         if self._office_webview is not None:
+            mode = "dark" if self._dark_reader else "light"
+            if self._office_viewer is not None:
+                updated_viewer_url = _with_viewer_theme_param(
+                    self._office_viewer.viewer_url, mode
+                )
+                self._office_viewer = replace(
+                    self._office_viewer, viewer_url=updated_viewer_url
+                )
+                self._active_webview_url = updated_viewer_url
+                if self._embedded_host is not None:
+                    self._embedded_host._url = updated_viewer_url
+                    wv_ctrl = getattr(self._embedded_host, "_wv", None)
+                    if wv_ctrl is not None and hasattr(wv_ctrl, "url"):
+                        try:
+                            wv_ctrl.url = updated_viewer_url
+                        except Exception:
+                            pass
             evaluator = getattr(self._embedded_host or self._office_webview, "eval_js", None)
             if callable(evaluator):
                 async def _set_office_theme() -> None:
-                    mode = "dark" if self._dark_reader else "light"
                     result = evaluator(f"window.setTheme && window.setTheme('{mode}');")
                     if inspect.isawaitable(result):
                         await result
@@ -577,11 +611,12 @@ class DocumentReaderView(ft.Container):
                 return
         target_mode = bool(self._dark_reader)
         # Offload uncached non-PDF conversion when mounted on a live page so UI never stutters
+        live_page = self._get_page()
         if (
             self._kind != "pdf"
             and self._rendered_pdf_bytes is None
             and target_mode not in self._converted_cache
-            and self._get_page() is not None
+            and live_page is not None
         ):
             safe_control_update(self._night_btn)
 
@@ -603,7 +638,7 @@ class DocumentReaderView(ft.Container):
                         self._set_body_content(self._build_body())
                         safe_control_update(self)
 
-                marshal_to_ui(self, _apply_converted)
+                marshal_to_ui(self, _apply_converted, page=live_page)
 
             threading.Thread(target=_convert_async, name="DocThemeToggle", daemon=True).start()
             return
@@ -2888,6 +2923,7 @@ class DocumentReaderView(ft.Container):
             page_cards.append(slot)
 
         if session.can_render_images:
+            hydrate_page = self._get_page()
             all_batch_indices = [
                 self._pdf_page_index,
                 *[i for i in range(batch_start, batch_end) if i != self._pdf_page_index],
@@ -2912,7 +2948,7 @@ class DocumentReaderView(ft.Container):
                             s.content = c
                             safe_control_update(s)
 
-                        marshal_to_ui(slot, _mount_slot)
+                        marshal_to_ui(slot, _mount_slot, page=hydrate_page)
                 # Pre-warm opposite dark/light mode in RAM so clicking Dark/Light is 0ms
                 alt_dark = not cur_dark
                 for p_idx in all_batch_indices:
@@ -3359,7 +3395,7 @@ class DocumentReaderView(ft.Container):
         ) or (
             self._active_webview_url is not None
             and self._preview_server.has_active_url(self._active_webview_url)
-            and (self._kind == "pdf" or self._dark_reader)
+            and (self._kind in {"pdf", "text"} or self._dark_reader)
         )
         if not preserve_webview:
             self._set_body_content(self._build_body())

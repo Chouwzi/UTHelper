@@ -1011,6 +1011,7 @@ class CoursesCoordinator:
             preset="archive" if (att.is_archive or att.preview_kind == "archive") else "document",
             on_back=self.courses_view.pop_overlay,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            page=self._page,
         )
         self.courses_view.push_overlay(loading_overlay, tag=f"viewer:load:{req_seq}")
         preopened_pdf: Optional[PdfDocumentSession] = None

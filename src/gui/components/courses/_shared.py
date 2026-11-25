@@ -10,16 +10,23 @@ import flet as ft
 from gui.core.theme import C
 
 
-def marshal_to_ui(control: ft.BaseControl, fn: Callable[[], None]) -> None:
+def marshal_to_ui(
+    control: ft.BaseControl,
+    fn: Callable[[], None],
+    *,
+    page: Any = None,
+) -> None:
     """Run ``fn`` on the control's Flet asyncio loop when invoked off-loop."""
-    try:
-        page = control.page
-    except Exception:
-        page = None
-
-    if page is not None:
+    resolved_page = page
+    if resolved_page is None:
         try:
-            loop = getattr(page, "loop", None)
+            resolved_page = control.page
+        except Exception:
+            resolved_page = None
+
+    if resolved_page is not None:
+        try:
+            loop = getattr(resolved_page, "loop", None)
         except Exception:
             # Flet 0.86+ raises RuntimeError("An attempt to fetch destroyed session.")
             # once the Page session weakref expires; drop stale callbacks safely.
@@ -539,12 +546,14 @@ class PaneLoadingOverlay(ft.Container):
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
+        page: Any = None,
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
         self._on_back = on_back
         self._expanded = bool(is_expanded)
         self._show_expand_toggle = bool(show_expand_toggle)
         self._on_toggle_expand = on_toggle_expand
+        self._page_ref = page
         self._disposed = False
 
         self._expand_btn = build_expand_toggle_button(
@@ -619,6 +628,8 @@ class PaneLoadingOverlay(ft.Container):
             page = self.page
         except RuntimeError:
             page = None
+        if page is not None:
+            self._page_ref = page
         run_task = getattr(page, "run_task", None) if page is not None else None
         if callable(run_task):
             run_task(self._pulse_loop_async)
@@ -635,10 +646,15 @@ class PaneLoadingOverlay(ft.Container):
             await asyncio.sleep(0.68)
 
     def set_status(self, message: str, *, subtitle: Optional[str] = None) -> None:
-        self._status_label.value = message
-        if subtitle is not None:
-            self._subtitle_text.value = subtitle
-        safe_control_update(self)
+        def _apply() -> None:
+            if self._disposed:
+                return
+            self._status_label.value = message
+            if subtitle is not None:
+                self._subtitle_text.value = subtitle
+            safe_control_update(self)
+
+        marshal_to_ui(self, _apply, page=self._page_ref)
 
     def set_progress(
         self,
@@ -647,15 +663,23 @@ class PaneLoadingOverlay(ft.Container):
         message: Optional[str] = None,
         subtitle: Optional[str] = None,
     ) -> None:
-        if fraction is None:
-            self._progress_bar.value = None
-        else:
-            self._progress_bar.value = max(0.03, min(1.0, float(fraction)))
-        if message is not None:
-            self._status_label.value = message
-        if subtitle is not None:
-            self._subtitle_text.value = subtitle
-        safe_control_update(self)
+        clamped = (
+            None
+            if fraction is None
+            else max(0.03, min(1.0, float(fraction)))
+        )
+
+        def _apply() -> None:
+            if self._disposed:
+                return
+            self._progress_bar.value = clamped
+            if message is not None:
+                self._status_label.value = message
+            if subtitle is not None:
+                self._subtitle_text.value = subtitle
+            safe_control_update(self)
+
+        marshal_to_ui(self, _apply, page=self._page_ref)
 
     def set_expanded(self, expanded: bool, *, visible: bool = True) -> None:
         self._expanded = bool(expanded)

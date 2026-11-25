@@ -25,6 +25,7 @@ import flet as ft
 
 import platform_utils
 from gui.components.courses._shared import safe_control_update
+from gui.core import utils as _gui_utils
 from gui.core.theme import C
 from gui.view_models.courses_state import safe_http_url
 
@@ -127,6 +128,22 @@ def _extract_loopback_port(url: str) -> Optional[int]:
     return int(port)
 
 
+def _is_demo_mode_active() -> bool:
+    try:
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+    except ImportError:
+        return False
+    return bool(is_demo_account(getattr(settings, "UTH_USERNAME", "")))
+
+
+def _is_demo_lms_blocked(url: object) -> bool:
+    if not url or not _is_demo_mode_active():
+        return False
+    is_uth_lms_fn = getattr(_gui_utils, "is_uth_lms_url", None)
+    return bool(callable(is_uth_lms_fn) and is_uth_lms_fn(url))
+
+
 def _validate_webview_url(
     url: object,
     *,
@@ -143,6 +160,8 @@ def _validate_webview_url(
             return cleaned
         if allowed_loopback_ports is not None and port in allowed_loopback_ports:
             return cleaned
+        return ""
+    if _is_demo_lms_blocked(cleaned):
         return ""
     return safe_http_url(cleaned, allow_loopback=False)
 
@@ -1497,11 +1516,24 @@ class EmbeddedWebViewHost:
         self._backend = backend
         self._page = page
         self._url = url
+        self._cookie_origin_host = (
+            (urlsplit(url).hostname or "").lower() if url else ""
+        )
+        self._is_viewer_locked = bool(
+            html is not None or (url and _is_viewer_locked_url(url))
+        )
         self._allowed_loopback_ports: set[int] = set()
         init_loop_port = _extract_loopback_port(url)
         if init_loop_port is not None:
             self._allowed_loopback_ports.add(init_loop_port)
         self._wv = webview_control
+        if backend == "inappwebview" and webview_control is not None:
+            try:
+                webview_control._on_rebootstrap_requested = (
+                    self._schedule_inapp_cookie_sync
+                )
+            except Exception:
+                pass
         self._dock = dock
         self._cookies: list[dict[str, Any]] = list(cookies or ())
         self._cookie_provider = cookie_provider
@@ -1521,6 +1553,7 @@ class EmbeddedWebViewHost:
         self._can_go_forward = False
         self._suspended = False
         self._disposed = False
+        self._cookie_sync_in_progress = False
         self._last_bounds: Optional[tuple[float, float, float, float, float]] = None
 
         self._loading_ring: Optional[ft.ProgressRing] = None
@@ -1593,42 +1626,68 @@ class EmbeddedWebViewHost:
         except RuntimeError:
             pass
 
+    def _schedule_inapp_cookie_sync(self) -> None:
+        if (
+            self._disposed
+            or self._backend != "inappwebview"
+            or self._wv is None
+            or self._cookie_sync_in_progress
+        ):
+            return
+        self._cookie_sync_in_progress = True
+
+        async def _bootstrap_inapp_cookies() -> None:
+            try:
+                if self._wv is None or self._disposed:
+                    return
+                cur_host = (urlsplit(self._url or "").hostname or "").lower()
+                same_cookie_host = bool(
+                    not self._is_viewer_locked
+                    and self._cookie_origin_host
+                    and cur_host == self._cookie_origin_host
+                    and (self._cookies or callable(self._cookie_provider))
+                )
+                if not same_cookie_host:
+                    if getattr(self._wv, "require_initial_cookies", False):
+                        abort_fn = getattr(self._wv, "abort_cookie_bootstrap", None)
+                        if callable(abort_fn):
+                            try:
+                                await abort_fn()
+                            except Exception:
+                                pass
+                    return
+                resolved_cookies = list(self._cookies or ())
+                if not resolved_cookies and callable(self._cookie_provider):
+                    try:
+                        resolved_cookies = (
+                            await asyncio.to_thread(self._cookie_provider) or []
+                        )
+                    except Exception as exc:
+                        logger.debug("InAppWebView cookie provider failed: %s", exc)
+                        resolved_cookies = []
+                if self._wv is not None and not self._disposed:
+                    try:
+                        await self._wv.bootstrap_cookies(
+                            list(resolved_cookies),
+                            target_url=self._url,
+                        )
+                    except Exception:
+                        pass
+            finally:
+                self._cookie_sync_in_progress = False
+
+        self._schedule_task(_bootstrap_inapp_cookies)
+
     def _on_flet_mount(self) -> None:
         if self._disposed:
             return
         if self._backend == "inappwebview":
             has_cookie_bootstrap = bool(
                 self._wv is not None
-                and (
-                    self._cookies
-                    or callable(self._cookie_provider)
-                    or getattr(self._wv, "require_initial_cookies", False)
-                )
+                and getattr(self._wv, "require_initial_cookies", False)
             )
             if has_cookie_bootstrap:
-
-                async def _bootstrap_inapp_cookies() -> None:
-                    if self._wv is None or self._disposed:
-                        return
-                    resolved_cookies = list(self._cookies or ())
-                    if not resolved_cookies and callable(self._cookie_provider):
-                        try:
-                            resolved_cookies = (
-                                await asyncio.to_thread(self._cookie_provider) or []
-                            )
-                        except Exception as exc:
-                            logger.debug("InAppWebView cookie provider failed: %s", exc)
-                            resolved_cookies = []
-                    if self._wv is not None and not self._disposed:
-                        try:
-                            await self._wv.bootstrap_cookies(
-                                list(resolved_cookies),
-                                target_url=self._url,
-                            )
-                        except Exception:
-                            pass
-
-                self._schedule_task(_bootstrap_inapp_cookies)
+                self._schedule_inapp_cookie_sync()
             if self._pending_html is not None:
                 html, base_url = self._pending_html
                 self._pending_html = None
@@ -1698,7 +1757,12 @@ class EmbeddedWebViewHost:
         if not cleaned:
             return True
         lowered = cleaned.lower()
-        if lowered == "about:blank":
+        if lowered == "about:blank" or lowered.startswith(("about:blank?", "about:blank#")):
+            return True
+        if not self._is_viewer_locked and (
+            lowered == "about:srcdoc"
+            or lowered.startswith(("about:srcdoc?", "about:srcdoc#"))
+        ):
             return True
         if lowered.startswith("blob:"):
             inner = cleaned[5:]
@@ -1718,7 +1782,28 @@ class EmbeddedWebViewHost:
     @staticmethod
     def _is_transient_event_url(url: str) -> bool:
         lowered = str(url or "").strip().lower()
-        return lowered == "about:blank" or lowered.startswith("blob:")
+        return (
+            lowered == "about:blank"
+            or lowered.startswith(("about:blank?", "about:blank#"))
+            or lowered == "about:srcdoc"
+            or lowered.startswith(("about:srcdoc?", "about:srcdoc#"))
+            or lowered.startswith("blob:")
+        )
+
+    def _sync_live_event_url(self, url: str) -> None:
+        self._url = url
+        if self._backend == "inappwebview" and self._wv is not None:
+            try:
+                self._wv.url = url
+                cur_host = (urlsplit(url).hostname or "").lower()
+                self._wv.require_initial_cookies = bool(
+                    not self._is_viewer_locked
+                    and self._cookie_origin_host
+                    and cur_host == self._cookie_origin_host
+                    and (self._cookies or callable(self._cookie_provider))
+                )
+            except Exception:
+                pass
 
     def _handle_flet_page_started(self, e: Any) -> None:
         if self._disposed:
@@ -1732,8 +1817,10 @@ class EmbeddedWebViewHost:
             return
         if self._on_loading_changed is not None:
             self._on_loading_changed(True)
-        if url and not self._is_transient_event_url(url) and self._on_url_changed is not None:
-            self._on_url_changed(url)
+        if url and not self._is_transient_event_url(url):
+            self._sync_live_event_url(url)
+            if self._on_url_changed is not None:
+                self._on_url_changed(url)
         self._schedule_history_refresh()
 
     def _handle_flet_page_ended(self, e: Any) -> None:
@@ -1787,7 +1874,7 @@ class EmbeddedWebViewHost:
                 self._on_error(f"Blocked disallowed WebView URL: {url}")
             return
         if url and not self._is_transient_event_url(url):
-            self._url = url
+            self._sync_live_event_url(url)
             if self._on_url_changed is not None:
                 self._on_url_changed(url)
         self._schedule_history_refresh()
@@ -1829,7 +1916,7 @@ class EmbeddedWebViewHost:
         if self._disposed or self._on_external_url is None:
             return
         ext = safe_http_url(str(getattr(e, "data", "") or ""))
-        if ext:
+        if ext and not _is_demo_lms_blocked(ext):
             self._on_external_url(ext)
 
     def _handle_webview2_loading(self, loading: bool) -> None:
@@ -1984,7 +2071,10 @@ class EmbeddedWebViewHost:
 
     def suspend(self) -> None:
         self._suspended = True
-        if self._backend in ("flet_webview", "inappwebview"):
+        if self._backend == "inappwebview":
+            self._slot.ignore_interactions = True
+            safe_control_update(self._slot)
+        elif self._backend == "flet_webview":
             self._slot.visible = False
             safe_control_update(self._slot)
         elif self._dock is not None:
@@ -1994,7 +2084,10 @@ class EmbeddedWebViewHost:
         self._suspended = False
         if self._disposed:
             return
-        if self._backend in ("flet_webview", "inappwebview"):
+        if self._backend == "inappwebview":
+            self._slot.ignore_interactions = False
+            safe_control_update(self._slot)
+        elif self._backend == "flet_webview":
             self._slot.visible = True
             safe_control_update(self._slot)
         elif self._dock is not None:
@@ -2099,6 +2192,7 @@ def build_embedded_webview_host(
                     viewer_locked=is_viewer_locked,
                     allowed_loopback_ports=[loop_port] if loop_port is not None else [],
                     require_initial_cookies=require_cookies,
+                    block_uth_lms=_is_demo_mode_active(),
                     expand=True,
                     on_page_started=lambda e: holder_inapp["host"]._handle_flet_page_started(e)
                     if "host" in holder_inapp
