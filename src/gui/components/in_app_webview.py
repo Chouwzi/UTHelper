@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,11 +21,41 @@ from gui.core.theme import C
 from gui.core.utils import html_to_markdown
 
 try:
+    from core.webview_auth import (
+        normalize_uth_webview_target_url as _core_normalize_uth_webview_target_url,
+    )
+except ImportError:
+    _core_normalize_uth_webview_target_url = None
+
+try:
     import flet_webview
 except ImportError:  # pragma: no cover - optional on non-mobile CI environments
     flet_webview = None
 
 logger = logging.getLogger(__name__)
+
+
+def _canonicalize_uth_dialog_url(url: str) -> str:
+    if not url:
+        return ""
+    norm_fn = _core_normalize_uth_webview_target_url
+    if norm_fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        norm_fn = getattr(wv_mod, "normalize_uth_webview_target_url", None)
+    if callable(norm_fn):
+        normalized = norm_fn(url, has_credentials=False)
+        if isinstance(normalized, str) and normalized:
+            return normalized
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme.lower() == "https"
+        and parsed.port is None
+        and (parsed.hostname or "").casefold() == "elearning.ut.edu.vn"
+    ):
+        return urllib.parse.urlunsplit(
+            ("https", "courses.ut.edu.vn", parsed.path, parsed.query, parsed.fragment)
+        )
+    return url
 
 _MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 _DEFAULT_DEMO_LMS_WEBVIEW_GUARD_MESSAGE = (
@@ -175,7 +206,12 @@ class InAppWebViewDialog:
         on_open_external: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._page = page
-        self._url = validate_public_https_url(url, resolve_dns=False) or ""
+        validated_initial = validate_public_https_url(url, resolve_dns=False) or ""
+        self._url = (
+            _canonicalize_uth_dialog_url(validated_initial)
+            if validated_initial
+            else ""
+        )
         self._title = (title or "").strip() or "Trình duyệt trong ứng dụng"
         self._on_open_external = on_open_external
         self._dialog: Optional[ft.AlertDialog] = None
@@ -349,9 +385,10 @@ class InAppWebViewDialog:
                 return
             validated_nav = validate_public_https_url(nav_url, resolve_dns=False)
             if validated_nav:
-                self._url = validated_nav
+                canonical_nav = _canonicalize_uth_dialog_url(validated_nav)
+                self._url = canonical_nav
                 subtitle_label.value = (
-                    urllib.parse.urlsplit(validated_nav).hostname or host
+                    urllib.parse.urlsplit(canonical_nav).hostname or host
                 )
                 self._safe_update(subtitle_label)
 

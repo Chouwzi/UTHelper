@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flet_uth_quiz/src/app_webview_control.dart';
 import 'package:flet_uth_quiz/src/app_webview_settings.dart';
 import 'package:flet_uth_quiz/src/mobile_session_queue.dart';
+import 'package:flet_uth_quiz/src/quiz_session_cleaner.dart';
 
 void main() {
   test('normalizeEmbeddedUserAgent strips Android wv markers while preserving Chrome and iOS Safari UAs', () {
@@ -1361,6 +1362,317 @@ void main() {
         isRedirect: true,
       ),
       isFalse,
+    );
+  });
+
+  test('validateAppWebViewUserScriptOrigin and buildOriginPinnedAppUserScript enforce AT_DOCUMENT_START, forMainFrameOnly, exact origin match, and Demo/viewer blocks (BUG-134-01)', () {
+    expect(
+      validateAppWebViewUserScriptOrigin('https://portal.ut.edu.vn'),
+      'https://portal.ut.edu.vn',
+    );
+    expect(
+      validateAppWebViewUserScriptOrigin('  HTTPS://PORTAL.UT.EDU.VN/  '),
+      'https://portal.ut.edu.vn',
+    );
+    for (final invalidOrigin in [
+      null,
+      '',
+      '*',
+      'http://portal.ut.edu.vn',
+      'https://portal.ut.edu.vn:8443',
+      'https://portal.ut.edu.vn/dashboard',
+      'https://portal.ut.edu.vn?x=1',
+      'https://portal.ut.edu.vn#frag',
+      'https://user:pass@portal.ut.edu.vn',
+      'https://127.0.0.1',
+      'https://localhost',
+      'https://192.168.1.1',
+      'https://docs.google.com',
+      'https://courses.ut.edu.vn',
+      'https://thnn.ut.edu.vn',
+      'javascript:alert(1)',
+    ]) {
+      expect(
+        validateAppWebViewUserScriptOrigin(invalidOrigin),
+        isNull,
+        reason: '$invalidOrigin',
+      );
+    }
+
+    const portalJs =
+        'window.localStorage.setItem("account","eyJ.test");window.localStorage.setItem("role","sv");';
+    final script = buildOriginPinnedAppUserScript(
+      source: portalJs,
+      allowedOrigin: 'https://portal.ut.edu.vn',
+      targetUrl: 'https://portal.ut.edu.vn/dashboard',
+      viewerLocked: false,
+      blockUthLms: false,
+    );
+    expect(script, isNotNull);
+    expect(script!.groupName, kAppWebViewAuthUserScriptGroup);
+    expect(script.injectionTime, UserScriptInjectionTime.AT_DOCUMENT_START);
+    expect(script.forMainFrameOnly, isTrue);
+    expect(script.allowedOriginRules, {'https://portal.ut.edu.vn'});
+    expect(script.source, contains('window.top !== window'));
+    expect(
+      script.source,
+      contains('window.location.origin !== "https://portal.ut.edu.vn"'),
+    );
+
+    final initialScripts = buildInitialAppWebViewUserScripts(
+      source: portalJs,
+      allowedOrigin: 'https://portal.ut.edu.vn',
+      initialUrl: 'https://portal.ut.edu.vn/dashboard',
+      viewerLocked: false,
+      blockUthLms: false,
+    );
+    expect(initialScripts, hasLength(1));
+
+    // NEVER inject Portal UserScript on external docs.google.com, courses.ut.edu.vn, viewerLocked, or Demo Mode!
+    for (final nonMatchingUrl in [
+      'https://docs.google.com/document/d/1/edit',
+      'https://courses.ut.edu.vn/my/',
+      'https://thnn.ut.edu.vn/course/view.php?id=9',
+      'http://127.0.0.1:51234/pdf-viewer/tok/pdf_host.html',
+      'about:blank',
+    ]) {
+      expect(
+        buildOriginPinnedAppUserScript(
+          source: portalJs,
+          allowedOrigin: 'https://portal.ut.edu.vn',
+          targetUrl: nonMatchingUrl,
+          viewerLocked: false,
+          blockUthLms: false,
+        ),
+        isNull,
+        reason: nonMatchingUrl,
+      );
+    }
+    expect(
+      buildOriginPinnedAppUserScript(
+        source: portalJs,
+        allowedOrigin: 'https://portal.ut.edu.vn',
+        targetUrl: 'https://portal.ut.edu.vn/dashboard',
+        viewerLocked: true,
+        blockUthLms: false,
+      ),
+      isNull,
+    );
+    expect(
+      buildOriginPinnedAppUserScript(
+        source: portalJs,
+        allowedOrigin: 'https://portal.ut.edu.vn',
+        targetUrl: 'https://portal.ut.edu.vn/dashboard',
+        viewerLocked: false,
+        blockUthLms: true,
+      ),
+      isNull,
+    );
+  });
+
+  test('applyAppWebViewAuthPayload serializes cookies + UserScript via MobileSessionQueue and supports cross-host UTH SSO without leaking to external hosts (BUG-134-01 / SEC-134-03)', () async {
+    final queue = MobileSessionQueue();
+    final hold = await queue.acquire(cancelled: Completer<void>().future);
+    expect(hold, isNotNull);
+
+    final ops = <String>[];
+    // Started on Portal, user clicked SSO link to Courses -> self-heal applies Courses + sibling THNN cookies
+    final portalInitial = Uri.parse('https://portal.ut.edu.vn/dashboard');
+    final coursesTarget = Uri.parse('https://courses.ut.edu.vn/course/view.php?id=12');
+    final future = applyAppWebViewAuthPayload(
+      rawCookies: [
+        {
+          'name': 'MoodleSession',
+          'value': 'courses_sess_fresh',
+          'domain': 'courses.ut.edu.vn',
+          'path': '/',
+          'secure': true,
+          'httpOnly': true,
+        },
+        {
+          'name': 'MoodleSession',
+          'value': 'thnn_sess_warm',
+          'domain': 'thnn.ut.edu.vn',
+          'path': '/',
+          'secure': true,
+          'httpOnly': true,
+        },
+        // Parent-domain cookie MUST be rejected even during UTH cross-host auth!
+        {
+          'name': 'MoodleSession',
+          'value': 'bad_parent_domain',
+          'domain': '.ut.edu.vn',
+          'path': '/',
+          'secure': true,
+          'httpOnly': true,
+        },
+      ],
+      rawInitScript: '',
+      rawAllowedOrigin: '',
+      targetUri: coursesTarget,
+      initialUri: portalInitial,
+      viewerLocked: false,
+      blockUthLms: false,
+      isDisposed: () => false,
+      disposeSignal: Completer<void>().future,
+      queue: queue,
+      clearAuthUserScripts: () async {
+        ops.add('clear_scripts');
+      },
+      addAuthUserScript: (script) async {
+        ops.add('add_script:${script.allowedOriginRules.join(",")}');
+      },
+      deleteCookie: (url, name, path, domain) async {
+        ops.add('del:${url.toString()}:$name:${domain ?? "host"}');
+      },
+      setCookie: (url, cookie) async {
+        ops.add('set:${url.toString()}:${cookie.name}=${cookie.value}:${cookie.domain ?? "host"}');
+      },
+    );
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(ops, isEmpty);
+
+    hold!.release();
+    final res = await future.timeout(const Duration(seconds: 2));
+    expect(res.appliedCookies, 2);
+    expect(res.installedScriptOrigin, isNull);
+    expect(ops.first, 'clear_scripts');
+    expect(
+      ops,
+      contains('set:https://courses.ut.edu.vn/:MoodleSession=courses_sess_fresh:host'),
+    );
+    expect(
+      ops,
+      contains('set:https://thnn.ut.edu.vn/:MoodleSession=thnn_sess_warm:host'),
+    );
+    expect(ops.any((item) => item.contains('bad_parent_domain')), isFalse);
+
+    // Reverse direction: started on Courses, reactive recovery onto Portal registers AT_DOCUMENT_START UserScript
+    ops.clear();
+    final portalRes = await applyAppWebViewAuthPayload(
+      rawCookies: const [],
+      rawInitScript: 'window.localStorage.setItem("account","jwt.ok");',
+      rawAllowedOrigin: 'https://portal.ut.edu.vn',
+      targetUri: portalInitial,
+      initialUri: coursesTarget,
+      viewerLocked: false,
+      blockUthLms: false,
+      isDisposed: () => false,
+      disposeSignal: Completer<void>().future,
+      queue: queue,
+      clearAuthUserScripts: () async => ops.add('clear_scripts'),
+      addAuthUserScript: (s) async => ops.add('add_script:${s.allowedOriginRules.single}'),
+      setCookie: (url, cookie) async => ops.add('set:${cookie.name}'),
+    );
+    expect(portalRes.appliedCookies, 0);
+    expect(portalRes.installedScriptOrigin, 'https://portal.ut.edu.vn');
+    expect(ops, ['clear_scripts', 'add_script:https://portal.ut.edu.vn']);
+
+    // External non-UTH target must NEVER receive cookies or Portal UserScript!
+    ops.clear();
+    final externalRes = await applyAppWebViewAuthPayload(
+      rawCookies: [
+        {
+          'name': 'MoodleSession',
+          'value': 'steal',
+          'domain': 'docs.google.com',
+          'path': '/',
+        },
+      ],
+      rawInitScript: 'window.localStorage.setItem("account","jwt.leak");',
+      rawAllowedOrigin: 'https://portal.ut.edu.vn',
+      targetUri: Uri.parse('https://docs.google.com/document/d/1/edit'),
+      initialUri: portalInitial,
+      viewerLocked: false,
+      blockUthLms: false,
+      isDisposed: () => false,
+      disposeSignal: Completer<void>().future,
+      queue: queue,
+      clearAuthUserScripts: () async => ops.add('clear_scripts'),
+      addAuthUserScript: (s) async => ops.add('add_script'),
+      setCookie: (url, cookie) async => ops.add('set:${cookie.name}'),
+    );
+    expect(externalRes.appliedCookies, 0);
+    expect(externalRes.installedScriptOrigin, isNull);
+    expect(ops, ['clear_scripts']);
+  });
+
+  test('clearPersistedQuizSessions purges macOS WKWebsiteDataStore localStorage and cookies via MobileSessionQueue (SEC-134-01)', () async {
+    final queue = MobileSessionQueue();
+    final hold = await queue.acquire(cancelled: Completer<void>().future);
+    final steps = <String>[];
+
+    final cleanFuture = clearPersistedQuizSessions(
+      platformOverride: TargetPlatform.macOS,
+      sessionQueue: queue,
+      deleteAllCookiesFn: () async {
+        steps.add('delete_cookies');
+      },
+      purgeWebStorageFn: (platform) async {
+        steps.add('purge_storage:${platform.name}');
+      },
+      clearAllCacheFn: () async {
+        steps.add('clear_cache');
+      },
+    );
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(steps, isEmpty);
+
+    hold!.release();
+    final ok = await cleanFuture.timeout(const Duration(seconds: 2));
+    expect(ok, isTrue);
+    expect(steps, [
+      'delete_cookies',
+      'purge_storage:macOS',
+      'clear_cache',
+    ]);
+  });
+
+  test('AppWebViewAuthScriptTracker preserves AT_DOCUMENT_START Portal UserScript across stale prior onLoadStop and clears on target onLoadStop or cross-origin nav (Challenge 4)', () {
+    final tracker = AppWebViewAuthScriptTracker();
+    expect(tracker.activeOrigin, isNull);
+    expect(tracker.awaitingLoadStart, isFalse);
+
+    // 1. User hits /login -> recovery arms AT_DOCUMENT_START Portal UserScript for /dashboard
+    tracker.arm('https://portal.ut.edu.vn');
+    expect(tracker.activeOrigin, 'https://portal.ut.edu.vn');
+    expect(tracker.awaitingLoadStart, isTrue);
+
+    // 2. Stale/aborted onLoadStop for prior /login arrives BEFORE /dashboard's onLoadStart -> MUST NOT clear!
+    expect(
+      tracker.shouldClearOnLoadStop(
+        'https://portal.ut.edu.vn/login',
+        hasInitialHtml: false,
+      ),
+      isFalse,
+    );
+    expect(tracker.activeOrigin, 'https://portal.ut.edu.vn');
+
+    // 3. Target /dashboard main-frame onLoadStart arrives -> binds script to this load
+    expect(
+      tracker.onMainFrameLoadStart('https://portal.ut.edu.vn/dashboard'),
+      AuthScriptLoadAction.keep,
+    );
+    expect(tracker.awaitingLoadStart, isFalse);
+
+    // 4. Target /dashboard finishes (onLoadStop) -> clears one-shot UserScript!
+    expect(
+      tracker.shouldClearOnLoadStop(
+        'https://portal.ut.edu.vn/dashboard',
+        hasInitialHtml: false,
+      ),
+      isTrue,
+    );
+    tracker.clear();
+    expect(tracker.activeOrigin, isNull);
+
+    // 5. Cross-origin main-frame onLoadStart immediately signals clearNow even while awaitingLoadStart!
+    tracker.arm('https://portal.ut.edu.vn');
+    expect(
+      tracker.onMainFrameLoadStart('https://courses.ut.edu.vn/my/'),
+      AuthScriptLoadAction.clearNow,
     );
   });
 }

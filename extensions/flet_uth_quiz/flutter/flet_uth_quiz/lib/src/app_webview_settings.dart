@@ -1,3 +1,5 @@
+import 'dart:collection' show UnmodifiableListView;
+import 'dart:convert' show jsonEncode;
 import 'dart:ui' show Color;
 
 import 'package:flutter/foundation.dart' show TargetPlatform;
@@ -10,6 +12,14 @@ const appWebViewExternalLaunchedPrefix = '__UTH_EXTERNAL_APP_LAUNCHED__:';
 const appWebViewExternalMissingPrefix = '__UTH_EXTERNAL_APP_MISSING__:';
 const appWebViewMaxConsoleMsgLength = 4096;
 const maxAppPopupSinks = 4;
+const kAppWebViewAuthUserScriptGroup = 'uth_app_webview_auth';
+const _maxUserScriptLength = 16384;
+
+const trustedUthAuthHosts = <String>{
+  'courses.ut.edu.vn',
+  'thnn.ut.edu.vn',
+  'portal.ut.edu.vn',
+};
 
 const allowedExternalAppSchemes = <String>{
   'zalo',
@@ -1167,4 +1177,189 @@ bool isUncommittedPreDocumentExternalRedirect({
 }) {
   if (hasCommittedPage || hasDocumentTitle) return false;
   return isRedirect == true;
+}
+
+/// Returns true iff [uri] targets a canonical portless HTTPS UTH LMS/Portal host.
+bool isTrustedUthAuthUri(Uri? uri) {
+  if (uri == null ||
+      !uri.hasScheme ||
+      !uri.hasAuthority ||
+      uri.scheme.toLowerCase() != 'https' ||
+      uri.hasPort ||
+      uri.userInfo.isNotEmpty ||
+      uri.host.isEmpty) {
+    return false;
+  }
+  return trustedUthAuthHosts.contains(uri.host.toLowerCase());
+}
+
+/// Extracts the canonical `https://<host>` origin from a validated public HTTPS URL
+/// with no custom port, or returns `null` for non-HTTPS, custom-port, or unsafe URLs.
+String? extractHttpsOrigin(String? rawUrl) {
+  if (rawUrl == null) return null;
+  final trimmed = rawUrl.trim();
+  if (!_isValidHttpsBrowserUrl(trimmed)) return null;
+  final uri = Uri.tryParse(trimmed);
+  if (uri == null || uri.hasPort || uri.host.isEmpty) return null;
+  return 'https://${uri.host.toLowerCase()}';
+}
+
+const kPortalUserScriptOrigin = 'https://portal.ut.edu.vn';
+
+/// Validates an origin-pinning rule for `UthAppWebView` user scripts, accepting
+/// ONLY the canonical portless `https://portal.ut.edu.vn` origin (never wildcards,
+/// custom ports, paths, queries, fragments, userinfo, private, or non-Portal hosts).
+String? validateAppWebViewUserScriptOrigin(String? rawOrigin) {
+  if (rawOrigin == null) return null;
+  final trimmed = rawOrigin.trim();
+  if (trimmed.isEmpty ||
+      trimmed == '*' ||
+      hasUnsafeUrlCharacters(trimmed) ||
+      trimmed.contains(RegExp(r'\s')) ||
+      _authorityHasUserInfo(trimmed)) {
+    return null;
+  }
+  final uri = Uri.tryParse(trimmed);
+  if (uri == null ||
+      !uri.hasScheme ||
+      !uri.hasAuthority ||
+      uri.scheme.toLowerCase() != 'https' ||
+      uri.hasPort ||
+      uri.userInfo.isNotEmpty ||
+      (uri.path.isNotEmpty && uri.path != '/') ||
+      uri.hasQuery ||
+      uri.hasFragment ||
+      uri.host.isEmpty ||
+      _isUnsafeHttpsHost(uri.host)) {
+    return null;
+  }
+  final canonical = 'https://${uri.host.toLowerCase()}';
+  if (canonical != kPortalUserScriptOrigin) {
+    return null;
+  }
+  return canonical;
+}
+
+enum AuthScriptLoadAction {
+  none,
+  keep,
+  clearNow,
+}
+
+/// Tracks the lifecycle of a one-shot origin-pinned `AT_DOCUMENT_START` [UserScript]
+/// so an aborted/stale `onLoadStop` from a prior navigation cannot delete the script
+/// before the target navigation's main-frame `onLoadStart` begins.
+class AppWebViewAuthScriptTracker {
+  String? _activeOrigin;
+  bool _awaitingLoadStart = false;
+  int _generation = 0;
+
+  String? get activeOrigin => _activeOrigin;
+  bool get awaitingLoadStart => _awaitingLoadStart;
+  int get generation => _generation;
+
+  void arm(String origin) {
+    _activeOrigin = origin;
+    _awaitingLoadStart = true;
+    _generation++;
+  }
+
+  void clear() {
+    _activeOrigin = null;
+    _awaitingLoadStart = false;
+    _generation++;
+  }
+
+  AuthScriptLoadAction onMainFrameLoadStart(String? url) {
+    final active = _activeOrigin;
+    if (active == null) {
+      return AuthScriptLoadAction.none;
+    }
+    final startedOrigin = extractHttpsOrigin(url);
+    if (startedOrigin == null || startedOrigin != active) {
+      return AuthScriptLoadAction.clearNow;
+    }
+    _awaitingLoadStart = false;
+    return AuthScriptLoadAction.keep;
+  }
+
+  bool shouldClearOnLoadStop(
+    String? url, {
+    required bool hasInitialHtml,
+  }) {
+    if (_activeOrigin == null || _awaitingLoadStart) {
+      return false;
+    }
+    return shouldRevealAppWebViewSurface(
+      url: url,
+      hasInitialHtml: hasInitialHtml,
+    );
+  }
+}
+
+/// Wraps [rawSource] in a main-frame AND `[LegacyUnforgeable]` `window.location.origin`
+/// guard so neither subframes nor cross-origin pages can ever execute the script.
+String wrapOriginPinnedUserScriptSource(
+  String rawSource,
+  String canonicalOrigin,
+) {
+  final originLiteral = jsonEncode(canonicalOrigin);
+  return '(function(){try{'
+      'if(window.top !== window || !window.location || window.location.origin !== $originLiteral){return;}'
+      '\n${rawSource.trim()}\n'
+      '}catch(_e){}})();';
+}
+
+/// Builds an `AT_DOCUMENT_START`, `forMainFrameOnly: true` [UserScript] pinned to
+/// [allowedOrigin] iff [targetUrl] shares that exact origin and neither
+/// [viewerLocked] nor [blockUthLms] blocks it.
+UserScript? buildOriginPinnedAppUserScript({
+  required String? source,
+  required String? allowedOrigin,
+  required String? targetUrl,
+  required bool viewerLocked,
+  required bool blockUthLms,
+}) {
+  if (viewerLocked) return null;
+  final trimmedSource = (source ?? '').trim();
+  if (trimmedSource.isEmpty || trimmedSource.length > _maxUserScriptLength) {
+    return null;
+  }
+  final canonicalOrigin = validateAppWebViewUserScriptOrigin(allowedOrigin);
+  if (canonicalOrigin == null) return null;
+  if (blockUthLms && isUthLmsBrowserUrl(canonicalOrigin)) {
+    return null;
+  }
+  final targetOrigin = extractHttpsOrigin(targetUrl);
+  if (targetOrigin == null || targetOrigin != canonicalOrigin) {
+    return null;
+  }
+  return UserScript(
+    groupName: kAppWebViewAuthUserScriptGroup,
+    source: wrapOriginPinnedUserScriptSource(trimmedSource, canonicalOrigin),
+    injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+    forMainFrameOnly: true,
+    allowedOriginRules: <String>{canonicalOrigin},
+  );
+}
+
+/// Builds the initial `InAppWebView.initialUserScripts` list when an origin-pinned
+/// initial script is supplied and matches [initialUrl]'s exact HTTPS origin.
+UnmodifiableListView<UserScript> buildInitialAppWebViewUserScripts({
+  required String? source,
+  required String? allowedOrigin,
+  required String? initialUrl,
+  required bool viewerLocked,
+  required bool blockUthLms,
+}) {
+  final script = buildOriginPinnedAppUserScript(
+    source: source,
+    allowedOrigin: allowedOrigin,
+    targetUrl: initialUrl,
+    viewerLocked: viewerLocked,
+    blockUthLms: blockUthLms,
+  );
+  return UnmodifiableListView<UserScript>(
+    script != null ? <UserScript>[script] : const <UserScript>[],
+  );
 }

@@ -19,7 +19,7 @@ from platform_utils import detect_platform
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 from core.data_orchestrator import DataOrchestrator
@@ -41,6 +41,18 @@ from core.activity_status import normalize_submission_status
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
+from core.url_validation import validate_https_url
+
+try:
+    from core.webview_auth import (
+        UthWebViewAuthService as _CoreUthWebViewAuthService,
+        classify_uth_webview_url as _core_classify_uth_webview_url,
+        normalize_uth_webview_target_url as _core_normalize_uth_webview_target_url,
+    )
+except ImportError:
+    _CoreUthWebViewAuthService = None
+    _core_classify_uth_webview_url = None
+    _core_normalize_uth_webview_target_url = None
 from config import (
     get_sync_interval_minutes,
     hydrate_secrets,
@@ -287,6 +299,61 @@ def _update_install_error_message(status: str) -> str:
     return "Không mở được trình cài đặt. Hãy thử lại."
 
 
+def _resolve_webview_auth_cls():
+    if _CoreUthWebViewAuthService is not None:
+        return _CoreUthWebViewAuthService
+    wv_mod = sys.modules.get("core.webview_auth")
+    return getattr(wv_mod, "UthWebViewAuthService", None)
+
+
+def _classify_uth_url(url: str) -> str:
+    fn = _core_classify_uth_webview_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "classify_uth_webview_url", None)
+    if callable(fn):
+        return str(fn(url))
+    validated = validate_https_url(url)
+    if validated is None:
+        return "external"
+    parsed = urlsplit(validated)
+    if parsed.port is not None:
+        return "external"
+    host = (parsed.hostname or "").casefold()
+    if host in ("courses.ut.edu.vn", "elearning.ut.edu.vn"):
+        return "courses"
+    if host == "thnn.ut.edu.vn":
+        return "thnn"
+    if host == "portal.ut.edu.vn":
+        return "portal"
+    return "external"
+
+
+def _normalize_uth_target_url(url: str, *, has_credentials: bool = True) -> str:
+    fn = _core_normalize_uth_webview_target_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "normalize_uth_webview_target_url", None)
+    if callable(fn):
+        return str(fn(url, has_credentials=has_credentials))
+    if not isinstance(url, str) or not url:
+        return ""
+    validated = validate_https_url(url)
+    if validated is None:
+        return url
+    parsed = urlsplit(validated)
+    if parsed.port is not None:
+        return url
+    host = (parsed.hostname or "").casefold()
+    if host == "elearning.ut.edu.vn":
+        return urlunsplit(
+            ("https", "courses.ut.edu.vn", parsed.path, parsed.query, parsed.fragment)
+        )
+    if host == "portal.ut.edu.vn" and parsed.path in ("", "/", "/login") and has_credentials:
+        return "https://portal.ut.edu.vn/dashboard"
+    return validated
+
+
 class AppController:
     def __init__(
         self,
@@ -316,7 +383,13 @@ class AppController:
             if settings.UTH_USERNAME
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
+        self._account_epoch = 0
         self._portal_client = PortalClient(settings.PORTAL_API_BASE)
+        self._webview_auth_service = self._build_webview_auth_service(
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+            portal_client=self._portal_client,
+        )
         # The Portal web app (lichTuan) is served from its own host.
         self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
         self._portal_week_lock = threading.Lock()
@@ -526,6 +599,7 @@ class AppController:
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
 
+        self._invalidate_active_webviews_before_credential_mutation()
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "user", screen="login")
         modal_token = _new_modal_occlusion_token()
@@ -551,6 +625,7 @@ class AppController:
         """Reuse the app credential dialog, then retry Moodle session setup."""
         from gui.components.login_dialog import show_login_dialog
 
+        self._invalidate_active_webviews_before_credential_mutation()
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "quiz_player", screen="login")
         modal_token = _new_modal_occlusion_token()
@@ -880,7 +955,10 @@ class AppController:
             # Close active WebViews BEFORE purging profiles/cookies so locks release.
             close_wv = getattr(self, "_close_app_webview", None)
             if callable(close_wv):
-                close_wv(update_page=False)
+                try:
+                    close_wv(update_page=False, clear_browser_storage=True)
+                except TypeError:
+                    close_wv(update_page=False)
 
             courses_coord = getattr(self, "_courses_coordinator", None)
             reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
@@ -986,6 +1064,8 @@ class AppController:
             )
             if callable(clear_quiz_sessions):
                 self._safe_run_task(clear_quiz_sessions)
+            if self._is_macos_native_runtime():
+                self._safe_run_task(self._clear_macos_persisted_webview_sessions)
 
             android_bg = getattr(self, "_android_background", None)
             if (
@@ -1042,10 +1122,114 @@ class AppController:
                     )
         await self._load_data_async()
 
+    def _is_macos_native_runtime(self) -> bool:
+        page = getattr(self, "page", None)
+        if page is not None and bool(getattr(page, "web", False)):
+            return False
+        plat_str = str(getattr(page, "platform", "") or "").lower()
+        return sys.platform == "darwin" or "macos" in plat_str
+
+    async def _clear_macos_persisted_webview_sessions(self) -> bool:
+        """Invoke UthQuizSessionCleaner on macOS so WKWebsiteDataStore localStorage & cookies wipe on logout."""
+        cleaner = getattr(self, "_macos_quiz_session_cleaner", None)
+        if cleaner is None:
+            try:
+                from flet_uth_quiz import UthQuizSessionCleaner
+            except ImportError:
+                try:
+                    from platform_utils.quiz_client_bootstrap import (
+                        add_source_quiz_package_to_path,
+                    )
+
+                    repo_root = Path(__file__).resolve().parents[2]
+                    add_source_quiz_package_to_path(repo_root)
+                    from flet_uth_quiz import UthQuizSessionCleaner
+                except Exception:
+                    return False
+            except Exception:
+                return False
+            try:
+                cleaner = UthQuizSessionCleaner()
+            except Exception:
+                return False
+            page = getattr(self, "page", None)
+            services = getattr(page, "services", None)
+            if isinstance(services, list) and cleaner not in services:
+                services.append(cleaner)
+                update_fn = getattr(page, "update", None)
+                if callable(update_fn):
+                    try:
+                        update_fn()
+                    except Exception:
+                        pass
+            self._macos_quiz_session_cleaner = cleaner
+        clear_fn = getattr(cleaner, "clear_sessions", None)
+        if not callable(clear_fn):
+            return False
+        try:
+            return bool(await clear_fn())
+        except Exception:
+            return False
+
+    def _committed_webview_credentials(self) -> tuple[str, str]:
+        username = str(getattr(settings, "UTH_USERNAME", "") or "")
+        password = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        committed = getattr(self, "_settings_identity", None)
+        if (
+            isinstance(committed, tuple)
+            and len(committed) == 2
+            and committed != (username, password)
+        ):
+            return ("", "")
+        return (username, password)
+
+    def _invalidate_active_webviews_before_credential_mutation(self) -> None:
+        """Bump account epoch and close active WebViews BEFORE mutating settings credentials (SEC-134-01)."""
+        self._account_epoch = getattr(self, "_account_epoch", 0) + 1
+        close_wv = getattr(self, "_close_app_webview", None)
+        if callable(close_wv):
+            try:
+                close_wv(update_page=False, clear_browser_storage=True)
+            except TypeError:
+                close_wv(update_page=False)
+            except Exception:
+                logger.debug("Pre-mutation app WebView close skipped", exc_info=True)
+        courses_coord = getattr(self, "_courses_coordinator", None)
+        if courses_coord is not None:
+            courses_view = getattr(courses_coord, "courses_view", None)
+            overlays = getattr(courses_view, "_overlays", None)
+            if isinstance(overlays, list):
+                for ov in list(overlays):
+                    disp = getattr(ov, "dispose", None)
+                    if callable(disp):
+                        try:
+                            disp(clear_browser_storage=True)
+                        except TypeError:
+                            disp()
+                        except Exception:
+                            pass
+            clear_overlays = getattr(courses_view, "clear_overlays", None)
+            if callable(clear_overlays):
+                try:
+                    clear_overlays(update=False)
+                except TypeError:
+                    clear_overlays()
+                except Exception:
+                    logger.debug("Pre-mutation overlay clear skipped", exc_info=True)
+        for portal_attr in ("_portal_client", "_portal_week_client"):
+            portal_obj = getattr(self, portal_attr, None)
+            clear_token = getattr(portal_obj, "clear_token", None)
+            if callable(clear_token):
+                try:
+                    clear_token()
+                except Exception:
+                    logger.debug("Pre-mutation portal clear skipped", exc_info=True)
+
     async def _handle_settings_account_login_async(
         self, username: str, password: str
     ) -> None:
         """Unified Settings -> Tài khoản login handler routed through full isolation."""
+        self._invalidate_active_webviews_before_credential_mutation()
         raw_user = str(username or "")
         clean_user = (
             normalize_demo_username(raw_user)
@@ -1067,6 +1251,7 @@ class AppController:
 
     async def _handle_logout_async(self) -> None:
         """Sign out cleanly: erase persisted secrets, tear down all caches, prompt login."""
+        self._invalidate_active_webviews_before_credential_mutation()
         settings.UTH_USERNAME = ""
         settings.UTH_PASSWORD = ""
         settings.UTH_CREDENTIALS_ORIGIN = ""
@@ -2319,6 +2504,8 @@ class AppController:
             all_assignments_provider=self._snapshot_all_data,
             on_start_quiz=self._start_course_quiz,
             account_namespace=courses_namespace,
+            webview_auth_service=self._webview_auth_service,
+            account_epoch_getter=lambda: getattr(self, "_account_epoch", 0),
         )
         if sys.platform == "win32" and not bool(getattr(self.page, "web", False)):
             from gui.components.courses.embedded_webview_host import (
@@ -2705,6 +2892,8 @@ class AppController:
         url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
         if not url:
             return
+        if _classify_uth_url(url) in {"courses", "thnn"}:
+            url = _normalize_uth_target_url(url, has_credentials=False)
         activity_data = None
         with self._data_lock:
             for item in self.all_data:
@@ -2874,19 +3063,27 @@ class AppController:
             daemon=True,
         ).start()
 
-    def _close_app_webview(self, *, update_page: bool = True) -> bool:
+    def _close_app_webview(
+        self, *, update_page: bool = True, clear_browser_storage: bool = False
+    ) -> bool:
         host = getattr(self, "_app_webview_host", None)
         pane = getattr(self, "_app_webview_pane", None)
         was_visible = bool(host is not None and getattr(host, "visible", False))
         self._app_webview_pane = None
+        if pane is not None:
+            try:
+                if clear_browser_storage:
+                    try:
+                        pane.dispose(clear_browser_storage=True)
+                    except TypeError:
+                        pane.dispose()
+                else:
+                    pane.dispose()
+            except Exception:
+                logger.debug("App WebView dispose skipped", exc_info=True)
         if host is not None:
             host.visible = False
             host.content = None
-        if pane is not None:
-            try:
-                pane.dispose()
-            except Exception:
-                logger.debug("App WebView dispose skipped", exc_info=True)
         if (was_visible or pane is not None) and update_page:
             try:
                 self.page.update()
@@ -2894,11 +3091,63 @@ class AppController:
                 pass
         return was_visible or pane is not None
 
+    def _build_webview_auth_service(
+        self,
+        *,
+        courses_client=None,
+        thnn_client=None,
+        portal_client=None,
+    ):
+        svc_cls = _resolve_webview_auth_cls()
+        if svc_cls is None:
+            return None
+        kwargs = {
+            "courses_client": courses_client,
+            "thnn_client": thnn_client,
+            "portal_client": portal_client,
+            "credentials_provider": self._committed_webview_credentials,
+        }
+        try:
+            params = inspect.signature(svc_cls).parameters
+            if "account_epoch_getter" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                kwargs["account_epoch_getter"] = lambda: getattr(
+                    self, "_account_epoch", 0
+                )
+        except (TypeError, ValueError):
+            pass
+        return svc_cls(**kwargs)
+
+    def _get_webview_auth_service(self):
+        svc = getattr(self, "_webview_auth_service", None)
+        if svc is not None:
+            return svc
+        coord = getattr(self, "_courses_coordinator", None)
+        orch = getattr(self, "orchestrator", None)
+        courses_client = getattr(orch, "client", None)
+        thnn_client = getattr(orch, "thnn_client", None)
+        if coord is not None:
+            client_for = getattr(coord, "_client_for", None)
+            if callable(client_for):
+                if courses_client is None:
+                    courses_client = client_for("courses")
+                if thnn_client is None:
+                    thnn_client = client_for("thnn")
+        portal_client = getattr(self, "_portal_client", None)
+        svc = self._build_webview_auth_service(
+            courses_client=courses_client,
+            thnn_client=thnn_client,
+            portal_client=portal_client,
+        )
+        self._webview_auth_service = svc
+        return svc
+
     def _open_url_in_app(self, url: str, title: str = "") -> None:
-        from core.moodle_sites import moodle_site_from_url
         from core.url_validation import validate_public_https_url
         from gui.components.courses.embedded_webview_host import (
             _is_flet_webview_platform,
+            _is_inappwebview_mobile_platform,
             _is_windows_webview2_platform,
             _webview2_runtime_available,
         )
@@ -2913,9 +3162,22 @@ class AppController:
             self._show_demo_lms_guard_snackbar()
             return
 
+        site_kind = _classify_uth_url(validated)
+        committed_user, committed_pass = self._committed_webview_credentials()
+        has_creds = bool(
+            not is_demo_account(committed_user)
+            and committed_user.strip()
+            and committed_pass.strip()
+        )
+        if site_kind in {"courses", "thnn", "portal"}:
+            validated = _normalize_uth_target_url(
+                validated, has_credentials=has_creds
+            )
+
         host = getattr(self, "_app_webview_host", None)
         supports_embedded = host is not None and (
-            _is_flet_webview_platform(self.page)
+            _is_inappwebview_mobile_platform(self.page)
+            or _is_flet_webview_platform(self.page)
             or (
                 _is_windows_webview2_platform(self.page)
                 and _webview2_runtime_available()
@@ -2930,40 +3192,61 @@ class AppController:
                 except Exception:
                     pass
 
-            moodle_site = moodle_site_from_url(validated)
-            moodle_site_id = moodle_site.identity if moodle_site is not None else None
-            source = "thnn" if moodle_site_id == "thnn" else "courses"
+            source = "thnn" if site_kind == "thnn" else "courses"
             preview_server = None
             session_client = None
-            if moodle_site_id in {"courses", "thnn"}:
-                coord = getattr(self, "_courses_coordinator", None)
-                if coord is not None:
+            coord = getattr(self, "_courses_coordinator", None)
+            if coord is not None:
+                ensure_srv = getattr(coord, "ensure_preview_server", None)
+                if callable(ensure_srv):
+                    preview_server = ensure_srv()
+                else:
                     preview_server = getattr(coord, "preview_server", None)
+            if preview_server is None:
+                preview_server = getattr(self, "_preview_server", None)
+            if site_kind in {"courses", "thnn"}:
+                if coord is not None:
                     client_for = getattr(coord, "_client_for", None)
                     if callable(client_for):
                         session_client = client_for(source)
-                if session_client is None and moodle_site_id == "courses":
-                    session_client = getattr(
-                        getattr(self, "orchestrator", None), "client", None
-                    )
+                if session_client is None:
+                    orch = getattr(self, "orchestrator", None)
+                    if site_kind == "thnn":
+                        session_client = getattr(orch, "thnn_client", None)
+                    else:
+                        session_client = getattr(orch, "client", None)
 
+            webview_auth_service = self._get_webview_auth_service()
             left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds()
             account_ns = (
                 f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
             )
-            pane = CoursesWebViewPane(
-                page=self.page,
-                source=source,
-                title=(title or "").strip() or "Trình duyệt trong ứng dụng",
-                url=validated,
-                preview_server=preview_server,
-                session_client=session_client,
-                on_back=self._close_app_webview,
-                on_open_external=self._open_url_external,
-                show_expand_toggle=False,
-                pane_width=pane_w,
-                account_namespace=account_ns,
-            )
+            pane_kwargs = {
+                "page": self.page,
+                "source": source,
+                "title": (title or "").strip() or "Trình duyệt trong ứng dụng",
+                "url": validated,
+                "preview_server": preview_server,
+                "session_client": session_client,
+                "webview_auth_service": webview_auth_service,
+                "on_back": self._close_app_webview,
+                "on_open_external": self._open_url_external,
+                "show_expand_toggle": False,
+                "pane_width": pane_w,
+                "account_namespace": account_ns,
+            }
+            try:
+                pane_params = inspect.signature(CoursesWebViewPane).parameters
+                if "account_epoch_getter" in pane_params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in pane_params.values()
+                ):
+                    pane_kwargs["account_epoch_getter"] = lambda: getattr(
+                        self, "_account_epoch", 0
+                    )
+            except (TypeError, ValueError):
+                pass
+            pane = CoursesWebViewPane(**pane_kwargs)
             self._app_webview_pane = pane
             host.content = pane
             host.visible = True
@@ -4717,9 +5000,14 @@ class AppController:
             or safe_http_url(mod.url)
             or (f"{origin}/mod/quiz/view.php?id={mod.cmid}" if mod.cmid else "")
         )
+        if url and _classify_uth_url(url) in {"courses", "thnn"}:
+            url = _normalize_uth_target_url(url, has_credentials=False)
         activity: dict = {}
         for item in self._snapshot_all_data():
-            if (url and item.get("url") == url) or (
+            item_url = str(item.get("url") or "")
+            if item_url and _classify_uth_url(item_url) in {"courses", "thnn"}:
+                item_url = _normalize_uth_target_url(item_url, has_credentials=False)
+            if (url and item_url == url) or (
                 mod.cmid
                 and item.get("cmid") == mod.cmid
                 and item.get("course_id") == course.id
@@ -4732,8 +5020,16 @@ class AppController:
         activity.setdefault("cmid", mod.cmid)
         activity["type"] = "quiz"
         activity["site_identity"] = course.source
-        if url:
-            activity["url"] = url
+        resolved_quiz_url = str(activity.get("url") or url or "")
+        if resolved_quiz_url and _classify_uth_url(resolved_quiz_url) in {
+            "courses",
+            "thnn",
+        }:
+            resolved_quiz_url = _normalize_uth_target_url(
+                resolved_quiz_url, has_credentials=False
+            )
+        if resolved_quiz_url:
+            activity["url"] = resolved_quiz_url
         return activity
 
     def _start_course_quiz(self, course: "CourseSummary", mod: "CourseModuleItem") -> None:

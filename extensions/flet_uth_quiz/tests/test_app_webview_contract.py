@@ -272,3 +272,104 @@ def test_app_webview_assigns_unique_default_key_and_resets_channel_on_unmount(
     assert invoked == [("bootstrap_cookies", {"channel_id": 2, "abort": True})]
 
 
+def test_app_webview_validates_origin_pinned_user_script_and_keeps_auth_payloads_on_private_data_channel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flet_uth_quiz import UthAppWebView
+
+    for bad_origin in (
+        "",
+        "*",
+        "http://portal.ut.edu.vn",
+        "https://portal.ut.edu.vn:8443",
+        "https://portal.ut.edu.vn/dashboard",
+        "https://user:pass@portal.ut.edu.vn",
+        "https://127.0.0.1",
+        "https://localhost",
+        "https://docs.google.com",
+        "https://courses.ut.edu.vn",
+        "https://thnn.ut.edu.vn",
+    ):
+        with pytest.raises(ValueError):
+            UthAppWebView(
+                url="https://portal.ut.edu.vn/dashboard",
+                initial_user_script='window.localStorage.setItem("account","jwt");',
+                initial_user_script_allowed_origin=bad_origin,
+            )
+
+    wv = UthAppWebView(
+        url="https://portal.ut.edu.vn/dashboard",
+        require_initial_cookies=True,
+    )
+    sent_payloads: list[bytes] = []
+    invoked: list[tuple[str, object, object]] = []
+    fake_channel = SimpleNamespace(send=sent_payloads.append)
+    monkeypatch.setattr(
+        wv, "get_data_channel", lambda cid: fake_channel if cid in (5, 19) else None
+    )
+
+    async def _invoke(name: str, arguments=None, timeout=None):
+        invoked.append((name, arguments, timeout))
+        if name == "ensure_auth_channel":
+            wv.on_data_channel_open(
+                SimpleNamespace(channel_name="app_webview_cookies", channel_id=19)
+            )
+            return 19
+        return True
+
+    monkeypatch.setattr(wv, "_invoke_method", _invoke)
+    wv.on_data_channel_open(
+        SimpleNamespace(channel_name="app_webview_cookies", channel_id=5)
+    )
+
+    secret_jwt = "eyJ.super.secret.portal.jwt"
+    portal_script = (
+        '(function(){if(window.location.origin==="https://portal.ut.edu.vn"){'
+        f'window.localStorage.setItem("account","{secret_jwt}");'
+        "}})();"
+    )
+    assert (
+        asyncio.run(
+            wv.bootstrap_cookies(
+                [],
+                target_url="https://portal.ut.edu.vn/dashboard",
+                init_script=portal_script,
+                init_script_allowed_origin="https://portal.ut.edu.vn",
+            )
+        )
+        is True
+    )
+    assert secret_jwt not in repr(invoked)
+    assert secret_jwt not in repr(wv)
+    first_payload = json.loads(sent_payloads[0].decode("utf-8"))
+    assert first_payload["target_url"] == "https://portal.ut.edu.vn/dashboard"
+    assert first_payload["init_script"] == portal_script
+    assert first_payload["init_script_allowed_origin"] == "https://portal.ut.edu.vn"
+
+    # Reactive self-heal after unmount/channel loss lazily opens auth channel and keeps secrets off _invoke_method
+    wv.will_unmount()
+    secret_cookie = "fresh_moodle_session_token"
+    assert (
+        asyncio.run(
+            wv.apply_auth_and_navigate(
+                [
+                    {
+                        "name": "MoodleSession",
+                        "value": secret_cookie,
+                        "domain": "courses.ut.edu.vn",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    }
+                ],
+                "https://courses.ut.edu.vn/course/view.php?id=77",
+            )
+        )
+        is True
+    )
+    assert secret_cookie not in repr(invoked)
+    assert any(call[0] == "ensure_auth_channel" for call in invoked)
+    assert invoked[-1] == ("apply_auth_and_navigate", {"channel_id": 19}, 10)
+    second_payload = json.loads(sent_payloads[-1].decode("utf-8"))
+    assert second_payload["target_url"] == "https://courses.ut.edu.vn/course/view.php?id=77"
+    assert second_payload["cookies"][0]["value"] == secret_cookie
