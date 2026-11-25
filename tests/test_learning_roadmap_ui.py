@@ -180,11 +180,16 @@ class ViewTests(unittest.TestCase):
 
 class ViewManagerTests(unittest.TestCase):
     def make(self):
-        mk = lambda: types.SimpleNamespace(visible=True, opacity=1.0, offset=None,
-                                           show=mock.Mock(), hide=mock.Mock(), show_loading=mock.Mock(),
-                                           update_grades=mock.Mock(), update_academic_data=mock.Mock(),
-                                           load_current_settings=mock.AsyncMock(),
-                                           cancel_pending_load=mock.Mock(), content=None)
+        def mk():
+            return types.SimpleNamespace(
+                visible=True, opacity=1.0, offset=None,
+                show=mock.Mock(), hide=mock.Mock(), show_loading=mock.Mock(),
+                update_grades=mock.Mock(), update_academic_data=mock.Mock(),
+                update_theme=mock.Mock(),
+                load_current_settings=mock.AsyncMock(),
+                cancel_pending_load=mock.Mock(), content=None,
+            )
+
         views = {n: mk() for n in ("dashboard", "detail", "settings", "calendar", "grades", "roadmap")}
         controller = types.SimpleNamespace(
             calendar_btn=types.SimpleNamespace(icon_color=None),
