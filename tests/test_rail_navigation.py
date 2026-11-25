@@ -135,9 +135,9 @@ def test_navigate_destination_prompts_unsaved_settings_before_switching_tabs(
         asyncio.run(controller._navigate_destination("calendar"))
         controller._show_calendar.assert_not_awaited()
         assert view.visible is True
-        # Rail/bottom-bar highlight is snapped back to "settings" (index 4).
-        assert controller._nav_shell.rail.selected_index == 4
-        assert controller._nav_shell.bar.selected_index == 4
+        # Rail/bottom-bar highlight is snapped back to "settings" (index 5).
+        assert controller._nav_shell.rail.selected_index == 5
+        assert controller._nav_shell.bar.selected_index == 5
         assert len(dialogs) == 1
         assert isinstance(dialogs[0], ft.AlertDialog)
 
@@ -436,7 +436,7 @@ def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings(
         asyncio.run(controller._navigate_destination(target))
         assert clean_rebuild_calls == [], (target, clean_rebuild_calls)
         assert "settings" not in nav_calls, (target, nav_calls)
-        assert 4 not in flushed_bar_indices, (target, flushed_bar_indices)
+        assert 5 not in flushed_bar_indices, (target, flushed_bar_indices)
         assert nav_shell.bar.selected_index == expected_idx
         assert settings_view.visible is False
 
@@ -453,7 +453,7 @@ def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings(
     asyncio.run(controller._navigate_destination("courses"))
     assert rebuild_calls == [(False, False)]
     assert "settings" not in nav_calls
-    assert 4 not in flushed_bar_indices
+    assert 5 not in flushed_bar_indices
     assert nav_shell.bar.selected_index == 1
 
     # Also verify real AppController._rebuild_colors executes cleanly under forced rebuild without snap-back
@@ -468,6 +468,6 @@ def test_leaving_clean_settings_for_all_four_tabs_never_snaps_back_to_settings(
     assert clean_rebuild_calls == [(False, False)]
     assert controller._rendered_palette == semantic_palette()
     assert "settings" not in nav_calls
-    assert 4 not in flushed_bar_indices
+    assert 5 not in flushed_bar_indices
     assert nav_shell.bar.selected_index == 3
     assert settings_view.visible is False

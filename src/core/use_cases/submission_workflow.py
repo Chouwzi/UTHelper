@@ -233,9 +233,7 @@ class SubmissionWorkflow:
         site_origin: str | MoodleSite | None = None,
     ):
         self.client = client
-        self.moodle_service = moodle_service or MoodleService(
-            client.call_ws_api, client=client
-        )
+        self.moodle_service = moodle_service or MoodleService(client.call_ws_api)
         if isinstance(site_origin, MoodleSite):
             self.site = site_origin
         elif site_origin is not None:
@@ -422,11 +420,7 @@ class SubmissionWorkflow:
                 _error(SubmissionErrorCode.INVALID_TARGET), fresh.snapshot
             )
         try:
-            user_id_getter = getattr(self.moodle_service, "get_user_id", None)
-            if callable(user_id_getter):
-                expected_user_id = user_id_getter(refresh=True)
-            else:
-                expected_user_id = self.client.get_user_id(refresh=True)
+            expected_user_id = self.client.get_user_id(refresh=True)
         except Exception:
             logger.exception("Could not verify the active Moodle account")
             expected_user_id = None
@@ -459,25 +453,13 @@ class SubmissionWorkflow:
             return True
 
         try:
-            remover = getattr(
-                self.moodle_service, "remove_assignment_submission", None
+            removed = bool(
+                self.client.remove_assignment_submission(
+                    cmid,
+                    expected_user_id=expected_user_id,
+                    before_commit=revalidate_before_commit,
+                )
             )
-            if callable(remover):
-                removed = bool(
-                    remover(
-                        cmid,
-                        expected_user_id=expected_user_id,
-                        before_commit=revalidate_before_commit,
-                    )
-                )
-            else:
-                removed = bool(
-                    self.client.remove_assignment_submission(
-                        cmid,
-                        expected_user_id=expected_user_id,
-                        before_commit=revalidate_before_commit,
-                    )
-                )
         except Exception:
             logger.exception("Moodle web submission removal failed")
             removed = False
@@ -566,10 +548,9 @@ class SubmissionWorkflow:
     def _client_matches_selected_site(self) -> bool:
         if self.site is None:
             return False
-        origin = getattr(self.moodle_service, "moodle_site_origin", None)
-        if origin is None:
-            origin = getattr(self.client, "moodle_site_origin", None)
-        client_site = moodle_site_from_origin(origin)
+        client_site = moodle_site_from_origin(
+            getattr(self.client, "moodle_site_origin", None)
+        )
         return client_site == self.site
 
     def _extract_cmid(self, url: str) -> int | None:
@@ -793,11 +774,7 @@ class SubmissionWorkflow:
                 if not item.remote.url:
                     return _error(SubmissionErrorCode.DOWNLOAD_FAILED, item.remote.identity)
                 try:
-                    downloader = getattr(self.moodle_service, "download_file", None)
-                    if callable(downloader):
-                        content = downloader(item.remote.url)
-                    else:
-                        content = self.client.download_file(item.remote.url)
+                    content = self.client.download_file(item.remote.url)
                 except Exception:
                     logger.exception("Could not download retained submission file")
                     return _error(SubmissionErrorCode.DOWNLOAD_FAILED, item.remote.identity)
@@ -852,23 +829,12 @@ class SubmissionWorkflow:
             for item, content in materialized:
                 expected_identity = item.metadata.identity
                 try:
-                    uploader = getattr(
-                        self.moodle_service, "upload_draft_file_record", None
+                    record = self.client.upload_draft_file_record(
+                        item.metadata.name,
+                        content,
+                        itemid=draft_id,
+                        filepath=item.metadata.filepath,
                     )
-                    if callable(uploader):
-                        record = uploader(
-                            item.metadata.name,
-                            content,
-                            itemid=draft_id,
-                            filepath=item.metadata.filepath,
-                        )
-                    else:
-                        record = self.client.upload_draft_file_record(
-                            item.metadata.name,
-                            content,
-                            itemid=draft_id,
-                            filepath=item.metadata.filepath,
-                        )
                 except Exception:
                     logger.error("Moodle draft upload failed")
                     record = None

@@ -423,14 +423,10 @@ class WindowsNotifier(BaseNotifier):
         self._ensure_schedule_runtime()
         with self._schedule_condition:
             self._scheduler_stopping = True
-            self._scheduler_enabled = False
             self._schedule_condition.notify_all()
         thread = self._scheduler_thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout=1)
-        with self._schedule_condition:
-            if self._scheduler_thread is thread and (thread is None or not thread.is_alive()):
-                self._scheduler_thread = None
 
     def _ensure_schedule_runtime(self) -> None:
         """Initialize scheduler fields for tests constructing via ``__new__``."""

@@ -130,7 +130,7 @@ THEME_PRESETS = {
         "surface_hover":  "#0D4150",
         "accent":         "#2AA2E8",
         "text_primary":   "#FDF6E3",
-        "text_secondary": "#9EAFAF",
+        "text_secondary": "#93A1A1",
         "border":         "#586E75",
         "critical": "#FF7B72",
         "warning":  "#FFD166",

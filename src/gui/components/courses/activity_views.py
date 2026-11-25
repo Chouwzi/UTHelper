@@ -32,7 +32,6 @@ from gui.components.courses._shared import (
     build_offline_banner,
     build_skeleton_block,
     build_viewer_header,
-    marshal_to_ui,
     refresh_viewer_header,
     safe_control_update,
     sync_expand_toggle_button,
@@ -223,11 +222,6 @@ class _BasePaneActivityView(ft.Container):
         )
         safe_control_update(self._body_host)
 
-    def _marshal_ui(self, fn: Callable[[], None]) -> None:
-        if self._disposed:
-            return
-        marshal_to_ui(self, lambda: fn() if not self._disposed else None)
-
     def _load_async(self) -> None:
         raise NotImplementedError
 
@@ -363,12 +357,8 @@ class AttendanceActivityView(_BasePaneActivityView):
             summary = self._svc.fetch_attendance(self._source, self._module)
             if self._disposed:
                 return
-
-            def _apply() -> None:
-                self._summary = summary
-                self._render_summary(summary)
-
-            self._marshal_ui(_apply)
+            self._summary = summary
+            self._render_summary(summary)
 
         threading.Thread(target=_worker, name="CourseAttendanceFetch", daemon=True).start()
 
@@ -391,18 +381,12 @@ class AttendanceActivityView(_BasePaneActivityView):
             )
             if self._disposed:
                 return
+            self._feedback_banner = msg if ok else f"Lỗi: {msg}"
             final_summary = updated if updated is not None else self._svc.fetch_attendance(
                 self._source, self._module
             )
-            if self._disposed:
-                return
-
-            def _apply() -> None:
-                self._feedback_banner = msg if ok else f"Lỗi: {msg}"
-                self._summary = final_summary
-                self._render_summary(final_summary)
-
-            self._marshal_ui(_apply)
+            self._summary = final_summary
+            self._render_summary(final_summary)
 
         threading.Thread(target=_worker, name="CourseAttendanceSubmit", daemon=True).start()
 
@@ -675,12 +659,8 @@ class GroupActivityView(_BasePaneActivityView):
             )
             if self._disposed:
                 return
-
-            def _apply() -> None:
-                self._summary = summary
-                self._render_summary(summary)
-
-            self._marshal_ui(_apply)
+            self._summary = summary
+            self._render_summary(summary)
 
         threading.Thread(target=_worker, name="CourseGroupsFetch", daemon=True).start()
 
@@ -698,13 +678,9 @@ class GroupActivityView(_BasePaneActivityView):
             )
             if self._disposed:
                 return
-
-            def _apply() -> None:
-                self._status_banner = msg if ok else f"Lỗi: {msg}"
-                self._summary = refreshed
-                self._render_summary(refreshed)
-
-            self._marshal_ui(_apply)
+            self._status_banner = msg if ok else f"Lỗi: {msg}"
+            self._summary = refreshed
+            self._render_summary(refreshed)
 
         threading.Thread(target=_worker, name="CourseGroupsSubmit", daemon=True).start()
 
@@ -1010,7 +986,7 @@ class QuizActivityView(_BasePaneActivityView):
             )
             if self._disposed:
                 return
-            self._marshal_ui(lambda: self._render_quiz(summary))
+            self._render_quiz(summary)
 
         threading.Thread(target=_worker, name="CourseQuizFetch", daemon=True).start()
 
@@ -1670,18 +1646,14 @@ class QuizActivityView(_BasePaneActivityView):
                 )
             if self._disposed:
                 return
-
-            def _apply() -> None:
-                if not report.questions:
-                    self._render_quiz(
-                        summary,
-                        notice="Bài làm này chưa cho phép xem lại chi tiết qua API; hãy mở WebView ngay bên dưới.",
-                    )
-                    return
-                self._review_cache[attempt_id] = report
-                self._render_attempt_review(summary, att_info, report)
-
-            self._marshal_ui(_apply)
+            if not report.questions:
+                self._render_quiz(
+                    summary,
+                    notice="Bài làm này chưa cho phép xem lại chi tiết qua API; hãy mở WebView ngay bên dưới.",
+                )
+                return
+            self._review_cache[attempt_id] = report
+            self._render_attempt_review(summary, att_info, report)
 
         threading.Thread(target=_worker, name="CourseQuizReview", daemon=True).start()
 
@@ -1908,12 +1880,8 @@ class ForumActivityView(_BasePaneActivityView):
             )
             if self._disposed:
                 return
-
-            def _apply() -> None:
-                self._summary = summary
-                self._render_discussions(summary)
-
-            self._marshal_ui(_apply)
+            self._summary = summary
+            self._render_discussions(summary)
 
         threading.Thread(target=_worker, name="CourseForumFetch", daemon=True).start()
 
@@ -1927,14 +1895,10 @@ class ForumActivityView(_BasePaneActivityView):
             posts = self._svc.fetch_discussion_posts(self._source, disc.discussion_id)
             if self._disposed:
                 return
-
-            def _apply() -> None:
-                if not posts and disc.discussion_url and self._on_open_webview is not None:
-                    self._on_open_webview(disc.name, disc.discussion_url)
-                    return
-                self._render_posts(summary, disc, posts)
-
-            self._marshal_ui(_apply)
+            if not posts and disc.discussion_url and self._on_open_webview is not None:
+                self._on_open_webview(disc.name, disc.discussion_url)
+                return
+            self._render_posts(summary, disc, posts)
 
         threading.Thread(target=_worker, name="CourseForumPosts", daemon=True).start()
 
@@ -2205,7 +2169,7 @@ class RichContentActivityView(_BasePaneActivityView):
             )
             if self._disposed:
                 return
-            self._marshal_ui(lambda: self._render_page(rich_page))
+            self._render_page(rich_page)
 
         threading.Thread(target=_worker, name="CourseRichPageFetch", daemon=True).start()
 

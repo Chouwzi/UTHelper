@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -10,32 +9,12 @@ from typing import Any, Optional
 from config import get_data_dir, settings
 from core.academic_radar.calculator import calculate_radar_profile
 from core.academic_radar.gpa_planner import CreditProgress, parse_credit_progress
-from core.academic_radar.models import (
-    CourseEligibility,
-    CourseGradeItem,
-    RadarProfile,
-    SemesterGradeData,
-)
+from core.academic_radar.models import CourseGradeItem, RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.portal_client import PortalClient
 from core.safe_file_io import SafeFileIO
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_moodle_float(val: Any) -> float | None:
-    if val is None or isinstance(val, bool):
-        return None
-    if isinstance(val, str):
-        stripped = val.strip()
-        if not stripped or stripped == "-":
-            return None
-        val = stripped.replace(",", ".")
-    try:
-        numeric = float(val)
-    except (ValueError, TypeError):
-        return None
-    return numeric if math.isfinite(numeric) else None
 
 
 def _namespace_digest(username: str) -> str:
@@ -56,15 +35,6 @@ class AcademicGradeService:
         self._portal_client = portal_client or PortalClient(settings.PORTAL_API_BASE)
         self._cache_dir = cache_dir or get_data_dir()
         self._normalizer = normalizer or SemesterNormalizer()
-
-    def clear_session(self) -> None:
-        """Clear cached Portal authentication token/session on account switch or logout."""
-        clear_token = getattr(self._portal_client, "clear_token", None)
-        if callable(clear_token):
-            clear_token()
-        clear_sess = getattr(self._portal_client, "clear_session", None)
-        if callable(clear_sess):
-            clear_sess()
 
     def _cache_paths(self, username: str) -> tuple[Path, Path]:
         digest = _namespace_digest(username)
@@ -109,8 +79,8 @@ class AcademicGradeService:
 
         Uses daily cache if available (fetched once per day) unless force_refresh is True.
         """
-        username = str(username or getattr(settings, "UTH_USERNAME", "") or "").strip()
-        password = str(password or getattr(settings, "UTH_PASSWORD", "") or "")
+        username = username or settings.UTH_USERNAME or settings.MOODLE_USERNAME
+        password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
 
         today_str = date.today().isoformat()
         cache = self._read_cache(username)
@@ -147,8 +117,8 @@ class AcademicGradeService:
         force_refresh: bool = False,
     ) -> CreditProgress | None:
         """Loads graduation credit progress (canDat/hienTai); daily cache, stale fallback."""
-        username = str(username or getattr(settings, "UTH_USERNAME", "") or "").strip()
-        password = str(password or getattr(settings, "UTH_PASSWORD", "") or "")
+        username = username or settings.UTH_USERNAME or settings.MOODLE_USERNAME
+        password = password or settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
         _, progress_cache_file = self._cache_paths(username)
 
         cache: dict[str, Any] | None = None
@@ -188,7 +158,7 @@ class AcademicGradeService:
     def create_semester_from_moodle_grades(
         self,
         courses_grades: list[dict[str, Any]],
-        grade_items: dict[int | str, list[dict[str, Any]]],
+        grade_items: dict[int, list[dict[str, Any]]],
     ) -> list[SemesterGradeData]:
         """Converts raw Moodle courses and grade items into a SemesterGradeData."""
         if not courses_grades:
@@ -196,62 +166,43 @@ class AcademicGradeService:
 
         courses: list[CourseGradeItem] = []
         for cg in courses_grades:
-            if not isinstance(cg, dict):
-                continue
-            cid = cg.get("courseid") if cg.get("courseid") is not None else (cg.get("id") or 0)
-            cname = (
-                cg.get("coursename")
-                or cg.get("fullname")
-                or cg.get("display_name")
-                or "Chưa có tên"
-            )
-            ccode = cg.get("shortname") or cg.get("coursecode") or ""
-            raw_grade = cg.get("rawgrade") if cg.get("rawgrade") is not None else cg.get("grade")
-            final_grade = _safe_moodle_float(raw_grade)
+            cid = cg.get("id") or 0
+            cname = cg.get("fullname") or cg.get("display_name") or "Chưa có tên"
+            ccode = cg.get("shortname") or ""
+            final_grade = None
+            raw_grade = cg.get("grade")
+            if raw_grade is not None:
+                try:
+                    final_grade = float(raw_grade)
+                except (ValueError, TypeError):
+                    pass
 
-            # Inspect grade items for QT / Thi (keys in fetch_all_grades are str(courseid))
-            items: list[dict[str, Any]] = []
-            if isinstance(grade_items, dict):
-                resolved_items = (
-                    grade_items.get(str(cid))
-                    if str(cid) in grade_items
-                    else grade_items.get(cid, [])
-                )
-                if isinstance(resolved_items, list):
-                    items = resolved_items
-
+            # Inspect grade items for QT / Thi
+            items = grade_items.get(cid, []) if isinstance(grade_items, dict) else []
             process_grade = None
             exam_grade = None
 
             for it in items:
-                if not isinstance(it, dict):
-                    continue
-                iname = str(it.get("itemname") or "").lower()
-                iraw = (
-                    it.get("graderaw")
-                    if it.get("graderaw") is not None
-                    else it.get("gradeformatted")
-                )
-                gval = _safe_moodle_float(iraw)
-                if gval is None:
-                    continue
-                if any(k in iname for k in ("quá trình", "qt", "chuyên cần", "thường kỳ", "giữa kỳ")):
-                    process_grade = gval
-                elif any(k in iname for k in ("thi", "cuối kỳ", "ck", "exam")):
-                    exam_grade = gval
+                iname = (it.get("itemname") or "").lower()
+                iraw = it.get("graderaw")
+                if iraw is not None:
+                    try:
+                        gval = float(iraw)
+                        if any(k in iname for k in ("quá trình", "qt", "chuyên cần", "thường kỳ")):
+                            process_grade = gval
+                        elif any(k in iname for k in ("thi", "cuối kỳ", "ck", "exam")):
+                            exam_grade = gval
+                    except (ValueError, TypeError):
+                        pass
 
             item = CourseGradeItem(
                 course_id=str(cid),
                 course_code=str(ccode),
                 course_name=str(cname),
-                credits=0.0,
+                credits=3.0,
                 process_grade=process_grade,
                 exam_grade=exam_grade,
                 final_grade=final_grade,
-                eligibility=CourseEligibility(
-                    status="unknown",
-                    reason="Điểm tạm thời từ Moodle (chưa đồng bộ số tín chỉ Portal)",
-                ),
             )
             courses.append(item)
 

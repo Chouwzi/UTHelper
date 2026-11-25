@@ -42,11 +42,7 @@ class DiagnosticScreen(str, Enum):
     SETTINGS = "settings"
     DETAIL = "detail"
     GRADES = "grades"
-    GRADES = "grades"
     ROADMAP = "roadmap"
-    COURSES = "courses"
-    COURSE_GRADES = "course_grades"
-    QUIZ = "quiz"
 
 
 class DiagnosticAction(str, Enum):

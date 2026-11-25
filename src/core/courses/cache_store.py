@@ -273,41 +273,27 @@ class CourseCacheStore:
     """Account-namespaced atomic JSON store for course catalogs and trees."""
 
     SCHEMA_VERSION = 1
-    _MAX_MEM_DETAILS = 16
 
     def __init__(self, cache_dir: Optional[Path] = None, namespace: Optional[str] = None) -> None:
-        from collections import OrderedDict
-        import threading
-
         if cache_dir is None:
             from config import _USER_DATA_DIR
 
             cache_dir = _USER_DATA_DIR
-        self._state_lock = threading.RLock()
-        self._generation: int = 0
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         normalized = (str(namespace).strip().lower() if namespace else "") or "default"
         self._digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
         self._catalog_path = self._dir / f"courses_catalog_{self._digest}.json"
-        self._mem_catalog: Optional[tuple[Path, tuple[int, int, int], CatalogCacheSnapshot]] = None
-        self._mem_details: OrderedDict[Path, tuple[tuple[int, int, int], CourseDetailSnapshot]] = OrderedDict()
+        self._mem_catalog: Optional[tuple[tuple[int, int, int], CatalogCacheSnapshot]] = None
+        self._mem_details: dict[Path, tuple[tuple[int, int, int], CourseDetailSnapshot]] = {}
 
-    @property
-    def generation(self) -> int:
-        """Monotonic namespace generation bumped atomically on every account switch."""
-        with self._state_lock:
-            return self._generation
-
-    def set_namespace(self, namespace: Optional[str]) -> None:
+    def set_namespace(self, namespace: str) -> None:
         """Switch active cache namespace on account change and drop RAM caches."""
-        with self._state_lock:
-            self._generation += 1
-            normalized = (str(namespace).strip().lower() if namespace else "") or "default"
-            self._digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-            self._catalog_path = self._dir / f"courses_catalog_{self._digest}.json"
-            self._mem_catalog = None
-            self._mem_details.clear()
+        normalized = (str(namespace).strip().lower() if namespace else "") or "default"
+        self._digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+        self._catalog_path = self._dir / f"courses_catalog_{self._digest}.json"
+        self._mem_catalog = None
+        self._mem_details.clear()
 
     @staticmethod
     def _stat_sig(path: Path) -> Optional[tuple[int, int, int]]:
@@ -320,53 +306,33 @@ class CourseCacheStore:
     def _detail_path(self, source: CourseSource, course_id: int) -> Path:
         valid_source = _validate_source(source)
         valid_id = _validate_course_id(course_id)
-        with self._state_lock:
-            digest = self._digest
-        return self._dir / f"course_tree_{valid_source}_{valid_id}_{digest}.json"
+        return self._dir / f"course_tree_{valid_source}_{valid_id}_{self._digest}.json"
 
-    def _read_catalog_dict(self, catalog_path: Optional[Path] = None) -> dict[str, Any]:
-        target = catalog_path if catalog_path is not None else self._catalog_path
-        payload = SafeFileIO.read_json_safe(target, dict)
+    def _read_catalog_dict(self) -> dict[str, Any]:
+        payload = SafeFileIO.read_json_safe(self._catalog_path, dict)
         return dict(payload) if isinstance(payload, dict) else {}
 
-    def _write_catalog_payload(
-        self, payload: dict[str, Any], catalog_path: Optional[Path] = None
-    ) -> bool:
-        target = catalog_path if catalog_path is not None else self._catalog_path
+    def _write_catalog_payload(self, payload: dict[str, Any]) -> bool:
         payload["version"] = self.SCHEMA_VERSION
-        with self._state_lock:
-            if self._catalog_path == target:
-                self._mem_catalog = None
-        if not SafeFileIO.write_json_atomic(target, payload):
-            logger.warning("Failed to persist courses catalog cache: %s", target)
+        self._mem_catalog = None
+        if not SafeFileIO.write_json_atomic(self._catalog_path, payload):
+            logger.warning("Failed to persist courses catalog cache: %s", self._catalog_path)
             return False
         return True
 
     def load_catalog(self) -> CatalogCacheSnapshot:
         """Load the cached course catalog, pins, unseen flags, and recent items (RAM-accelerated)."""
-        with self._state_lock:
-            catalog_path = self._catalog_path
-        with get_memory_lock(catalog_path):
-            sig = self._stat_sig(catalog_path)
+        with get_memory_lock(self._catalog_path):
+            sig = self._stat_sig(self._catalog_path)
             if sig is None:
-                with self._state_lock:
-                    if self._catalog_path == catalog_path:
-                        self._mem_catalog = None
+                self._mem_catalog = None
                 return CatalogCacheSnapshot()
-            with self._state_lock:
-                if (
-                    self._catalog_path == catalog_path
-                    and self._mem_catalog is not None
-                    and self._mem_catalog[0] == catalog_path
-                    and self._mem_catalog[1] == sig
-                ):
-                    return self._mem_catalog[2]
+            if self._mem_catalog is not None and self._mem_catalog[0] == sig:
+                return self._mem_catalog[1]
 
-            payload = self._read_catalog_dict(catalog_path)
+            payload = self._read_catalog_dict()
             if not payload:
-                with self._state_lock:
-                    if self._catalog_path == catalog_path:
-                        self._mem_catalog = None
+                self._mem_catalog = None
                 return CatalogCacheSnapshot()
 
             raw_specs = payload.get("portal_course_specs")
@@ -388,11 +354,9 @@ class CourseCacheStore:
                 current_term_label=str(payload.get("current_term_label") or ""),
                 portal_course_specs=portal_specs,
             )
-            post_sig = self._stat_sig(catalog_path)
+            post_sig = self._stat_sig(self._catalog_path)
             if post_sig is not None:
-                with self._state_lock:
-                    if self._catalog_path == catalog_path:
-                        self._mem_catalog = (catalog_path, post_sig, snap)
+                self._mem_catalog = (post_sig, snap)
             return snap
 
     def save_catalog(
@@ -402,33 +366,19 @@ class CourseCacheStore:
         synced_at: int,
         current_term_label: Optional[str] = None,
         portal_course_specs: Optional[list[dict[str, Any]]] = None,
-        expected_generation: Optional[int] = None,
-    ) -> bool:
+    ) -> None:
         """Persist the latest course catalog while preserving pins/unseen/recent/Portal metadata."""
-        with self._state_lock:
-            if expected_generation is not None and self._generation != expected_generation:
-                return False
-            catalog_path = self._catalog_path
-        with get_memory_lock(catalog_path):
-            with self._state_lock:
-                if expected_generation is not None and self._generation != expected_generation:
-                    return False
+        with get_memory_lock(self._catalog_path):
             self._dir.mkdir(parents=True, exist_ok=True)
-            with SafeFileIO.transaction(catalog_path):
-                with self._state_lock:
-                    if (
-                        expected_generation is not None
-                        and self._generation != expected_generation
-                    ):
-                        return False
-                existing = self._read_catalog_dict(catalog_path)
+            with SafeFileIO.transaction(self._catalog_path):
+                existing = self._read_catalog_dict()
                 existing["courses"] = [asdict(course) for course in courses]
                 existing["catalog_synced_at"] = int(synced_at)
                 if current_term_label is not None:
                     existing["current_term_label"] = str(current_term_label)
                 if portal_course_specs is not None:
                     existing["portal_course_specs"] = list(portal_course_specs)
-                return self._write_catalog_payload(existing, catalog_path)
+                self._write_catalog_payload(existing)
 
     def _update_catalog_string_list(
         self,
@@ -440,12 +390,10 @@ class CourseCacheStore:
     ) -> list[str]:
         if not isinstance(course_key, str) or not course_key.strip():
             raise ValueError("course_key must be non-empty")
-        with self._state_lock:
-            catalog_path = self._catalog_path
-        with get_memory_lock(catalog_path):
+        with get_memory_lock(self._catalog_path):
             self._dir.mkdir(parents=True, exist_ok=True)
-            with SafeFileIO.transaction(catalog_path):
-                existing = self._read_catalog_dict(catalog_path)
+            with SafeFileIO.transaction(self._catalog_path):
+                existing = self._read_catalog_dict()
                 previous_keys = _string_list(existing.get(field_name))
                 keys = [k for k in previous_keys if k != course_key]
                 if present:
@@ -454,7 +402,7 @@ class CourseCacheStore:
                     else:
                         keys.append(course_key)
                 existing[field_name] = keys
-                if not self._write_catalog_payload(existing, catalog_path):
+                if not self._write_catalog_payload(existing):
                     return previous_keys
                 return keys
 
@@ -475,12 +423,10 @@ class CourseCacheStore:
     ) -> list[RecentMaterialEntry]:
         """Prepend a recently opened material, deduplicated by attachment URL."""
         max_items = max(1, int(limit))
-        with self._state_lock:
-            catalog_path = self._catalog_path
-        with get_memory_lock(catalog_path):
+        with get_memory_lock(self._catalog_path):
             self._dir.mkdir(parents=True, exist_ok=True)
-            with SafeFileIO.transaction(catalog_path):
-                existing = self._read_catalog_dict(catalog_path)
+            with SafeFileIO.transaction(self._catalog_path):
+                existing = self._read_catalog_dict()
                 previous_entries = _parse_dict_items(
                     existing.get("recent_items"), _recent_from_dict
                 )
@@ -491,19 +437,9 @@ class CourseCacheStore:
                 ]
                 entries = [entry, *filtered][:max_items]
                 existing["recent_items"] = [asdict(item) for item in entries]
-                if not self._write_catalog_payload(existing, catalog_path):
+                if not self._write_catalog_payload(existing):
                     return previous_entries
                 return entries
-
-    def _put_mem_detail_locked(
-        self, detail_path: Path, sig: tuple[int, int, int], snap: CourseDetailSnapshot
-    ) -> None:
-        if not detail_path.name.endswith(f"_{self._digest}.json"):
-            return
-        self._mem_details[detail_path] = (sig, snap)
-        self._mem_details.move_to_end(detail_path)
-        while len(self._mem_details) > self._MAX_MEM_DETAILS:
-            self._mem_details.popitem(last=False)
 
     def load_course_detail(self, source: CourseSource, course_id: int) -> CourseDetailSnapshot:
         """Load cached sections, grades, and known cmids for a single course (RAM-accelerated)."""
@@ -511,23 +447,15 @@ class CourseCacheStore:
         with get_memory_lock(detail_path):
             sig = self._stat_sig(detail_path)
             if sig is None:
-                with self._state_lock:
-                    self._mem_details.pop(detail_path, None)
+                self._mem_details.pop(detail_path, None)
                 return CourseDetailSnapshot()
-            with self._state_lock:
-                cached_mem = self._mem_details.get(detail_path)
-                if (
-                    cached_mem is not None
-                    and cached_mem[0] == sig
-                    and detail_path.name.endswith(f"_{self._digest}.json")
-                ):
-                    self._mem_details.move_to_end(detail_path)
-                    return cached_mem[1]
+            cached_mem = self._mem_details.get(detail_path)
+            if cached_mem is not None and cached_mem[0] == sig:
+                return cached_mem[1]
 
             payload = SafeFileIO.read_json_safe(detail_path, dict)
             if not isinstance(payload, dict) or not payload:
-                with self._state_lock:
-                    self._mem_details.pop(detail_path, None)
+                self._mem_details.pop(detail_path, None)
                 return CourseDetailSnapshot()
 
             known_cmids: list[int] = []
@@ -546,8 +474,7 @@ class CourseCacheStore:
             )
             post_sig = self._stat_sig(detail_path)
             if post_sig is not None:
-                with self._state_lock:
-                    self._put_mem_detail_locked(detail_path, post_sig, snap)
+                self._mem_details[detail_path] = (post_sig, snap)
             return snap
 
     def save_course_detail(
@@ -559,20 +486,11 @@ class CourseCacheStore:
         *,
         synced_at: int,
         known_cmids: Optional[list[int]] = None,
-        expected_generation: Optional[int] = None,
-    ) -> bool:
+    ) -> None:
         """Persist sections, grades, and known cmids for a single course."""
-        valid_source = _validate_source(source)
-        valid_id = _validate_course_id(course_id)
-        with self._state_lock:
-            if expected_generation is not None and self._generation != expected_generation:
-                return False
-            detail_path = self._dir / f"course_tree_{valid_source}_{valid_id}_{self._digest}.json"
+        detail_path = self._detail_path(source, course_id)
         with get_memory_lock(detail_path):
-            with self._state_lock:
-                if expected_generation is not None and self._generation != expected_generation:
-                    return False
-                self._mem_details.pop(detail_path, None)
+            self._mem_details.pop(detail_path, None)
             self._dir.mkdir(parents=True, exist_ok=True)
             resolved_cmids = (
                 [m.cmid for s in sections for m in s.modules]
@@ -590,21 +508,17 @@ class CourseCacheStore:
                 "last_synced_at": int(synced_at),
                 "known_cmids": resolved_cmids,
             }
-            with self._state_lock:
-                if expected_generation is not None and self._generation != expected_generation:
-                    return False
             if not SafeFileIO.write_json_atomic(detail_path, payload):
                 logger.warning("Failed to persist course detail cache: %s", detail_path)
-                return False
-            post_sig = self._stat_sig(detail_path)
-            if post_sig is not None:
-                snap = CourseDetailSnapshot(
-                    sections=list(sections),
-                    grades=list(grades),
-                    last_synced_at=int(synced_at),
-                    known_cmids=resolved_cmids,
-                )
-                with self._state_lock:
-                    if expected_generation is None or self._generation == expected_generation:
-                        self._put_mem_detail_locked(detail_path, post_sig, snap)
-            return True
+            else:
+                post_sig = self._stat_sig(detail_path)
+                if post_sig is not None:
+                    self._mem_details[detail_path] = (
+                        post_sig,
+                        CourseDetailSnapshot(
+                            sections=list(sections),
+                            grades=list(grades),
+                            last_synced_at=int(synced_at),
+                            known_cmids=resolved_cmids,
+                        ),
+                    )

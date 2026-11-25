@@ -173,30 +173,10 @@ def prepare_activity_hot_fields(items: list[dict[str, Any]]) -> None:
 def build_prefetched_dataset(
     items: list[dict[str, Any]],
     detail_cache: dict[str, dict[str, Any]],
-    pending_updates: dict[str, tuple[float, str]] | None = None,
-    prefetch_start_time: float = 0.0,
-    *,
-    now: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the display dataset after background detail prefetch completes.
-
-    When ``pending_updates`` is supplied, optimistic local submission statuses
-    recorded after ``prefetch_start_time`` are preserved over stale prefetched
-    values and expired entries are pruned in place (intended to be called under
-    the controller's ``_data_lock``).
-    """
+    """Build the display dataset after background detail prefetch completes."""
     data = merge_cached_details(items, detail_cache)
-    if pending_updates is not None:
-        data, fresh_pending = apply_pending_submission_updates(
-            data,
-            pending_updates,
-            prefetch_start_time,
-            now=now,
-        )
-        pending_updates.clear()
-        pending_updates.update(fresh_pending)
     sort_activity_items(data)
-    prepare_activity_hot_fields(data)
     return data
 
 

@@ -1,8 +1,6 @@
-import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import logging
-from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List, Iterable
+import logging
 from core import ws_functions
 
 logger = logging.getLogger(__name__)
@@ -15,19 +13,10 @@ class MoodleService:
         call_ws_api: Callable,
         grade_report_fetcher: Optional[Callable[[int], Optional[str]]] = None,
         grade_report_error_getter: Optional[Callable[[], str]] = None,
-        *,
-        client: Any = None,
     ):
         self.call_ws_api = call_ws_api
-        self._client = client if client is not None else getattr(call_ws_api, "__self__", None)
         self._grade_report_fetcher = grade_report_fetcher
         self._grade_report_error_getter = grade_report_error_getter
-
-    @property
-    def moodle_site_origin(self) -> Optional[str]:
-        if self._client is None:
-            return None
-        return getattr(self._client, "moodle_site_origin", None)
 
     @property
     def last_grade_report_error(self) -> str:
@@ -151,82 +140,9 @@ class MoodleService:
             modulename,
         )
 
-    def upload_file_to_draft(
-        self,
-        file_path: str,
-        draft_id: int = 0,
-        *,
-        user_id: Optional[int] = None,
-    ) -> Optional[int]:
+    def upload_file_to_draft(self, file_path: str, draft_id: int = 0) -> int:
         """Tải một tệp tin lên vùng nháp (draft area) trên server Moodle."""
-        try:
-            path = Path(file_path)
-            raw_bytes = path.read_bytes()
-        except (OSError, TypeError, ValueError) as exc:
-            logger.error("Không thể đọc file '%s' để upload nháp: %s", file_path, exc)
-            return None
-
-        resolved_user_id = user_id if user_id is not None else self.get_current_user_id()
-        if not isinstance(resolved_user_id, int) or isinstance(resolved_user_id, bool) or resolved_user_id <= 0:
-            logger.error("Không xác định được Moodle user_id để upload file '%s'", path.name)
-            return None
-
-        encoded = base64.b64encode(raw_bytes).decode("ascii")
-        return ws_functions.upload_file_to_draft(
-            self.call_ws_api,
-            path.name,
-            encoded,
-            resolved_user_id,
-            draft_id,
-        )
-
-    def upload_draft_file_record(
-        self,
-        filename: str,
-        content: bytes,
-        *,
-        itemid: int = 0,
-        filepath: str = "/",
-    ) -> Any:
-        """Upload raw bytes to a Moodle draft area via the bound client."""
-        if self._client is None or not hasattr(self._client, "upload_draft_file_record"):
-            return None
-        return self._client.upload_draft_file_record(
-            filename,
-            content,
-            itemid=itemid,
-            filepath=filepath,
-        )
-
-    def download_file(self, url: str) -> Optional[bytes]:
-        """Download an authenticated Moodle file payload via the bound client."""
-        if self._client is None or not hasattr(self._client, "download_file"):
-            return None
-        return self._client.download_file(url)
-
-    def get_user_id(self, *, refresh: bool = False) -> Optional[int]:
-        """Return the active Moodle user ID, refreshing from server when requested."""
-        if self._client is not None and hasattr(self._client, "get_user_id"):
-            return self._client.get_user_id(refresh=refresh)
-        return self.get_current_user_id()
-
-    def remove_assignment_submission(
-        self,
-        cmid: int,
-        *,
-        expected_user_id: int,
-        before_commit: Optional[Callable[[], bool]] = None,
-    ) -> bool:
-        """Remove an editable Moodle assignment submission via the bound client."""
-        if self._client is None or not hasattr(self._client, "remove_assignment_submission"):
-            return False
-        return bool(
-            self._client.remove_assignment_submission(
-                cmid,
-                expected_user_id=expected_user_id,
-                before_commit=before_commit,
-            )
-        )
+        return ws_functions.upload_file_to_draft(self.call_ws_api, file_path, draft_id)
 
     def get_unused_draft_itemid(self) -> Optional[int]:
         """Allocate a separate Moodle draft area for an editor field."""

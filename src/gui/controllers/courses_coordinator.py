@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import re
 import time
 import uuid
@@ -18,11 +17,7 @@ import platform_utils
 from core.courses.activity_service import CourseActivityService
 from core.courses.archive_service import ArchiveService
 from core.courses.catalog_service import CourseCatalogService
-from core.courses.document_converter import (
-    ConvertedDocument,
-    clear_converted_document_cache,
-    convert_document_bytes,
-)
+from core.courses.document_converter import ConvertedDocument, convert_document_bytes
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import (
     CourseAttachment,
@@ -33,7 +28,7 @@ from core.courses.models import (
     PreviewKind,
     RecentMaterialEntry,
 )
-from core.courses.pdf_renderer import PdfDocumentSession, clear_rendered_pdf_cache
+from core.courses.pdf_renderer import PdfDocumentSession
 from core.courses.office_viewer_service import (
     OfficeViewerDescriptor,
     prepare_office_viewer,
@@ -74,32 +69,8 @@ from gui.view_models.courses_state import format_file_size, safe_http_url
 
 logger = logging.getLogger(__name__)
 _SAFE_TMP_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_SAFE_EXTERNAL_OPEN_EXTS = frozenset(
-    {
-        ".pdf",
-        ".docx",
-        ".doc",
-        ".pptx",
-        ".ppt",
-        ".xlsx",
-        ".xls",
-        ".csv",
-        ".txt",
-        ".md",
-        ".rtf",
-        ".odt",
-        ".ods",
-        ".odp",
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".zip",
-        ".rar",
-        ".7z",
-    }
+_DANGEROUS_EXTERNAL_EXTS = frozenset(
+    {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi", ".scr", ".com", ".pif"}
 )
 
 
@@ -304,49 +275,17 @@ class CoursesCoordinator:
             raise
 
     def reset_for_account_switch(self, namespace: Optional[str] = None) -> None:
-        """Reset catalog load state, cache namespace, preview caches, and overlays on account change."""
+        """Reset catalog load state, cache namespace, and overlays on account change."""
         self._attachment_load_seq += 1
         self._initial_loaded = False
-        self._account_namespace = namespace
-        effective_ns = namespace if namespace else "__logged_out__"
-        cache_store = getattr(self.catalog_service, "_cache", None) or getattr(
-            self.catalog_service, "_cache_store", None
-        )
-        set_ns = getattr(cache_store, "set_namespace", None)
-        if callable(set_ns):
-            set_ns(effective_ns)
-        try:
-            clear_converted_document_cache()
-        except Exception:
-            pass
-        preview_cache = getattr(self, "preview_cache", None)
-        if preview_cache is not None:
-            clear_pc = getattr(preview_cache, "clear", None)
-            if callable(clear_pc):
-                try:
-                    clear_pc()
-                except Exception:
-                    pass
-            cache_dir = getattr(preview_cache, "cache_dir", None)
-            if isinstance(cache_dir, Path):
-                try:
-                    clear_rendered_pdf_cache(cache_dir)
-                except Exception:
-                    pass
-                ext_dir = cache_dir / "external"
-                if ext_dir.is_dir():
-                    for entry in ext_dir.iterdir():
-                        if entry.is_file():
-                            try:
-                                entry.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-        reset_srv = getattr(self.preview_server, "reset_for_account_switch", None)
-        if callable(reset_srv):
-            try:
-                reset_srv()
-            except Exception:
-                pass
+        if namespace:
+            self._account_namespace = namespace
+            cache_store = getattr(self.catalog_service, "_cache", None) or getattr(
+                self.catalog_service, "_cache_store", None
+            )
+            set_ns = getattr(cache_store, "set_namespace", None)
+            if callable(set_ns):
+                set_ns(namespace)
         if hasattr(self.courses_view, "reset_for_account_switch"):
             self.courses_view.reset_for_account_switch()
 
@@ -921,12 +860,7 @@ class CoursesCoordinator:
         """Show live progress in Pane 3, fetch attachment, pre-render off-thread, and open viewer."""
         self._attachment_load_seq += 1
         req_seq = self._attachment_load_seq
-        raw_size = getattr(att, "file_size", 0)
-        expected_total = (
-            max(0, int(raw_size))
-            if isinstance(raw_size, (int, float)) and not isinstance(raw_size, bool)
-            else 0
-        )
+        expected_total = max(0, int(att.file_size or 0))
         size_hint = format_file_size(expected_total)
         subtitle = f"Đang tải xuống · {size_hint}" if size_hint else "Đang tải tài liệu từ Moodle..."
         loading_overlay = PaneLoadingOverlay(
@@ -1079,14 +1013,7 @@ class CoursesCoordinator:
 
                         def _warm_pdf() -> PdfDocumentSession:
                             sess = PdfDocumentSession(raw, cache_dir=pdf_dir)
-                            pcount = getattr(sess, "page_count", 0)
-                            if (
-                                bool(getattr(sess, "supported", False))
-                                and bool(getattr(sess, "can_render_images", False))
-                                and isinstance(pcount, int)
-                                and not isinstance(pcount, bool)
-                                and pcount > 0
-                            ):
+                            if sess.supported and sess.can_render_images and sess.page_count > 0:
                                 sess.render_page_png(0, scale=1.6, dark_mode=False)
                             return sess
 
@@ -1175,38 +1102,19 @@ class CoursesCoordinator:
         if saved:
             self._show_snack(f"Đã lưu: {safe_name}")
 
-    @staticmethod
-    def _write_external_file_with_motw(out: Path, data: bytes) -> None:
-        out.write_bytes(data)
-        if os.name == "nt" or platform_utils.IS_WINDOWS:
-            try:
-                with open(f"{out}:Zone.Identifier", "wb") as ads:
-                    ads.write(b"[ZoneTransfer]\r\nZoneId=3\r\n")
-            except OSError:
-                pass
-
     async def _open_external_async(self, file_name: str, data: bytes) -> None:
-        raw_input = str(file_name or "").strip()
-        effective_input = raw_input if raw_input else "document.txt"
-        raw_leaf = Path(effective_input).name.strip()
+        raw_leaf = Path(file_name or "document").name.strip()
         stripped_leaf = raw_leaf.rstrip(". ")
-        if not stripped_leaf:
-            stripped_leaf = "document.txt"
-            raw_leaf = "document.txt"
         raw_ext = Path(raw_leaf).suffix.lower()
         clean_ext = Path(stripped_leaf).suffix.lower()
-        if (
-            not clean_ext
-            or raw_ext != clean_ext
-            or clean_ext not in _SAFE_EXTERNAL_OPEN_EXTS
-        ):
+        if raw_ext in _DANGEROUS_EXTERNAL_EXTS or clean_ext in _DANGEROUS_EXTERNAL_EXTS:
             await self._save_bytes_async(file_name, data)
             return
 
-        safe_leaf = _SAFE_TMP_RE.sub("_", stripped_leaf).strip("._") or f"document{clean_ext}"
+        safe_leaf = _SAFE_TMP_RE.sub("_", stripped_leaf).strip("._") or "document"
         stem = Path(safe_leaf).stem or "document"
-        ext = Path(safe_leaf).suffix.lower()
-        if ext not in _SAFE_EXTERNAL_OPEN_EXTS:
+        ext = Path(safe_leaf).suffix
+        if ext.lower() in _DANGEROUS_EXTERNAL_EXTS:
             await self._save_bytes_async(file_name, data)
             return
 
@@ -1219,7 +1127,7 @@ class CoursesCoordinator:
             tmp_dir = self.preview_cache.cache_dir / "external"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             out = tmp_dir / unique_name
-            await asyncio.to_thread(self._write_external_file_with_motw, out, data)
+            await asyncio.to_thread(out.write_bytes, data)
             await ft.UrlLauncher().launch_url(out.as_uri())
         except Exception:
             await self._save_bytes_async(file_name, data)
@@ -1230,8 +1138,15 @@ class CoursesCoordinator:
             bgcolor=C.SURFACE,
             duration=3000,
         )
+        show_dlg = getattr(self._page, "show_dialog", None)
+        if callable(show_dlg):
+            try:
+                show_dlg(sb)
+                return
+            except (AttributeError, TypeError):
+                pass
         overlay = getattr(self._page, "overlay", None)
-        if isinstance(overlay, list):
+        if overlay is not None:
             overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
             overlay.append(sb)
             sb.open = True
@@ -1241,13 +1156,6 @@ class CoursesCoordinator:
                     update()
                 except Exception:
                     pass
-            return
-        show_dlg = getattr(self._page, "show_dialog", None)
-        if callable(show_dlg):
-            try:
-                show_dlg(sb)
-            except (AttributeError, TypeError):
-                pass
 
     def update_theme(self) -> None:
         """Propagate semantic theme changes to CoursesTabView and active overlays."""

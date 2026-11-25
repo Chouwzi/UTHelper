@@ -10,51 +10,13 @@ import flet as ft
 from gui.core.theme import C
 
 
-def marshal_to_ui(control: ft.BaseControl, fn: Callable[[], None]) -> None:
-    """Run ``fn`` on the control's Flet asyncio loop when invoked off-loop."""
-    try:
-        page = control.page
-    except Exception:
-        page = None
-
-    if page is not None:
-        try:
-            loop = getattr(page, "loop", None)
-        except Exception:
-            # Flet 0.86+ raises RuntimeError("An attempt to fetch destroyed session.")
-            # once the Page session weakref expires; drop stale callbacks safely.
-            return
-
-        if isinstance(loop, asyncio.AbstractEventLoop):
-            if loop.is_closed():
-                return
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-            if running_loop is loop:
-                fn()
-                return
-            if loop.is_running():
-                try:
-                    loop.call_soon_threadsafe(fn)
-                except RuntimeError:
-                    pass
-            return
-
-    fn()
-
-
 def safe_control_update(control: ft.BaseControl) -> None:
     """Update a Flet control only if it is currently attached to a Page."""
-    def _do_update() -> None:
-        try:
-            if control.page is not None:
-                control.update()
-        except Exception:
-            pass
-
-    marshal_to_ui(control, _do_update)
+    try:
+        if control.page is not None:
+            control.update()
+    except Exception:
+        pass
 
 
 def build_filter_chip(

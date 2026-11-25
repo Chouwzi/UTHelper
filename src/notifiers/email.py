@@ -35,42 +35,35 @@ class EmailNotifier(BaseNotifier):
             return False
 
         tasks = assignments
-        if not tasks:
-            return True
+        if not tasks: return True
 
-        all_grade_alerts = all(bool(_get(t, "is_grade_alert", False)) for t in tasks)
-        time_str = datetime.now().strftime("%H:%M %d/%m/%Y")
+        # Count urgencies for subject & summary
+        critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
+        warning_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'warning')
 
-        if all_grade_alerts:
-            msg_subject = f"[UTHelper] 📊 {len(tasks)} cập nhật điểm mới"
-            header_title = "📊 Cập nhật điểm mới"
-            header_subtitle = f"{len(tasks)} thay đổi điểm được ghi nhận"
-            summary = f"{len(tasks)} cập nhật điểm"
+        # Dynamic subject
+        if critical_count > 0:
+            msg_subject = f"[UTHelper] ⚠️ {critical_count} bài tập khẩn cấp cần nộp!"
         else:
-            critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
-            warning_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'warning')
-
-            if critical_count > 0:
-                msg_subject = f"[UTHelper] ⚠️ {critical_count} bài tập khẩn cấp cần nộp!"
-            else:
-                msg_subject = f"[UTHelper] {len(tasks)} deadline sắp đến"
-
-            summary_parts = []
-            if critical_count:
-                summary_parts.append(f"{critical_count} khẩn cấp")
-            if warning_count:
-                summary_parts.append(f"{warning_count} sắp hạn")
-            safe_count = len(tasks) - critical_count - warning_count
-            if safe_count > 0:
-                summary_parts.append(f"{safe_count} bình thường")
-            summary = " · ".join(summary_parts)
-            header_title = "📋 Nhắc nhở deadline"
-            header_subtitle = f"{len(tasks)} hoạt động cần chú ý"
+            msg_subject = f"[UTHelper] {len(tasks)} deadline sắp đến"
 
         msg = EmailMessage()
         msg['Subject'] = msg_subject
         msg['From'] = email_address
         msg['To'] = email_address
+
+        # Smart summary for header
+        summary_parts = []
+        if critical_count:
+            summary_parts.append(f"{critical_count} khẩn cấp")
+        if warning_count:
+            summary_parts.append(f"{warning_count} sắp hạn")
+        safe_count = len(tasks) - critical_count - warning_count
+        if safe_count > 0:
+            summary_parts.append(f"{safe_count} bình thường")
+        summary = " · ".join(summary_parts)
+
+        time_str = datetime.now().strftime("%H:%M %d/%m/%Y")
 
         html_content = f"""
         <html>
@@ -103,8 +96,8 @@ class EmailNotifier(BaseNotifier):
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>{header_title}</h2>
-                    <p class="subtitle">{header_subtitle}</p>
+                    <h2>📋 Nhắc nhở deadline</h2>
+                    <p class="subtitle">{len(tasks)} hoạt động cần chú ý</p>
                 </div>
                 <div class="summary">
                     {summary} · Cập nhật lúc {time_str}
@@ -113,24 +106,6 @@ class EmailNotifier(BaseNotifier):
         """
 
         for task in tasks:
-            if bool(_get(task, "is_grade_alert", False)):
-                g_title = html.escape(str(_get(task, "title", "📊 Điểm mới")))
-                g_course_raw = _get(task, "course_name", "") or _get(task, "course", "Không rõ môn")
-                g_course = html.escape(str(clean_course_name(g_course_raw) if g_course_raw else g_course_raw))
-                g_item = html.escape(str(_get(task, "item_name", "") or "-"))
-                g_old = html.escape(str(_get(task, "old_grade", "-") or "-"))
-                g_new = html.escape(str(_get(task, "new_grade", "-") or "-"))
-                html_content += f"""
-                    <div class="task-card safe">
-                        <p class="task-title">{g_title}</p>
-                        <div class="task-meta"><strong>📚 Môn học</strong> {g_course}</div>
-                        <div class="task-meta"><strong>📝 Cột điểm</strong> {g_item}</div>
-                        <div class="task-meta"><strong>📉 Điểm cũ</strong> {g_old}</div>
-                        <div class="task-meta"><strong>📈 Điểm mới</strong> <b>{g_new}</b></div>
-                    </div>
-                """
-                continue
-
             urgency = _get(task, 'urgency', 'safe')
             urg_normalized = urgency_str(urgency)
             css_class = urg_normalized
@@ -178,7 +153,8 @@ class EmailNotifier(BaseNotifier):
                 remaining = html.escape(str(remaining))
                 type_label = html.escape(type_label)
             except Exception:
-                logger.debug("Ignored exception while escaping email HTML", exc_info=True)
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
             html_content += f"""
                     <div class="task-card {css_class}">
@@ -205,24 +181,13 @@ class EmailNotifier(BaseNotifier):
         """
 
         # Plain text fallback
-        plain_lines = [
-            f"UTHelper · {len(tasks)} cập nhật điểm mới"
-            if all_grade_alerts
-            else f"UTHelper · {len(tasks)} hoạt động cần chú ý",
-            "",
-        ]
+        plain_lines = [f"UTHelper · {len(tasks)} hoạt động cần chú ý", ""]
         for task in tasks:
             t_title = _get(task, 'title', 'Không rõ')
             t_course = _get(task, 'course_name', '') or _get(task, 'course', '')
-            if bool(_get(task, "is_grade_alert", False)):
-                t_old = _get(task, "old_grade", "-") or "-"
-                t_new = _get(task, "new_grade", "-") or "-"
-                plain_lines.append(f"• {t_title}")
-                plain_lines.append(f"  Môn: {t_course} · Điểm: {t_old} -> {t_new}")
-            else:
-                t_remaining = format_remaining_time(_get(task, 'deadline', None))
-                plain_lines.append(f"• {t_title}")
-                plain_lines.append(f"  Môn: {t_course} · Còn: {t_remaining}")
+            t_remaining = format_remaining_time(_get(task, 'deadline', None))
+            plain_lines.append(f"• {t_title}")
+            plain_lines.append(f"  Môn: {t_course} · Còn: {t_remaining}")
             plain_lines.append("")
         plain_lines.append("-- UTHelper")
 

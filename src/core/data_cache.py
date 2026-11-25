@@ -50,27 +50,14 @@ class DataCache:
     # v3 persists assignment/quiz instance IDs used by the one-call status path.
     ACTIVITY_CATALOG_VERSION = 3
 
-    def __init__(
-        self,
-        cache_dir: Optional[Path] = None,
-        namespace: Optional[str] = None,
-        allow_legacy_migration: bool = True,
-    ):
+    def __init__(self, cache_dir: Optional[Path] = None, namespace: Optional[str] = None):
         if cache_dir is None:
             from config import _USER_DATA_DIR
 
             cache_dir = _USER_DATA_DIR
         self._legacy_cache_path = cache_dir / "activities_cache.json"
-        norm_ns = namespace.strip().lower() if isinstance(namespace, str) and namespace.strip() else ""
-        self._is_logged_out = norm_ns == "__logged_out__" or (
-            not norm_ns and not allow_legacy_migration
-        )
-        self._allow_legacy_migration = bool(allow_legacy_migration) and not self._is_logged_out
-        if norm_ns:
-            digest = hashlib.sha256(norm_ns.encode("utf-8")).hexdigest()[:12]
-            self._cache_path = cache_dir / f"activities_cache_{digest}.json"
-        elif not allow_legacy_migration:
-            digest = hashlib.sha256(b"__logged_out__").hexdigest()[:12]
+        if namespace:
+            digest = hashlib.sha256(namespace.strip().lower().encode("utf-8")).hexdigest()[:12]
             self._cache_path = cache_dir / f"activities_cache_{digest}.json"
         else:
             self._cache_path = self._legacy_cache_path
@@ -115,14 +102,8 @@ class DataCache:
         )
 
     def load_snapshot(self) -> ActivitySnapshot:
-        if self._is_logged_out:
-            return ActivitySnapshot()
         # One-time compatibility migration into the current account namespace.
-        if (
-            self._allow_legacy_migration
-            and not self._cache_path.exists()
-            and self._cache_path != self._legacy_cache_path
-        ):
+        if not self._cache_path.exists() and self._cache_path != self._legacy_cache_path:
             if self._legacy_cache_path.exists():
                 from core.safe_file_io import SafeFileIO
 
@@ -147,8 +128,6 @@ class DataCache:
             return ActivitySnapshot()
 
     def _write(self, activities: List[Dict[str, Any]], *, server_sync: bool) -> bool:
-        if self._is_logged_out:
-            return False
         from core.safe_file_io import SafeFileIO
 
         now = _utc_now_iso()
@@ -193,8 +172,6 @@ class DataCache:
 
     def record_failed_attempt(self, error: str) -> bool:
         """Record diagnostics while preserving the last good activity snapshot."""
-        if self._is_logged_out:
-            return False
         from core.safe_file_io import SafeFileIO
 
         now = _utc_now_iso()
@@ -225,14 +202,19 @@ class DataCache:
         return snapshot.activities, snapshot.last_successful_sync_at
 
     def clear(self) -> None:
-        from core.safe_file_io import SafeFileIO, get_memory_lock
+        from core.safe_file_io import SafeFileIO
 
-        mem_lock = get_memory_lock(self._cache_path)
         lock = SafeFileIO.get_file_lock(self._cache_path)
         try:
-            with mem_lock:
-                with lock.acquire(timeout=2):
-                    if self._cache_path.exists():
-                        self._cache_path.unlink()
+            with lock.acquire(timeout=2):
+                if self._cache_path.exists():
+                    self._cache_path.unlink()
+                lock_file = self._cache_path.with_suffix(".lock")
+                if lock_file.exists():
+                    try:
+                        lock_file.unlink()
+                    except OSError:
+                        pass
         except Exception:
-            logger.debug("Ignored exception while clearing data cache", exc_info=True)
+            import logging as _fb_log
+            _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)

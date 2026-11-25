@@ -350,15 +350,10 @@ class CoursesTabView(ft.Container):
             if (self._layout_mode == "wide" and not self._state.pane3_expanded)
             else 0.0
         )
-        if self._layout_mode == "tablet_portrait":
-            tablet_w = min(820.0, max(320.0, content_w))
-            left = rail_w + max(0.0, (content_w - tablet_w) / 2.0)
-            width = max(240.0, tablet_w)
-        else:
-            left = rail_w + list_w
-            width = max(240.0, content_w - list_w)
+        left = rail_w + list_w
         top = 0.0 if is_web else 36.0
-        bottom_inset = 0.0 if (has_rail or self._immersive_active) else 64.0
+        bottom_inset = 0.0 if (has_rail or self._immersive_active) else 80.0
+        width = max(240.0, content_w - list_w)
         height = max(200.0, page_h - top - bottom_inset)
         return (left, top, width, height)
 
@@ -369,32 +364,6 @@ class CoursesTabView(ft.Container):
         sync_fn = getattr(top, "sync_bounds", None)
         if callable(sync_fn):
             left, top_px, width, height = self._compute_pane3_bounds()
-            page = self._get_page()
-            raw_page_w = float(
-                getattr(page, "width", 0)
-                or getattr(getattr(page, "window", None), "width", 0)
-                or 0.0
-            )
-            has_rail = (
-                raw_page_w >= float(RAIL_BREAKPOINT)
-                if raw_page_w > 0
-                else (
-                    (self._current_width + float(RAIL_WIDTH)) >= float(RAIL_BREAKPOINT)
-                    if self._current_width > 0
-                    else True
-                )
-            )
-            nav_inset = 0.0 if (has_rail or self._immersive_active) else 64.0
-            try:
-                sig = inspect.signature(sync_fn)
-                if "bottom_inset" in sig.parameters:
-                    sync_fn(left, top_px, width, height, bottom_inset=nav_inset)
-                    return
-                if "nav_bottom_inset" in sig.parameters:
-                    sync_fn(left, top_px, width, height, nav_bottom_inset=nav_inset)
-                    return
-            except (TypeError, ValueError):
-                pass
             sync_fn(left, top_px, width, height)
 
     def _sync_overlay_expand_buttons(self) -> None:
