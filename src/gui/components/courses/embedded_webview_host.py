@@ -35,29 +35,61 @@ _DANGEROUS_WEBVIEW_SCHEMES = frozenset({"file", "javascript", "data", "intent", 
 _LOOPBACK_ITEM_PATH_RE = re.compile(r"^/[0-9a-f]{16}$")
 
 _OCCLUSION_LOCK = threading.Lock()
-_ACTIVE_OCCLUSION_REASONS: set[str] = set()
+_STACKED_OCCLUSION_REASONS: frozenset[str] = frozenset({"modal_dialog"})
+_ACTIVE_OCCLUSION_REASONS: dict[str, int] = {}
+_ACTIVE_OCCLUSION_TOKENS: set[tuple[str, str]] = set()
 _ACTIVE_DOCKS: "weakref.WeakSet[WindowsWebView2Dock]" = weakref.WeakSet()
 
 
 def is_globally_occluded() -> bool:
     """Return True when any modal/overlay surface requires native WebView2 HWNDs to hide."""
     with _OCCLUSION_LOCK:
-        return bool(_ACTIVE_OCCLUSION_REASONS)
+        return bool(_ACTIVE_OCCLUSION_REASONS or _ACTIVE_OCCLUSION_TOKENS)
 
 
-def set_global_webview_occlusion(reason: str, occluded: bool) -> None:
-    """Register or clear a global occlusion reason and hide/restore active WebView2 HWNDs."""
+def set_global_webview_occlusion(
+    reason: str,
+    occluded: bool,
+    *,
+    token: Optional[str] = None,
+) -> None:
+    """Register or clear a global occlusion reason and hide/restore active WebView2 HWNDs.
+
+    Stacked modal surfaces (``modal_dialog``) are reference-counted so closing an
+    inner modal never prematurely un-occludes active docks while an outer modal
+    remains open. Single-surface reasons (such as ``detail_view``, ``quiz_player``,
+    ``webview_menu``) stay idempotent across repeated ``True`` calls so a single
+    close always restores visibility. Callers may also pass an explicit ``token``
+    to track overlapping instances idempotently. Unmatched ``occluded=False``
+    calls clamp cleanly at zero.
+    """
     key = str(reason or "").strip()
     if not key:
         return
+    tok = str(token or "").strip() if token is not None else ""
     changed = False
     with _OCCLUSION_LOCK:
-        was_occluded = bool(_ACTIVE_OCCLUSION_REASONS)
-        if occluded:
-            _ACTIVE_OCCLUSION_REASONS.add(key)
+        was_occluded = bool(_ACTIVE_OCCLUSION_REASONS or _ACTIVE_OCCLUSION_TOKENS)
+        if tok:
+            if occluded:
+                _ACTIVE_OCCLUSION_TOKENS.add((key, tok))
+            else:
+                _ACTIVE_OCCLUSION_TOKENS.discard((key, tok))
+        elif key in _STACKED_OCCLUSION_REASONS:
+            if occluded:
+                _ACTIVE_OCCLUSION_REASONS[key] = _ACTIVE_OCCLUSION_REASONS.get(key, 0) + 1
+            else:
+                remaining = _ACTIVE_OCCLUSION_REASONS.get(key, 0) - 1
+                if remaining > 0:
+                    _ACTIVE_OCCLUSION_REASONS[key] = remaining
+                else:
+                    _ACTIVE_OCCLUSION_REASONS.pop(key, None)
         else:
-            _ACTIVE_OCCLUSION_REASONS.discard(key)
-        now_occluded = bool(_ACTIVE_OCCLUSION_REASONS)
+            if occluded:
+                _ACTIVE_OCCLUSION_REASONS[key] = 1
+            else:
+                _ACTIVE_OCCLUSION_REASONS.pop(key, None)
+        now_occluded = bool(_ACTIVE_OCCLUSION_REASONS or _ACTIVE_OCCLUSION_TOKENS)
         changed = was_occluded != now_occluded
         docks = list(_ACTIVE_DOCKS) if changed else []
     for dock in docks:
@@ -70,8 +102,9 @@ def set_global_webview_occlusion(reason: str, occluded: bool) -> None:
 def clear_global_webview_occlusion() -> None:
     """Clear all active WebView2 occlusion reasons and restore visible docks."""
     with _OCCLUSION_LOCK:
-        had_any = bool(_ACTIVE_OCCLUSION_REASONS)
+        had_any = bool(_ACTIVE_OCCLUSION_REASONS or _ACTIVE_OCCLUSION_TOKENS)
         _ACTIVE_OCCLUSION_REASONS.clear()
+        _ACTIVE_OCCLUSION_TOKENS.clear()
         docks = list(_ACTIVE_DOCKS) if had_any else []
     for dock in docks:
         try:
@@ -122,16 +155,26 @@ def webview2_profile_root() -> Path:
 
 def webview2_account_profile_name(account_namespace: Optional[str] = None) -> str:
     """Return a deterministic persistent WebView2 profile name for an account namespace."""
-    ns = str(account_namespace or "").strip()
-    if not ns:
+    raw_ns = str(account_namespace or "").strip()
+    if not raw_ns:
         try:
             from config import settings
 
-            base = str(getattr(settings, "MOODLE_BASE_URL", "") or "").strip()
-            user = str(getattr(settings, "UTH_USERNAME", "") or "").strip() or "anon"
+            base = str(getattr(settings, "MOODLE_BASE_URL", "") or "").strip().casefold()
+            user = (
+                str(getattr(settings, "UTH_USERNAME", "") or "").strip().casefold()
+                or "anon"
+            )
             ns = f"{base}|{user}"
         except Exception:
             ns = "default|anon"
+    elif "|" in raw_ns:
+        base_part, user_part = raw_ns.rsplit("|", 1)
+        base_norm = base_part.strip().casefold()
+        user_norm = user_part.strip().casefold() or "anon"
+        ns = f"{base_norm}|{user_norm}"
+    else:
+        ns = raw_ns.casefold()
     digest = hashlib.sha256(
         f"uth-webview2-profile-v1\0{ns}".encode("utf-8")
     ).hexdigest()[:24]
