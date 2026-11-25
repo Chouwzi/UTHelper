@@ -310,7 +310,7 @@ class ProfileView(ft.Container):
         self._avatar_src: str = ""
         self._name_text: ft.Text | None = None
         self._sid_text: ft.Text | None = None
-        self._info_column: ft.Column | None = None
+        self._info_column: ft.Control | None = None
         self._stat_total: ft.Text | None = None
         self._stat_paid: ft.Text | None = None
         self._stat_debt: ft.Text | None = None
@@ -1659,7 +1659,7 @@ class ProfileView(ft.Container):
             border_radius=8,
             horizontal_lines=ft.BorderSide(1, C.BORDER),
             vertical_lines=ft.BorderSide(1, C.BORDER),
-            column_spacing=16,
+            column_spacing=38,
             show_checkbox_column=False,
         )
 
@@ -1745,7 +1745,7 @@ class ProfileView(ft.Container):
             border_radius=8,
             horizontal_lines=ft.BorderSide(1, C.BORDER),
             vertical_lines=ft.BorderSide(1, C.BORDER),
-            column_spacing=16,
+            column_spacing=38,
             show_checkbox_column=False,
         )
 
