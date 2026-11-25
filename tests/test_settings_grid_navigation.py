@@ -223,3 +223,84 @@ def test_selecting_theme_updates_dirty_dot_save_button_and_color_swatches():
         assert view._save_text.value == "Đã lưu"
     finally:
         apply_theme(initial_theme)
+
+
+def test_settings_logout_and_account_login_seams_and_hub_back_navigation():
+    import asyncio
+    from types import SimpleNamespace
+
+    page = _make_dummy_page()
+    closed_calls: list[bool] = []
+    logout_calls: list[bool] = []
+    account_logins: list[tuple[str, str]] = []
+    login_persist_flags: list[object] = []
+
+    async def _on_logout() -> None:
+        logout_calls.append(True)
+
+    async def _on_account_login(u: str, p: str) -> None:
+        account_logins.append((u, p))
+
+    class _ProbeClient:
+        def login(
+            self,
+            username: str,
+            password: str,
+            *,
+            force: bool = False,
+            persist: bool = True,
+        ) -> bool:
+            login_persist_flags.append((force, persist))
+            return username == "sv999" and password == "pw999"
+
+    orch = SimpleNamespace(client=_ProbeClient(), is_logged_in=False)
+    view = SettingsView(
+        page=page,
+        orchestrator=orch,
+        on_close=lambda: closed_calls.append(True),
+        on_logout=_on_logout,
+        on_account_login=_on_account_login,
+    )
+    view.update = Mock()
+
+    # 1. ExpansionTile affinity must never be set to ft.Theme.color_scheme
+    def _walk(ctrl):
+        yield ctrl
+        for attr in ("content", "title", "subtitle", "leading", "trailing"):
+            child = getattr(ctrl, attr, None)
+            if isinstance(child, ft.Control):
+                yield from _walk(child)
+        for attr in ("controls", "items", "actions"):
+            seq = getattr(ctrl, attr, None)
+            if isinstance(seq, (list, tuple)):
+                for item in seq:
+                    if isinstance(item, ft.Control):
+                        yield from _walk(item)
+
+    for c in _walk(view):
+        if isinstance(c, ft.ExpansionTile):
+            assert c.affinity is None or isinstance(c.affinity, ft.TileAffinity)
+
+    # 2. Sub-screen Back when on_closed is None returns to hub first instead of closing Settings
+    view._navigate_to_detail("account")
+    assert view._current_screen == "account"
+    asyncio.run(view._handle_back(None, on_closed=None))
+    assert view._current_screen == "hub"
+    assert closed_calls == []
+    asyncio.run(view._handle_back(None, on_closed=None))
+    assert closed_calls == [True]
+
+    # 3. _handle_test_login probes persist=False and delegates to on_account_login seam
+    view._username_field.value = "sv999"
+    view._password_field.value = "pw999"
+    asyncio.run(view._handle_test_login(None))
+    assert login_persist_flags == [(True, False)]
+    assert account_logins == [("sv999", "pw999")]
+
+    # 4. Explicit "Đăng xuất" button invokes on_logout seam and clears form fields
+    assert hasattr(view, "_logout_btn")
+    asyncio.run(view._handle_logout(None))
+    assert logout_calls == [True]
+    assert view._username_field.value == ""
+    assert view._password_field.value == ""
+

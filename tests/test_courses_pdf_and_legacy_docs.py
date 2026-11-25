@@ -1452,3 +1452,71 @@ def test_pdf_peek_ram_cache_luma_lut_and_zero_latency_theme_prewarm(tmp_path: Pa
     finally:
         server.stop()
 
+
+def test_pdf_renderer_lazy_imports_single_backend_on_cold_start():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.path.insert(0, 'src'); "
+        "import core.courses.pdf_renderer as pr; "
+        "assert 'pypdfium2' not in sys.modules, 'pypdfium2 eagerly imported'; "
+        "assert 'pymupdf' not in sys.modules and 'fitz' not in sys.modules, 'pymupdf eagerly imported'; "
+        "print('OK')"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "OK"
+
+
+def test_document_reader_hides_night_mode_for_rendered_pdf_webview_and_preserves_xlsx_grid():
+    from tests.e2e_courses.builders import build_docx_bytes, build_xlsx_bytes
+
+    server = LocalPreviewServer()
+    try:
+        # 1. rendered_pdf_bytes + pdf_in_webview hides _night_btn even when kind == "docx"
+        docx_raw = build_docx_bytes(paragraphs=["Word source"])
+        pdf_raw = _build_minimal_pdf(["Converted PDF page"])
+        wv_reader = DocumentReaderView(
+            file_name="report.docx",
+            data=docx_raw,
+            kind="docx",
+            preview_server=server,
+            rendered_pdf_bytes=pdf_raw,
+            pdf_in_webview=True,
+            webview_builder=lambda url: ft.Container(key="wv-pdf", data=url),
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+        )
+        assert wv_reader._night_btn.visible is False
+        wv_reader._toggle_reader_mode()
+        assert wv_reader._dark_reader is False
+        wv_reader.dispose()
+
+        # 2. .xlsx preserves interactive native DataTable + sheet Chips even when webview_builder exists
+        xlsx_raw = build_xlsx_bytes({"Sheet1": [["MSSV", "Điểm"], ["001", "9.5"]], "Sheet2": [["A"], ["1"]]})
+        xlsx_reader = DocumentReaderView(
+            file_name="grades.xlsx",
+            data=xlsx_raw,
+            kind="xlsx",
+            preview_server=server,
+            webview_builder=lambda url: ft.Container(key="unexpected-wv", data=url),
+            on_close=lambda: None,
+            on_save=lambda _n, _b: None,
+            on_open_external=lambda _n, _b: None,
+        )
+        assert not any(getattr(c, "key", None) == "unexpected-wv" for c in _walk_controls(xlsx_reader))
+        assert any(isinstance(c, ft.DataTable) for c in _walk_controls(xlsx_reader))
+        assert len([c for c in _walk_controls(xlsx_reader) if isinstance(c, ft.Chip)]) == 2
+        xlsx_reader.dispose()
+    finally:
+        server.stop()
+
+

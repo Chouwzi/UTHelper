@@ -406,6 +406,7 @@ def package_unsigned_ipa(
                     str(temporary_ipa),
                 ],
                 cwd=root,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=120,

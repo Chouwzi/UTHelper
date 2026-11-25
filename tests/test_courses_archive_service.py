@@ -1102,6 +1102,7 @@ def test_archive_service_real_unrar_cli_vietnamese_empty_dir_and_links(monkeypat
     arc_path = tmp_path / "real_test.rar"
     created = subprocess.run(
         [rar_exe, "a", "-r", "-ep1", "-oh", str(arc_path), str(src_dir) + "\\*"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
     )
@@ -1129,6 +1130,7 @@ def test_archive_service_real_unrar_cli_vietnamese_empty_dir_and_links(monkeypat
         enc_path = tmp_path / f"enc_{idx}.rar"
         enc_created = subprocess.run(
             [rar_exe, "a", flag, "-ep1", str(enc_path), str(target_file)],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,
         )

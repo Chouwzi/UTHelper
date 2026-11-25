@@ -156,3 +156,87 @@ def test_transient_autostart_failure_remains_retryable():
 
     assert result is not None and result.confirmed is False
     assert settings.AUTOSTART_DEFAULT_APPLIED is False
+
+
+def test_unpackaged_windows_repairs_missing_or_legacy_run_key_after_upgrade():
+    from platform_utils.autostart import RunKeyAutostartBackend
+
+    canonical = r'"C:\Program Files\UTHelper\UTHelperAutostart.exe"'
+    registry: dict[str, str] = {"UTHElearningAlert": r'"C:\Old\UTHelper.exe"'}
+    backend = RunKeyAutostartBackend(
+        command=canonical,
+        reader=registry.get,
+        writer=registry.__setitem__,
+        deleter=lambda name: registry.pop(name, None),
+    )
+    settings = type(
+        "Settings",
+        (),
+        {"START_WITH_WINDOWS": True, "AUTOSTART_DEFAULT_APPLIED": True},
+    )()
+
+    # 1. Missing Run\UTHelper (e.g. wiped by older MSI MajorUpgrade) -> repaired
+    result = asyncio.run(
+        apply_initial_autostart_default(
+            backend,
+            settings,
+            lambda: False,
+            startup_approved_disabled_probe=lambda _name: False,
+        )
+    )
+    assert result == AutostartUiState(True, True, True, "")
+    assert registry == {"UTHelper": canonical}
+
+    # 2. Already canonical -> no-op
+    assert (
+        asyncio.run(
+            apply_initial_autostart_default(
+                backend,
+                settings,
+                lambda: False,
+                startup_approved_disabled_probe=lambda _name: False,
+            )
+        )
+        is None
+    )
+
+    # 3. Legacy --autostart value -> migrated to UTHelperAutostart.exe
+    registry["UTHelper"] = r'"C:\Program Files\UTHelper\UTHelper.exe" --autostart'
+    migrated = asyncio.run(
+        apply_initial_autostart_default(
+            backend,
+            settings,
+            lambda: False,
+            startup_approved_disabled_probe=lambda _name: False,
+        )
+    )
+    assert migrated == AutostartUiState(True, True, True, "")
+    assert registry["UTHelper"] == canonical
+
+
+def test_unpackaged_windows_respects_startup_approved_user_disablement():
+    from platform_utils.autostart import RunKeyAutostartBackend
+
+    writes: list[tuple[str, str]] = []
+    backend = RunKeyAutostartBackend(
+        command=r'"C:\Program Files\UTHelper\UTHelperAutostart.exe"',
+        reader=lambda _name: None,
+        writer=lambda k, v: writes.append((k, v)),
+        deleter=lambda _name: None,
+    )
+    settings = type(
+        "Settings",
+        (),
+        {"START_WITH_WINDOWS": True, "AUTOSTART_DEFAULT_APPLIED": True},
+    )()
+
+    result = asyncio.run(
+        apply_initial_autostart_default(
+            backend,
+            settings,
+            lambda: False,
+            startup_approved_disabled_probe=lambda _name: True,
+        )
+    )
+    assert result is None
+    assert writes == []

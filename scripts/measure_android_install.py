@@ -42,7 +42,14 @@ def main() -> None:
     args = parser.parse_args()
 
     def run(command: list[str], timeout: int = 120) -> str:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
         if result.returncode:
             raise RuntimeError(f"Command failed ({command[0]}): {result.stderr[:300]}")
         return result.stdout
@@ -107,6 +114,7 @@ def main() -> None:
                 # Keep a partial scan explicitly bounded, never call it total storage.
                 disk = subprocess.run(
                     ["adb", "-s", args.serial, "shell", "du", "-sk", code[1]],
+                    stdin=subprocess.DEVNULL,
                     capture_output=True, text=True, encoding="utf-8", timeout=30,
                 )
                 size = re.match(r"(\d+)\s", disk.stdout)

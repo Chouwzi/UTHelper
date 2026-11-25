@@ -1303,3 +1303,80 @@ def test_legacy_metadata_adapter_renames_target():
 
     assert ok is True
     assert (client.uploads[0].name, client.uploads[0].filepath) == ("renamed.pdf", "/proof/")
+
+
+def test_submission_workflow_routes_file_and_remove_ops_through_moodle_service():
+    from core.moodle_service import MoodleService
+
+    initial = editable_snapshot(online_text="", remote_files=(remote("old.pdf", b"old"),))
+    current = initial
+    uploads: list[Upload] = []
+    removed_cmids: list[int] = []
+
+    class StrictClient:
+        moodle_site_origin = "https://courses.ut.edu.vn"
+
+        def call_ws_api(self, function: str, **params):
+            nonlocal current
+            if function == "mod_assign_get_assignments":
+                mapped = {**assignment_mapping(current), "cmid": 123, "course": 456}
+                return {"courses": [{"id": 456, "assignments": [mapped]}]}
+            if function == "mod_assign_get_submission_status":
+                return status_mapping(current)
+            if function == "core_files_get_unused_draft_itemid":
+                return {"itemid": 900 + len(uploads)}
+            if function == "mod_assign_save_submission":
+                current = replace(
+                    current,
+                    raw_status="submitted",
+                    remote_files=tuple(remote(u.name, u.content, u.filepath) for u in uploads),
+                )
+                return []
+            raise AssertionError(f"Unexpected WS call: {function} {params}")
+
+        def download_file(self, url: str) -> bytes:
+            assert "old.pdf" in url
+            return b"old"
+
+        def upload_draft_file_record(self, filename: str, content: bytes, *, itemid: int = 0, filepath: str = "/"):
+            uploads.append(Upload(filename, content, itemid, filepath))
+            return DraftFileRecord(itemid=itemid, filepath=filepath, filename=filename)
+
+        def get_user_id(self, *, refresh: bool = False) -> int:
+            assert refresh is True
+            return 42
+
+        def remove_assignment_submission(self, cmid: int, *, expected_user_id: int, before_commit=None) -> bool:
+            assert expected_user_id == 42
+            assert before_commit is not None and before_commit() is True
+            removed_cmids.append(cmid)
+            nonlocal current
+            current = replace(current, raw_status="new", remote_files=())
+            return True
+
+    from core import ws_functions
+
+    ws_functions.clear_all_caches()
+    client = StrictClient()
+    service = MoodleService(client.call_ws_api, client=client)
+    workflow = SubmissionWorkflow(client, service)
+
+    add_intent = FileMutationIntent(
+        operation=MutationOperation.ADD,
+        selected_files=(SelectedFile("new.pdf", 3, "application/pdf"),),
+    )
+    add_res = workflow.mutate_files(
+        target(),
+        add_intent,
+        selected_files=(SelectedSubmissionFile("new.pdf", b"new"),),
+    )
+    assert add_res.ok is True
+    assert [f.name for f in add_res.snapshot.remote_files] == ["old.pdf", "new.pdf"]
+
+    clear_res = workflow.mutate_files(
+        target(),
+        FileMutationIntent(operation=MutationOperation.CLEAR),
+    )
+    assert clear_res.ok is True
+    assert clear_res.outcome is MutationOutcome.SUBMISSION_REMOVED
+    assert removed_cmids == [123]

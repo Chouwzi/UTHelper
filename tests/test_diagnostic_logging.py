@@ -396,6 +396,7 @@ def test_main_import_owns_one_rotating_log_without_legacy_debug_file(
         text=True,
         timeout=10,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert completed.returncode == 0, completed.stderr

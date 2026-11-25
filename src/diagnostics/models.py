@@ -43,6 +43,9 @@ class DiagnosticScreen(str, Enum):
     DETAIL = "detail"
     GRADES = "grades"
     PROFILE = "profile"
+    COURSES = "courses"
+    COURSE_GRADES = "course_grades"
+    QUIZ = "quiz"
 
 
 class DiagnosticAction(str, Enum):
