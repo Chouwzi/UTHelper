@@ -623,14 +623,16 @@ class ProfileView(ft.Container):
         # corner, then the 2-column info grid underneath.
         campus_photo = ft.Container(
             content=ft.Image(
-                src="uth_campus.jpg",
-                width=240,
-                height=128,
+                src="uth_campus_banner.jpg",
+                height=180,
+                expand=True,
                 fit=ft.BoxFit.COVER,
                 border_radius=12,
                 anti_alias=True,
                 semantics_label="Trường Đại học Giao thông Vận tải TP. Hồ Chí Minh",
             ),
+            height=180,
+            expand=True,
             border_radius=12,
         )
         identity = ft.Row(

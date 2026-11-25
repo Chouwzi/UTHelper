@@ -437,7 +437,7 @@ def test_profile_view_desktop_card_matches_mockup_layout():
     # Identity row: avatar · name/MSSV/badge · UTH campus photo in the corner.
     identity = card.content.controls[0]
     campus_image = identity.controls[2].content
-    assert campus_image.src == "uth_campus.jpg"
+    assert campus_image.src == "uth_campus_banner.jpg"
     name_block = identity.controls[1]
     assert name_block.controls[0].value == "Nguyễn Văn A"
     assert name_block.controls[1].value == "MSSV: SV001"
