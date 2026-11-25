@@ -42,6 +42,7 @@ class DiagnosticScreen(str, Enum):
     SETTINGS = "settings"
     DETAIL = "detail"
     GRADES = "grades"
+    ROADMAP = "roadmap"
 
 
 class DiagnosticAction(str, Enum):

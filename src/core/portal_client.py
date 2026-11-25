@@ -558,3 +558,142 @@ class PortalClient:
 
         first_ten = str(ordered[0].get("tenDot") or "").strip()
         return (first_ten, [])
+
+    # ------------------------------------------------------------------
+    # Learning Roadmap endpoints (see docs/api/portal.md §3 and §6)
+    # ------------------------------------------------------------------
+    _ROADMAP_ENDPOINTS: tuple[tuple[str, str], ...] = (
+        ("curriculum", "hoctap/chuongtrinhkhung"),
+        ("exemptions", "hoctap/diemMien"),
+        ("certificates", "hoctap/getChungChi"),
+        ("graduation_certificates", "xetTotNghiep/getChungChi"),
+        ("graduation_info", "xetTotNghiep/xetTotNghiepInfo"),
+        ("credit_progress", "hoctap/tiendo"),
+    )
+
+    def _authed_get(
+        self,
+        path: str,
+        username: str,
+        password: str,
+        *,
+        query: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """GET with Bearer auth; one transparent re-login on HTTP 401."""
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
+        try:
+            payload = self._request_json("GET", path, token=token, query=query)
+        except _PortalHttpError as exc:
+            if exc.status != 401:
+                raise
+            token = self._login(username, password, generation)
+            payload = self._request_json("GET", path, token=token, query=query)
+        refreshed_token = payload.get("token")
+        if isinstance(refreshed_token, str) and refreshed_token:
+            self._store_token(refreshed_token, username, generation)
+        return payload
+
+    def _collect_body(
+        self,
+        key: str,
+        path: str,
+        username: str,
+        password: str,
+        bodies: dict[str, Any],
+        errors: dict[str, str],
+    ) -> None:
+        """Fetch one endpoint into ``bodies``; record per-endpoint failures.
+
+        Authentication failures and network-level failures abort the whole
+        bundle (re-raised) so the caller can fall back to its offline cache;
+        an HTTP error or malformed payload on a single endpoint only degrades
+        that endpoint.
+        """
+        try:
+            payload = self._authed_get(path, username, password)
+        except PortalAuthenticationError:
+            raise
+        except _PortalHttpError as exc:
+            errors[key] = f"HTTP {exc.status}"
+            return
+        except PortalProtocolError as exc:
+            errors[key] = str(exc)
+            return
+        if payload.get("success") is False:
+            errors[key] = str(payload.get("message") or f"status {payload.get('status')}")
+            return
+        bodies[key] = payload.get("body")
+
+    def fetch_roadmap_bundle(self, username: str, password: str) -> dict[str, Any]:
+        """Fetch everything the Learning Roadmap needs, in one login session.
+
+        Returns ``{"bodies": {...}, "current_semester": {...}, "transcript": [...],
+        "errors": {...}}`` holding *raw* Portal bodies (no token, no credentials)
+        so the result can be cached verbatim and re-interpreted later.
+
+        Raises ``PortalAuthenticationError`` / ``PortalError`` when the Portal
+        is unreachable or rejects the login, and ``PortalProtocolError`` when no
+        usable data came back at all.
+        """
+        if not username or not password:
+            raise PortalAuthenticationError("Portal credentials are unavailable")
+        if not self._cached_token(username):
+            # fail fast before the other calls
+            self._login(username, password, self._current_generation())
+
+        bodies: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for key, path in self._ROADMAP_ENDPOINTS:
+            self._collect_body(key, path, username, password, bodies, errors)
+
+        # Current (latest) semester and the courses registered in it.
+        current: dict[str, Any] = {}
+        sem_bodies: dict[str, Any] = {}
+        self._collect_body("semesters", "hoctap/hocky", username, password, sem_bodies, errors)
+        semesters = sem_bodies.get("semesters")
+        if isinstance(semesters, list):
+            candidates = [
+                s for s in semesters
+                if isinstance(s, dict) and isinstance(s.get("id"), int)
+            ]
+            if candidates:
+                latest = max(candidates, key=lambda s: s["id"])
+                course_bodies: dict[str, Any] = {}
+                self._collect_body(
+                    "current_semester",
+                    f"hoctap/montheoky/{latest['id']}",
+                    username,
+                    password,
+                    course_bodies,
+                    errors,
+                )
+                if "current_semester" in course_bodies:
+                    current = {
+                        "id": latest["id"],
+                        "name": latest.get("tenDot") or "",
+                        "courses": course_bodies["current_semester"],
+                    }
+
+        try:
+            transcript = self.fetch_full_transcript(username, password)
+        except PortalAuthenticationError:
+            raise
+        except (_PortalHttpError, PortalProtocolError) as exc:
+            errors["transcript"] = str(exc)
+            transcript = []
+        else:
+            if not transcript:
+                errors["transcript"] = "Không có dữ liệu"
+
+        got_anything = bool(transcript) or any(v is not None for v in bodies.values())
+        if not got_anything:
+            raise PortalProtocolError("Portal returned no roadmap data")
+        return {
+            "bodies": bodies,
+            "current_semester": current,
+            "transcript": transcript,
+            "errors": errors,
+        }
