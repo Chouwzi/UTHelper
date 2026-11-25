@@ -26,10 +26,51 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
+import org.robolectric.shadow.api.Shadow
+import org.robolectric.util.ReflectionHelpers.ClassParameter
+import androidx.core.content.FileProvider
+
+/**
+ * AndroidX FileProvider 1.17.0 `belongsToRoot` hardcodes POSIX `/` after `File.getCanonicalPath()`,
+ * which rejects valid child files on Windows JVMs (`\`). Delegate directly on POSIX/CI (`/`), and
+ * mirror the exact `@xml/uth_update_paths` `cache-path` containment check on Windows hosts.
+ */
+@Implements(FileProvider::class)
+class PosixSafeFileProviderShadow {
+    companion object {
+        @JvmStatic
+        @Implementation
+        fun getUriForFile(context: Context, authority: String, file: File): Uri {
+            if (File.separatorChar == '/') {
+                return Shadow.directlyOn(
+                    FileProvider::class.java,
+                    "getUriForFile",
+                    ClassParameter.from(Context::class.java, context),
+                    ClassParameter.from(String::class.java, authority),
+                    ClassParameter.from(File::class.java, file),
+                )
+            }
+            val resolved = context.packageManager.resolveContentProvider(
+                authority,
+                PackageManager.GET_META_DATA,
+            ) ?: throw IllegalArgumentException("Missing provider for $authority")
+            val root = File(context.cacheDir, "verified_updates").canonicalFile
+            val target = file.canonicalFile
+            val rootPrefix = root.path.trimEnd('\\', '/') + File.separator
+            require(target.path.startsWith(rootPrefix)) {
+                "Failed to find configured root that contains $target"
+            }
+            val rel = target.path.substring(rootPrefix.length).replace('\\', '/')
+            return Uri.parse("content://${resolved.authority}/verified_updates/$rel")
+        }
+    }
+}
 
 /** Robolectric simulates Android framework metadata and activity handoff, not APK parsing/install. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [27])
+@Config(sdk = [27], shadows = [PosixSafeFileProviderShadow::class])
 class ApkUpdateInstallerFlowTest {
     private val archiveBytes = "platform handoff fixture".toByteArray()
     private val signerBytes = "UTHelper signer fixture".toByteArray()

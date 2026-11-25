@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -985,3 +986,214 @@ def test_verifier_enforces_quiz_and_webview_packages_when_required(tmp_path):
         require_quiz_webview=True,
     )
     assert "quiz_webview_packages" in evidence["checks"]
+
+
+def test_verifier_accepts_real_self_signed_play_upload_key_aab_and_rejects_tampering(
+    tmp_path, monkeypatch
+):
+    keytool = shutil.which("keytool")
+    jarsigner = shutil.which("jarsigner")
+    if not keytool or not jarsigner:
+        pytest.skip("JDK keytool/jarsigner not installed")
+
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+
+    def gen_keystore(name: str, cn: str) -> tuple[Path, str]:
+        ks = tmp_path / f"{name}.jks"
+        subprocess.run(
+            [
+                keytool,
+                "-J-Duser.language=en",
+                "-J-Duser.country=US",
+                "-genkeypair",
+                "-keystore",
+                str(ks),
+                "-storepass",
+                "uploadpass123",
+                "-keypass",
+                "uploadpass123",
+                "-alias",
+                "upload",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "3650",
+                "-dname",
+                f"CN={cn}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        listed = subprocess.run(
+            [
+                keytool,
+                "-J-Duser.language=en",
+                "-J-Duser.country=US",
+                "-list",
+                "-v",
+                "-keystore",
+                str(ks),
+                "-storepass",
+                "uploadpass123",
+                "-alias",
+                "upload",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+        match = re.search(r"SHA256:\s*([0-9A-Fa-f:]+)", listed)
+        assert match is not None, listed
+        fp = re.sub(r"[^0-9A-Fa-f]", "", match.group(1)).upper()
+        return ks, fp
+
+    def sign_aab(aab_path: Path, ks: Path) -> None:
+        subprocess.run(
+            [
+                jarsigner,
+                "-keystore",
+                str(ks),
+                "-storepass",
+                "uploadpass123",
+                "-keypass",
+                "uploadpass123",
+                "-digestalg",
+                "SHA-256",
+                str(aab_path),
+                "upload",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+
+    trusted_ks, trusted_fp = gen_keystore("trusted_upload", "UTH Play Upload")
+    rogue_ks, _rogue_fp = gen_keystore("rogue_upload", "Rogue Signer")
+
+    # 1. Valid self-signed Play Upload Key AAB (no apksigner, no TSA) -> accepted
+    signed_aab = _aab(tmp_path / "UTHelper-2.5.1-chplay-upload-signed.aab")
+    sign_aab(signed_aab, trusted_ks)
+    evidence = _verify(
+        signed_aab,
+        tmp_path,
+        allow_unsigned=False,
+        certificate_sha256=trusted_fp,
+        output=tmp_path / "signed-evidence.json",
+    )
+    assert evidence["signature_valid"] is True
+    assert evidence["signature_kind"] == "aab-upload-pinned"
+    assert evidence["certificate_fingerprint"] == trusted_fp
+
+    # 2. Unsigned AAB -> rejected when allow_unsigned=False
+    unsigned_aab = _aab(tmp_path / "UTHelper-2.5.1-unsigned.aab")
+    with pytest.raises(AndroidVerificationError):
+        _verify(
+            unsigned_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "unsigned-evidence.json",
+        )
+
+    # 3. Wrong self-signed Play Upload Key -> rejected
+    wrong_key_aab = _aab(tmp_path / "UTHelper-2.5.1-wrong-key.aab")
+    sign_aab(wrong_key_aab, rogue_ks)
+    with pytest.raises(AndroidVerificationError, match="certificate"):
+        _verify(
+            wrong_key_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "wrong-key-evidence.json",
+        )
+
+    # 4. Appended unsigned entry after signing -> rejected
+    appended_aab = tmp_path / "UTHelper-2.5.1-appended.aab"
+    shutil.copyfile(signed_aab, appended_aab)
+    with zipfile.ZipFile(appended_aab, "a") as zf:
+        zf.writestr("base/assets/unsigned_payload.txt", b"injected")
+    with pytest.raises(AndroidVerificationError, match="unsigned|manifest"):
+        _verify(
+            appended_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "appended-evidence.json",
+        )
+
+    # 5. Tampered signed entry bytes -> rejected
+    tampered_aab = tmp_path / "UTHelper-2.5.1-tampered.aab"
+    with zipfile.ZipFile(signed_aab, "r") as src, zipfile.ZipFile(tampered_aab, "w") as dst:
+        for info in src.infolist():
+            payload = src.read(info.filename)
+            if info.filename == "base/dex/classes.dex":
+                payload = _dex(("Lcom/uthelper/Tampered;",))
+            dst.writestr(info, payload)
+    with pytest.raises(AndroidVerificationError):
+        _verify(
+            tampered_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "tampered-evidence.json",
+        )
+
+    # 6. Multi-signer AAB (trusted + rogue signature blocks) -> rejected
+    dual_signed_aab = tmp_path / "UTHelper-2.5.1-dual.aab"
+    shutil.copyfile(signed_aab, dual_signed_aab)
+    subprocess.run(
+        [
+            jarsigner,
+            "-keystore",
+            str(rogue_ks),
+            "-storepass",
+            "uploadpass123",
+            "-keypass",
+            "uploadpass123",
+            "-sigfile",
+            "ROGUE",
+            "-digestalg",
+            "SHA-256",
+            str(dual_signed_aab),
+            "upload",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    with pytest.raises(AndroidVerificationError, match="certificate"):
+        _verify(
+            dual_signed_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "dual-evidence.json",
+        )
+
+    # 7. Duplicate ZIP entry shadowing a signed file -> rejected
+    dup_aab = tmp_path / "UTHelper-2.5.1-dup.aab"
+    shutil.copyfile(signed_aab, dup_aab)
+    with zipfile.ZipFile(dup_aab, "a") as zf:
+        zf.writestr("BundleConfig.pb", b"shadowed")
+    with pytest.raises(AndroidVerificationError, match="duplicate|signature|verifier"):
+        _verify(
+            dup_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "dup-evidence.json",
+        )
+
+
