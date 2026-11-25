@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import base64
 import gzip
 import json
+import time
 from datetime import date
 from email.message import Message
 from urllib.error import HTTPError
+
+import pytest
 
 from core.portal_client import PortalAuthenticationError, PortalClient
 
@@ -760,3 +764,327 @@ def test_portal_client_summary_profile_reauthenticates_after_401():
 
     assert client.fetch_summary_profile("student", "secret")["maSinhVien"] == "SV001"
     assert login_count == 2
+def _build_fake_jwt(*, exp: int, role: str = "sv") -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b"=").decode("ascii")
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"sub": "2251120001", "exp": exp, "data": {"role": role}}).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    return f"{header}.{payload}.sig"
+
+
+def _build_raw_jwt(payload_obj: object) -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b"=").decode("ascii")
+    payload = base64.urlsafe_b64encode(
+        json.dumps(payload_obj).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    return f"{header}.{payload}.sig"
+
+
+def test_ensure_web_session_replaces_expired_jwt_and_reuses_valid_token():
+    expired_jwt = _build_fake_jwt(exp=int(time.time()) - 10, role="sv")
+    fresh_jwt = _build_fake_jwt(exp=int(time.time()) + 86400, role="sv")
+    forced_jwt = _build_fake_jwt(exp=int(time.time()) + 90000, role="sv")
+    issued = [fresh_jwt, forced_jwt]
+    login_calls = 0
+
+    def opener(request, timeout):
+        nonlocal login_calls
+        del timeout
+        assert request.full_url.endswith("/user/login")
+        tok = issued[login_calls]
+        login_calls += 1
+        return _Response({"success": True, "body": "sv", "token": tok})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+    client._store_token(expired_jwt, "2251120001", role="sv")
+
+    tok1, role1 = client.ensure_web_session("2251120001", "pass123")
+    assert (tok1, role1) == (fresh_jwt, "sv")
+    assert login_calls == 1
+
+    tok2, role2 = client.ensure_web_session("2251120001", "pass123")
+    assert (tok2, role2) == (fresh_jwt, "sv")
+    assert login_calls == 1
+
+    tok3, role3 = client.ensure_web_session("2251120001", "pass123", force=True)
+    assert (tok3, role3) == (forced_jwt, "sv")
+    assert login_calls == 2
+
+
+def test_ensure_web_session_rejects_missing_credentials():
+    calls = 0
+
+    def opener(request, timeout):
+        nonlocal calls
+        del request, timeout
+        calls += 1
+        return _Response({"success": True, "body": "sv", "token": "tok"})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+    valid_jwt = _build_fake_jwt(exp=int(time.time()) + 86400, role="sv")
+    client._store_token(valid_jwt, "2251120001")
+
+    for username, password in (
+        ("", "pass123"),
+        ("   ", "pass123"),
+        ("2251120001", ""),
+        ("", ""),
+        (None, "pass123"),
+        ("2251120001", None),
+        (None, None),
+    ):
+        with pytest.raises(PortalAuthenticationError):
+            client.ensure_web_session(username, password)
+
+    assert calls == 0
+
+
+def test_ensure_web_session_rejects_whitespace_only_token():
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response(
+            {"success": True, "body": "sv", "token": "   "}
+        ),
+    )
+    client._store_token("old-tok", "student", client._current_generation(), role="gv")
+
+    with pytest.raises(PortalAuthenticationError):
+        client.ensure_web_session("student", "pass123", force=True)
+
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+
+def test_decode_jwt_payload_handles_valid_and_malformed_tokens():
+    from core.portal_client import _decode_jwt_payload
+
+    for sub in ("a", "ab", "abc", "2251120001"):
+        tok = _build_raw_jwt({"sub": sub, "exp": 2000000000})
+        assert _decode_jwt_payload(tok) == {"sub": sub, "exp": 2000000000}
+
+    non_utf8 = base64.urlsafe_b64encode(b"\xff\xfe\xfd").rstrip(b"=").decode("ascii")
+    not_json = base64.urlsafe_b64encode(b"not-valid-json").rstrip(b"=").decode("ascii")
+
+    for bad_token in (
+        "",
+        "tok",
+        "header.payload",
+        "a.b.c.d",
+        "header..sig",
+        "header.x.sig",
+        "header.éééé.sig",
+        f"header.{non_utf8}.sig",
+        f"header.{not_json}.sig",
+        _build_raw_jwt(["list", "not", "dict"]),
+        _build_raw_jwt(12345),
+        _build_raw_jwt("just-a-string"),
+        _build_raw_jwt(None),
+    ):
+        assert _decode_jwt_payload(bad_token) == {}
+
+
+def test_is_jwt_expired_respects_opaque_tokens_and_skew_window():
+    from core.portal_client import _is_jwt_expired
+
+    now = int(time.time())
+
+    assert _is_jwt_expired("tok") is False
+    assert _is_jwt_expired("header.payload") is False
+    assert _is_jwt_expired(_build_raw_jwt({"sub": "student"})) is False
+    assert _is_jwt_expired(_build_raw_jwt({"exp": None})) is False
+    assert _is_jwt_expired(_build_raw_jwt({"exp": "1999999999"})) is False
+    assert _is_jwt_expired(_build_raw_jwt({"exp": True})) is False
+    assert _is_jwt_expired(_build_raw_jwt({"exp": False})) is False
+    nan_payload = base64.urlsafe_b64encode(b'{"exp": NaN}').rstrip(b"=").decode("ascii")
+    inf_payload = base64.urlsafe_b64encode(b'{"exp": Infinity}').rstrip(b"=").decode("ascii")
+    assert _is_jwt_expired(f"hdr.{nan_payload}.sig") is False
+    assert _is_jwt_expired(f"hdr.{inf_payload}.sig") is False
+
+    assert _is_jwt_expired(_build_raw_jwt({"exp": 0})) is True
+    assert _is_jwt_expired(_build_fake_jwt(exp=now - 10)) is True
+    assert _is_jwt_expired(_build_fake_jwt(exp=now + 299)) is True
+    assert _is_jwt_expired(_build_fake_jwt(exp=now + 300)) is True
+    assert _is_jwt_expired(_build_fake_jwt(exp=now + 310)) is False
+    assert _is_jwt_expired(_build_fake_jwt(exp=now + 50), skew_seconds=60) is True
+    assert _is_jwt_expired(_build_fake_jwt(exp=now + 75), skew_seconds=60) is False
+
+
+def test_ensure_web_session_reuses_opaque_token_and_replaces_within_skew():
+    now = int(time.time())
+    fresh_jwt = _build_fake_jwt(exp=now + 86400, role="sv")
+    login_calls = 0
+
+    def opener(request, timeout):
+        nonlocal login_calls
+        del request, timeout
+        login_calls += 1
+        return _Response({"success": True, "body": "sv", "token": fresh_jwt})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    client._store_token("tok", "2251120001", role="sv")
+    assert client.ensure_web_session("2251120001", "pass123") == ("tok", "sv")
+    assert login_calls == 0
+
+    client.clear_token()
+    cached_gv_jwt = _build_fake_jwt(exp=now + 86400, role="gv")
+    client._store_token(cached_gv_jwt, "2251120001")
+    assert client.ensure_web_session("2251120001", "pass123") == (cached_gv_jwt, "gv")
+    assert login_calls == 0
+
+    near_expiry_jwt = _build_fake_jwt(exp=now + 120, role="sv")
+    client._store_token(near_expiry_jwt, "2251120001", role="sv")
+    assert client.ensure_web_session("2251120001", "pass123") == (fresh_jwt, "sv")
+    assert login_calls == 1
+
+
+def test_ensure_web_session_role_extraction_and_fallbacks():
+    now = int(time.time())
+    jwt_gv = _build_fake_jwt(exp=now + 86400, role="gv")
+    jwt_sv = _build_fake_jwt(exp=now + 86400, role="sv")
+    jwt_no_role = _build_raw_jwt({"sub": "2251120001", "exp": now + 86400, "data": {}})
+    jwt_bad_data = _build_raw_jwt({"sub": "2251120001", "exp": now + 86400, "data": "not-a-dict"})
+
+    cases = [
+        ({"success": True, "body": " gv ", "token": jwt_sv}, (jwt_sv, "gv")),
+        ({"success": True, "body": "   ", "token": jwt_gv}, (jwt_gv, "gv")),
+        ({"success": True, "body": {"nested": True}, "token": jwt_gv}, (jwt_gv, "gv")),
+        ({"success": True, "body": None, "token": jwt_no_role}, (jwt_no_role, "sv")),
+        ({"success": True, "body": "", "token": jwt_bad_data}, (jwt_bad_data, "sv")),
+        ({"success": True, "body": "", "token": "opaque-tok"}, ("opaque-tok", "sv")),
+    ]
+
+    for response_payload, expected in cases:
+        client = PortalClient(
+            "https://portal-publicapp.ut.edu.vn/api/v1",
+            opener=lambda *_args, payload=response_payload, **_kwargs: _Response(payload),
+        )
+        assert client.ensure_web_session("2251120001", "pass123") == expected
+
+
+def test_discard_token_clears_token_role_and_respects_generation():
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response({"success": False, "message": "bad"}),
+    )
+
+    gen0 = client._current_generation()
+    stored1 = client._store_token("tok-1", "student", gen0, role="gv")
+    assert stored1 is not None
+    assert client._token_role == "gv"
+
+    client.clear_token()
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+    # Newer token stored after clear must survive a stale _discard_token(gen0)
+    gen1 = client._current_generation()
+    gen2 = client._store_token("tok-2", "student", gen1, role="sv")
+    assert gen2 is not None and gen2 > gen1
+    client._discard_token(gen0)
+    assert client._cached_token("student") == "tok-2"
+    assert client._token_role == "sv"
+
+    # Rejected login with stale generation keeps newer token and role
+    with pytest.raises(PortalAuthenticationError):
+        client._login("student", "wrong", gen0)
+    assert client._cached_token("student") == "tok-2"
+    assert client._token_role == "sv"
+
+    # Rejected login with current generation clears both token and role
+    with pytest.raises(PortalAuthenticationError):
+        client._login("student", "wrong", gen2)
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+
+def test_ensure_web_session_forces_relogin_for_different_username_and_isolates_role():
+    now = int(time.time())
+    jwt_u1 = _build_fake_jwt(exp=now + 86400, role="gv")
+    jwt_u2 = _build_fake_jwt(exp=now + 86400, role="sv")
+    jwt_u2_refreshed = _build_fake_jwt(exp=now + 90000, role="sv")
+    login_users: list[str] = []
+
+    def opener(request, timeout):
+        del timeout
+        assert request.full_url.endswith("/user/login")
+        body = json.loads(request.data)
+        user = body["username"]
+        login_users.append(user)
+        if user == "student1":
+            return _Response({"success": True, "body": "gv", "token": jwt_u1})
+        return _Response({"success": True, "body": "sv", "token": jwt_u2})
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    assert client.ensure_web_session("student1", "pass1") == (jwt_u1, "gv")
+    assert client.ensure_web_session("student2", "pass2") == (jwt_u2, "sv")
+    assert login_users == ["student1", "student2"]
+
+    client._store_token(jwt_u2_refreshed, "student2", client._current_generation())
+    assert client._token_role == "sv"
+
+    client._store_token("tok-u3", "student3", client._current_generation())
+    assert client._token_role == ""
+
+
+def test_ensure_web_session_and_store_token_respect_stale_generation():
+    now = int(time.time())
+    late_jwt = _build_fake_jwt(exp=now + 86400, role="sv")
+    responses = iter(
+        [
+            {"success": True, "body": "gv", "token": late_jwt},
+            {"success": True, "body": "gv", "token": "late-opaque-tok"},
+        ]
+    )
+
+    def opener(request, timeout):
+        del request, timeout
+        client.clear_token()
+        return _Response(next(responses))
+
+    client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
+
+    stale_gen = client._current_generation()
+    client.clear_token()
+    assert client._store_token(late_jwt, "student", stale_gen, role="gv") is None
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+    tok, role = client.ensure_web_session("student", "pass123")
+    assert (tok, role) == (late_jwt, "gv")
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+    tok_opaque, role_opaque = client.ensure_web_session("student", "pass123")
+    assert (tok_opaque, role_opaque) == ("late-opaque-tok", "gv")
+    assert client._cached_token("student") == ""
+    assert client._token_role == ""
+
+
+def test_ensure_web_session_preserves_body_role_under_concurrent_store_token():
+    now = int(time.time())
+    jwt_u1 = _build_fake_jwt(exp=now + 86400, role="sv")
+    jwt_u2 = _build_fake_jwt(exp=now + 86400, role="sv")
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1",
+        opener=lambda *_args, **_kwargs: _Response(
+            {"success": True, "body": "gv", "token": jwt_u1}
+        ),
+    )
+
+    original_store = client._store_token
+
+    def racing_store_token(token, username, generation=None, *, role=""):
+        res = original_store(token, username, generation, role=role)
+        if username == "student1":
+            original_store(jwt_u2, "student2", role="sv")
+        return res
+
+    client._store_token = racing_store_token  # type: ignore[method-assign]
+
+    tok, role = client.ensure_web_session("student1", "pass1")
+    assert (tok, role) == (jwt_u1, "gv")
+    assert client._cached_token("student2") == jwt_u2
+    assert client._token_role == "sv"

@@ -295,9 +295,9 @@ def test_settings_view_store_url_falls_back_to_https_when_url_launcher_fails(
 
     assert view._handle_open_store_url() is True
     assert launched == [
-        ("market://details?id=com.uthelper.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
+        ("market://details?id=io.github.chouwzi.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
         (
-            "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+            "https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
             ft.LaunchMode.EXTERNAL_APPLICATION,
         ),
     ]

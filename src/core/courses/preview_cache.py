@@ -205,13 +205,24 @@ class PreviewFileCache:
         return raw if raw.startswith(b"%PDF-") else None
 
     def put_converted_pdf(
-        self, data: bytes, file_name: str, pdf_bytes: bytes
+        self,
+        data: bytes,
+        file_name: str,
+        pdf_bytes: bytes,
+        *,
+        should_commit: Optional[Callable[[], bool]] = None,
     ) -> Optional[Path]:
         """Persist converted Office PDF bytes keyed by source SHA-256."""
         if not data or not pdf_bytes or not pdf_bytes.startswith(b"%PDF-"):
             return None
         key_url, mtime, pdf_name = self.converted_pdf_cache_key(data, file_name)
-        return self.put_bytes(key_url, mtime, pdf_name, pdf_bytes)
+        return self.put_bytes(
+            key_url,
+            mtime,
+            pdf_name,
+            pdf_bytes,
+            should_commit=should_commit,
+        )
 
     def evict_if_needed(self, keep: Optional[Path] = None) -> None:
         """Remove expired files, stale temp files, and oldest entries above max_bytes."""

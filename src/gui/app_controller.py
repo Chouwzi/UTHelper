@@ -19,10 +19,11 @@ from platform_utils import detect_platform
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 from core.data_orchestrator import DataOrchestrator
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
@@ -41,6 +42,18 @@ from core.activity_status import normalize_submission_status
 from core.sync_coordinator import ActivitySyncCoordinator, FetchOutcome, parse_timestamp
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
+from core.url_validation import validate_https_url
+
+try:
+    from core.webview_auth import (
+        UthWebViewAuthService as _CoreUthWebViewAuthService,
+        classify_uth_webview_url as _core_classify_uth_webview_url,
+        normalize_uth_webview_target_url as _core_normalize_uth_webview_target_url,
+    )
+except ImportError:
+    _CoreUthWebViewAuthService = None
+    _core_classify_uth_webview_url = None
+    _core_normalize_uth_webview_target_url = None
 from config import (
     get_sync_interval_minutes,
     hydrate_secrets,
@@ -53,6 +66,7 @@ from platform_utils.background_sync import AndroidSecretBackend
 from platform_utils.update_packages import detect_runtime_target
 
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
+from gui.core.utils import DEMO_LMS_WEBVIEW_GUARD_MESSAGE, is_uth_lms_url
 from core.filter_service import FilterService
 from gui.components.activity_card import ActivityCard
 from gui.components.detail_view import DetailView
@@ -122,7 +136,28 @@ def _resolve_lazy_attr(name: str):
     return __getattr__(name)
 
 
-def _set_webview_occlusion(reason: str, occluded: bool) -> None:
+def _new_modal_occlusion_token() -> str:
+    import uuid
+
+    return f"dlg:{uuid.uuid4().hex}"
+
+
+def _call_modal_occlusion(
+    reason: str, occluded: bool, *, token: str | None = None
+) -> None:
+    """Invoke `_set_webview_occlusion` with token support and 2-arg test-monkeypatch fallback."""
+    if token is not None:
+        try:
+            _set_webview_occlusion(reason, occluded, token=token)
+            return
+        except TypeError:
+            pass
+    _set_webview_occlusion(reason, occluded)
+
+
+def _set_webview_occlusion(
+    reason: str, occluded: bool, *, token: str | None = None
+) -> None:
     """Best-effort bridge to global WebView2 occlusion coordinator."""
     try:
         from gui.components.courses.embedded_webview_host import (
@@ -131,18 +166,33 @@ def _set_webview_occlusion(reason: str, occluded: bool) -> None:
     except ImportError:
         return
     try:
+        if token is not None:
+            try:
+                set_global_webview_occlusion(reason, bool(occluded), token=token)
+                return
+            except TypeError:
+                pass
         set_global_webview_occlusion(reason, bool(occluded))
     except Exception:
         logger.debug("WebView occlusion update failed", exc_info=True)
 
 
 def _build_account_data_cache(username: str | None):
-    """Build an isolated DataCache; logged-out state never uses namespace=None."""
+    """Build an isolated DataCache; logged-out and demo states never migrate legacy cache."""
     from core.data_cache import DataCache
 
     clean_user = str(username or "").strip()
     if clean_user:
-        return DataCache(namespace=f"{settings.MOODLE_BASE_URL}|{clean_user}")
+        demo_user = is_demo_account(clean_user)
+        if demo_user:
+            clean_user = normalize_demo_username(clean_user)
+        try:
+            return DataCache(
+                namespace=f"{settings.MOODLE_BASE_URL}|{clean_user}",
+                allow_legacy_migration=not demo_user,
+            )
+        except TypeError:
+            return DataCache(namespace=f"{settings.MOODLE_BASE_URL}|{clean_user}")
     try:
         return DataCache(
             namespace="__logged_out__",
@@ -251,6 +301,61 @@ def _update_install_error_message(status: str) -> str:
     return "Không mở được trình cài đặt. Hãy thử lại."
 
 
+def _resolve_webview_auth_cls():
+    if _CoreUthWebViewAuthService is not None:
+        return _CoreUthWebViewAuthService
+    wv_mod = sys.modules.get("core.webview_auth")
+    return getattr(wv_mod, "UthWebViewAuthService", None)
+
+
+def _classify_uth_url(url: str) -> str:
+    fn = _core_classify_uth_webview_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "classify_uth_webview_url", None)
+    if callable(fn):
+        return str(fn(url))
+    validated = validate_https_url(url)
+    if validated is None:
+        return "external"
+    parsed = urlsplit(validated)
+    if parsed.port is not None:
+        return "external"
+    host = (parsed.hostname or "").casefold()
+    if host in ("courses.ut.edu.vn", "elearning.ut.edu.vn"):
+        return "courses"
+    if host == "thnn.ut.edu.vn":
+        return "thnn"
+    if host == "portal.ut.edu.vn":
+        return "portal"
+    return "external"
+
+
+def _normalize_uth_target_url(url: str, *, has_credentials: bool = True) -> str:
+    fn = _core_normalize_uth_webview_target_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "normalize_uth_webview_target_url", None)
+    if callable(fn):
+        return str(fn(url, has_credentials=has_credentials))
+    if not isinstance(url, str) or not url:
+        return ""
+    validated = validate_https_url(url)
+    if validated is None:
+        return url
+    parsed = urlsplit(validated)
+    if parsed.port is not None:
+        return url
+    host = (parsed.hostname or "").casefold()
+    if host == "elearning.ut.edu.vn":
+        return urlunsplit(
+            ("https", "courses.ut.edu.vn", parsed.path, parsed.query, parsed.fragment)
+        )
+    if host == "portal.ut.edu.vn" and parsed.path in ("", "/", "/login") and has_credentials:
+        return "https://portal.ut.edu.vn/dashboard"
+    return validated
+
+
 class AppController:
     def __init__(
         self,
@@ -280,7 +385,13 @@ class AppController:
             if settings.UTH_USERNAME
             else f"{settings.PORTAL_API_BASE}|anonymous"
         )
+        self._account_epoch = 0
         self._portal_client = PortalClient(settings.PORTAL_API_BASE)
+        self._webview_auth_service = self._build_webview_auth_service(
+            courses_client=self.orchestrator.client,
+            thnn_client=self.orchestrator.thnn_client,
+            portal_client=self._portal_client,
+        )
         # The Portal web app (lichTuan) is served from its own host.
         self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
         self._portal_week_lock = threading.Lock()
@@ -325,7 +436,9 @@ class AppController:
         self._pending_updates = {}
         
         self._account_epoch = 0
+        self._sync_generation = 0
         self._active_sync_epoch: int | None = None
+        self._active_sync_generation: int | None = None
         self._grades_request_epoch = 0
         self._course_grades_request_epoch = 0
         self._prefetch_cancel_event = threading.Event()
@@ -434,7 +547,9 @@ class AppController:
         except Exception:
             logger.debug("Diagnostic breadcrumb failed", exc_info=True)
 
-    def _attach_modal_occlusion_release(self) -> bool:
+    def _attach_modal_occlusion_release(
+        self, *, occlusion_token: str | None = None
+    ) -> bool:
         """Hook the active modal dialog's on_dismiss to release WebView occlusion."""
         dlg = None
         dialogs_ctrl = getattr(self.page, "_dialogs", None)
@@ -453,6 +568,11 @@ class AppController:
                     ):
                         dlg = candidate
                         break
+                    if getattr(candidate, "open", False) and hasattr(
+                        candidate, "on_dismiss"
+                    ):
+                        dlg = candidate
+                        break
         if dlg is None:
             candidate = getattr(self.page, "dialog", None)
             if candidate is not None and getattr(candidate, "open", False):
@@ -468,7 +588,9 @@ class AppController:
                     if inspect.isawaitable(res):
                         await res
             finally:
-                _set_webview_occlusion("modal_dialog", False)
+                _call_modal_occlusion(
+                    "modal_dialog", False, token=occlusion_token
+                )
 
         try:
             dlg.on_dismiss = _on_dismiss
@@ -479,12 +601,14 @@ class AppController:
     async def _show_login_dialog(self):
         from gui.components.login_dialog import show_login_dialog
 
+        self._invalidate_active_webviews_before_credential_mutation()
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "user", screen="login")
-        _set_webview_occlusion("modal_dialog", True)
+        modal_token = _new_modal_occlusion_token()
+        _call_modal_occlusion("modal_dialog", True, token=modal_token)
 
         async def _on_login_success():
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             # UX-5: Show success snackbar after dialog closes
@@ -494,21 +618,23 @@ class AppController:
         try:
             await show_login_dialog(self.page, self.orchestrator, _on_login_success)
         except Exception:
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             raise
-        if not self._attach_modal_occlusion_release():
-            _set_webview_occlusion("modal_dialog", False)
+        if not self._attach_modal_occlusion_release(occlusion_token=modal_token):
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
 
     async def _show_quiz_auth_dialog(self, retry_callback):
         """Reuse the app credential dialog, then retry Moodle session setup."""
         from gui.components.login_dialog import show_login_dialog
 
+        self._invalidate_active_webviews_before_credential_mutation()
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "quiz_player", screen="login")
-        _set_webview_occlusion("modal_dialog", True)
+        modal_token = _new_modal_occlusion_token()
+        _call_modal_occlusion("modal_dialog", True, token=modal_token)
 
         async def _on_login_success():
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             await self._complete_login_success()
@@ -525,10 +651,95 @@ class AppController:
                 allow_cancel=True,
             )
         except Exception:
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             raise
-        if not self._attach_modal_occlusion_release():
-            _set_webview_occlusion("modal_dialog", False)
+        if not self._attach_modal_occlusion_release(occlusion_token=modal_token):
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
+
+    def _restore_refresh_button(self) -> None:
+        refresh_btn = getattr(self, "refresh_btn", None)
+        if refresh_btn is None or not getattr(refresh_btn, "disabled", False):
+            return
+        refresh_btn.disabled = False
+        upd = getattr(refresh_btn, "update", None)
+        if callable(upd):
+            try:
+                upd()
+                return
+            except Exception:
+                pass
+        page = getattr(self, "page", None)
+        page_upd = getattr(page, "update", None)
+        if callable(page_upd):
+            try:
+                page_upd()
+            except Exception:
+                pass
+
+    def _teardown_detail_view_for_account_switch(self, *, clear_ui: bool) -> None:
+        """Reset DetailView state and close any open detail overlay on account switch."""
+        detail_view = getattr(self, "detail_view", None)
+        view_manager = getattr(self, "view_manager", None)
+        detail_was_open = bool(
+            getattr(detail_view, "visible", False)
+            or (
+                view_manager is not None
+                and getattr(view_manager, "detail_switcher", None) is not None
+                and getattr(view_manager.detail_switcher, "content", None) is detail_view
+            )
+        )
+        reset_detail = getattr(detail_view, "reset_for_account_switch", None)
+        if callable(reset_detail):
+            try:
+                reset_detail(account_epoch=getattr(self, "_account_epoch", 0))
+            except TypeError:
+                reset_detail()
+            except Exception:
+                logger.debug("DetailView account reset failed", exc_info=True)
+        if not clear_ui:
+            return
+        from_calendar = bool(getattr(self, "_detail_from_calendar", False))
+        self._detail_from_calendar = False
+        if view_manager is not None and detail_was_open:
+            origin = getattr(view_manager, "_detail_origin", None)
+            if origin is None:
+                origin = (
+                    getattr(self, "calendar_view", None)
+                    if from_calendar
+                    else getattr(self, "dashboard", None)
+                )
+            clear_layer = getattr(view_manager, "_clear_detail_layer", None)
+            if callable(clear_layer):
+                try:
+                    clear_layer()
+                    if origin is not None and not getattr(
+                        getattr(self, "settings_view", None), "visible", False
+                    ):
+                        origin.visible = True
+                        origin.opacity = 1.0
+                        if getattr(view_manager, "detail_switcher", None) is None:
+                            show_only = getattr(view_manager, "_show_only", None)
+                            if callable(show_only):
+                                show_only(origin)
+                except Exception:
+                    logger.debug("Detail overlay clear failed", exc_info=True)
+            else:
+                close_detail = getattr(view_manager, "close_detail", None)
+                safe_run = getattr(self, "_safe_run_task", None)
+                if callable(close_detail) and callable(safe_run):
+                    safe_run(close_detail, from_calendar)
+            page = getattr(self, "page", None)
+            update_fn = getattr(page, "update", None)
+            if callable(update_fn):
+                try:
+                    update_fn()
+                except Exception:
+                    pass
+        elif detail_view is not None:
+            try:
+                detail_view.visible = False
+            except Exception:
+                pass
 
     def _teardown_account_session(
         self,
@@ -540,6 +751,7 @@ class AppController:
         trigger_android_logout: bool = True,
         clear_ui: bool = True,
         mark_logged_out: bool = False,
+        preserve_login_state: bool = False,
     ) -> int:
         """Unified account-switch & logout teardown.
 
@@ -550,15 +762,30 @@ class AppController:
         new_username = str(new_identity[0] or "").strip()
         # 1. Flip identity & advance epochs BEFORE scheduling or mutating anything.
         self._settings_identity = new_identity
-        self._account_epoch = getattr(self, "_account_epoch", 0) + 1
-        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
-        self._detail_request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
-        self._grades_request_epoch = getattr(self, "_grades_request_epoch", 0) + 1
-        self._course_grades_request_epoch = (
-            getattr(self, "_course_grades_request_epoch", 0) + 1
+        should_advance_account_epoch = bool(
+            reset_moodle_and_caches
+            or account_switched_or_logged_out
+            or mark_logged_out
         )
+        if should_advance_account_epoch:
+            self._account_epoch = getattr(self, "_account_epoch", 0) + 1
+            self._detail_request_epoch = (
+                getattr(self, "_detail_request_epoch", 0) + 1
+            )
+            self._grades_request_epoch = (
+                getattr(self, "_grades_request_epoch", 0) + 1
+            )
+            self._course_grades_request_epoch = (
+                getattr(self, "_course_grades_request_epoch", 0) + 1
+            )
+        else:
+            self._account_epoch = getattr(self, "_account_epoch", 0)
+        self._sync_generation = getattr(self, "_sync_generation", 0) + 1
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._is_loading = False
         self._active_sync_epoch = None
+        self._active_sync_generation = None
+        self._restore_refresh_button()
 
         # 2. Invalidate in-flight sync coalescing & cancel background warmers.
         sync_coord = getattr(self, "_sync_coordinator", None)
@@ -638,6 +865,11 @@ class AppController:
             orchestrator = getattr(self, "orchestrator", None)
             if orchestrator is not None:
                 try:
+                    preserved_logged_in = (
+                        bool(getattr(orchestrator, "is_logged_in", False))
+                        if preserve_login_state and not mark_logged_out
+                        else False
+                    )
                     clear_caches = getattr(orchestrator, "clear_caches", None)
                     if callable(clear_caches):
                         clear_caches()
@@ -653,8 +885,8 @@ class AppController:
                         orchestrator._thnn_activities_cache = []
                     if hasattr(orchestrator, "_last_thnn_fetch_ts"):
                         orchestrator._last_thnn_fetch_ts = 0.0
-                    if mark_logged_out:
-                        orchestrator.is_logged_in = False
+                    if mark_logged_out or hasattr(orchestrator, "is_logged_in"):
+                        orchestrator.is_logged_in = preserved_logged_in
                     for client_attr in ("client", "thnn_client"):
                         client_obj = getattr(orchestrator, client_attr, None)
                         clear_session = getattr(client_obj, "clear_session", None)
@@ -725,7 +957,10 @@ class AppController:
             # Close active WebViews BEFORE purging profiles/cookies so locks release.
             close_wv = getattr(self, "_close_app_webview", None)
             if callable(close_wv):
-                close_wv(update_page=False)
+                try:
+                    close_wv(update_page=False, clear_browser_storage=True)
+                except TypeError:
+                    close_wv(update_page=False)
 
             courses_coord = getattr(self, "_courses_coordinator", None)
             reset_courses = getattr(courses_coord, "reset_for_account_switch", None)
@@ -767,6 +1002,16 @@ class AppController:
             set_state(self._today_schedule_state)
 
         # 7. Clear UI surfaces when visible so stale account data disappears immediately.
+        if reset_moodle_and_caches or clear_ui:
+            self._teardown_detail_view_for_account_switch(clear_ui=clear_ui)
+        else:
+            detail_view = getattr(self, "detail_view", None)
+            if detail_view is not None and hasattr(
+                detail_view, "_owner_account_epoch"
+            ):
+                detail_view._owner_account_epoch = getattr(
+                    self, "_account_epoch", 0
+                )
         if clear_ui:
             quiz_player_view = getattr(self, "quiz_player_view", None)
             if quiz_player_view is not None and getattr(
@@ -821,6 +1066,8 @@ class AppController:
             )
             if callable(clear_quiz_sessions):
                 self._safe_run_task(clear_quiz_sessions)
+            if self._is_macos_native_runtime():
+                self._safe_run_task(self._clear_macos_persisted_webview_sessions)
 
             android_bg = getattr(self, "_android_background", None)
             if (
@@ -828,7 +1075,14 @@ class AppController:
                 and android_bg is not None
                 and getattr(android_bg, "available", False)
             ):
-                self._safe_run_task(android_bg.logout)
+                if is_demo_account(new_username):
+                    async def _reset_demo_android_bg(bg=android_bg) -> None:
+                        await bg.logout()
+                        await bg.configure("", token_origin="")
+
+                    self._safe_run_task(_reset_demo_android_bg)
+                else:
+                    self._safe_run_task(android_bg.logout)
 
         return self._account_epoch
 
@@ -845,22 +1099,145 @@ class AppController:
         account_switched_or_logged_out = (
             old_username.casefold() != new_username.casefold()
         ) or not new_username
+        do_android_logout = identity_changed and account_switched_or_logged_out
 
         self._teardown_account_session(
             new_identity,
             reset_moodle_and_caches=identity_changed,
             account_switched_or_logged_out=account_switched_or_logged_out,
             schedule_refresh_trigger="login",
-            trigger_android_logout=identity_changed and account_switched_or_logged_out,
+            trigger_android_logout=False,
             clear_ui=identity_changed,
+            preserve_login_state=True,
         )
+        if do_android_logout or is_demo_account(settings.UTH_USERNAME):
+            mobile_bridge = getattr(self, "_android_background", None)
+            if mobile_bridge is not None and getattr(mobile_bridge, "available", False):
+                try:
+                    await mobile_bridge.logout()
+                    if is_demo_account(settings.UTH_USERNAME):
+                        await mobile_bridge.configure("", token_origin="")
+                except Exception:
+                    logger.debug(
+                        "Android background logout after login skipped",
+                        exc_info=True,
+                    )
         await self._load_data_async()
+
+    def _is_macos_native_runtime(self) -> bool:
+        page = getattr(self, "page", None)
+        if page is not None and bool(getattr(page, "web", False)):
+            return False
+        plat_str = str(getattr(page, "platform", "") or "").lower()
+        return sys.platform == "darwin" or "macos" in plat_str
+
+    async def _clear_macos_persisted_webview_sessions(self) -> bool:
+        """Invoke UthQuizSessionCleaner on macOS so WKWebsiteDataStore localStorage & cookies wipe on logout."""
+        cleaner = getattr(self, "_macos_quiz_session_cleaner", None)
+        if cleaner is None:
+            try:
+                from flet_uth_quiz import UthQuizSessionCleaner
+            except ImportError:
+                try:
+                    from platform_utils.quiz_client_bootstrap import (
+                        add_source_quiz_package_to_path,
+                    )
+
+                    repo_root = Path(__file__).resolve().parents[2]
+                    add_source_quiz_package_to_path(repo_root)
+                    from flet_uth_quiz import UthQuizSessionCleaner
+                except Exception:
+                    return False
+            except Exception:
+                return False
+            try:
+                cleaner = UthQuizSessionCleaner()
+            except Exception:
+                return False
+            page = getattr(self, "page", None)
+            services = getattr(page, "services", None)
+            if isinstance(services, list) and cleaner not in services:
+                services.append(cleaner)
+                update_fn = getattr(page, "update", None)
+                if callable(update_fn):
+                    try:
+                        update_fn()
+                    except Exception:
+                        pass
+            self._macos_quiz_session_cleaner = cleaner
+        clear_fn = getattr(cleaner, "clear_sessions", None)
+        if not callable(clear_fn):
+            return False
+        try:
+            return bool(await clear_fn())
+        except Exception:
+            return False
+
+    def _committed_webview_credentials(self) -> tuple[str, str]:
+        username = str(getattr(settings, "UTH_USERNAME", "") or "")
+        password = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        committed = getattr(self, "_settings_identity", None)
+        if (
+            isinstance(committed, tuple)
+            and len(committed) == 2
+            and committed != (username, password)
+        ):
+            return ("", "")
+        return (username, password)
+
+    def _invalidate_active_webviews_before_credential_mutation(self) -> None:
+        """Bump account epoch and close active WebViews BEFORE mutating settings credentials (SEC-134-01)."""
+        self._account_epoch = getattr(self, "_account_epoch", 0) + 1
+        close_wv = getattr(self, "_close_app_webview", None)
+        if callable(close_wv):
+            try:
+                close_wv(update_page=False, clear_browser_storage=True)
+            except TypeError:
+                close_wv(update_page=False)
+            except Exception:
+                logger.debug("Pre-mutation app WebView close skipped", exc_info=True)
+        courses_coord = getattr(self, "_courses_coordinator", None)
+        if courses_coord is not None:
+            courses_view = getattr(courses_coord, "courses_view", None)
+            overlays = getattr(courses_view, "_overlays", None)
+            if isinstance(overlays, list):
+                for ov in list(overlays):
+                    disp = getattr(ov, "dispose", None)
+                    if callable(disp):
+                        try:
+                            disp(clear_browser_storage=True)
+                        except TypeError:
+                            disp()
+                        except Exception:
+                            pass
+            clear_overlays = getattr(courses_view, "clear_overlays", None)
+            if callable(clear_overlays):
+                try:
+                    clear_overlays(update=False)
+                except TypeError:
+                    clear_overlays()
+                except Exception:
+                    logger.debug("Pre-mutation overlay clear skipped", exc_info=True)
+        for portal_attr in ("_portal_client", "_portal_week_client"):
+            portal_obj = getattr(self, portal_attr, None)
+            clear_token = getattr(portal_obj, "clear_token", None)
+            if callable(clear_token):
+                try:
+                    clear_token()
+                except Exception:
+                    logger.debug("Pre-mutation portal clear skipped", exc_info=True)
 
     async def _handle_settings_account_login_async(
         self, username: str, password: str
     ) -> None:
         """Unified Settings -> Tài khoản login handler routed through full isolation."""
-        clean_user = str(username or "").strip()
+        self._invalidate_active_webviews_before_credential_mutation()
+        raw_user = str(username or "")
+        clean_user = (
+            normalize_demo_username(raw_user)
+            if is_demo_account(raw_user)
+            else raw_user.strip()
+        )
         clean_pass = str(password or "")
         settings.UTH_USERNAME = clean_user
         settings.UTH_PASSWORD = clean_pass
@@ -868,11 +1245,15 @@ class AppController:
         settings.MOODLE_WS_TOKEN = ""
         settings.MOODLE_WS_TOKEN_ORIGIN = ""
         settings.MOODLE_SESSION = ""
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is not None and hasattr(orchestrator, "is_logged_in"):
+            orchestrator.is_logged_in = False
         await asyncio.to_thread(save_settings)
         await self._complete_login_success()
 
     async def _handle_logout_async(self) -> None:
         """Sign out cleanly: erase persisted secrets, tear down all caches, prompt login."""
+        self._invalidate_active_webviews_before_credential_mutation()
         settings.UTH_USERNAME = ""
         settings.UTH_PASSWORD = ""
         settings.UTH_CREDENTIALS_ORIGIN = ""
@@ -1198,6 +1579,8 @@ class AppController:
 
     def _native_background_credentials(self) -> tuple[str, str]:
         """Return only a token proven to belong to the active Moodle client."""
+        if is_demo_account(settings.UTH_USERNAME):
+            return "", ""
         configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
         client_site = moodle_site_from_origin(
             getattr(getattr(self.orchestrator, "client", None), "moodle_site_origin", None)
@@ -1442,10 +1825,17 @@ class AppController:
         self.page.update()
 
     async def _destroy_window(self) -> None:
+        prepare = getattr(self, "_prepare_async_shutdown", None)
+        if callable(prepare):
+            prepare()
+        window = getattr(getattr(self, "page", None), "window", None)
+        destroy_fn = getattr(window, "destroy", None)
+        if not callable(destroy_fn):
+            return
         try:
-            await self.page.window.destroy()
+            await destroy_fn()
         except RuntimeError as exc:
-            if str(exc) != "Session closed":
+            if "Session closed" not in str(exc):
                 raise
             logger.debug("Window session closed before custom exit completed")
 
@@ -2012,6 +2402,7 @@ class AppController:
             get_quiz_account_id=lambda: settings.UTH_USERNAME,
             on_open_url=self._open_url_in_app,
             on_open_external=self._open_url_external,
+            get_account_epoch=lambda: getattr(self, "_account_epoch", 0),
         )
         self.calendar_view = CalendarView(
             self.page,
@@ -2129,6 +2520,8 @@ class AppController:
             all_assignments_provider=self._snapshot_all_data,
             on_start_quiz=self._start_course_quiz,
             account_namespace=courses_namespace,
+            webview_auth_service=self._webview_auth_service,
+            account_epoch_getter=lambda: getattr(self, "_account_epoch", 0),
         )
         if sys.platform == "win32" and not bool(getattr(self.page, "web", False)):
             from gui.components.courses.embedded_webview_host import (
@@ -2280,7 +2673,7 @@ class AppController:
             on_destination_change=self._nav_shell.set_active,
         )
         body_with_rail = ft.Row(
-            controls=[self._nav_shell.rail_host, main_stack],
+            controls=[self._nav_shell.rail_slot, main_stack],
             spacing=0,
             expand=True,
             vertical_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -2425,6 +2818,7 @@ class AppController:
 
         single_gutter = max(0.0, (content_width - _SINGLE_VIEW_MAX_WIDTH) / 2)
         self.settings_view.margin = ft.Margin(left=single_gutter, right=single_gutter, top=0, bottom=0)
+        zero_margin = ft.Margin(left=0, right=0, top=0, bottom=0)
         for view in (
             getattr(self, "grade_overview_view", None),
             getattr(self, "profile_view", None),
@@ -2432,8 +2826,8 @@ class AppController:
             courses_view,
             getattr(self, "course_grades_view", None),
         ):
-            if view is not None:
-                view.margin = ft.Margin(left=0, right=0, top=0, bottom=0)
+            if view is not None and getattr(view, "margin", None) != zero_margin:
+                view.margin = zero_margin
 
         host = getattr(self, "_detail_host", None)
         if host is not None:
@@ -2475,9 +2869,19 @@ class AppController:
         except Exception:
             logger.debug("Responsive layout update skipped", exc_info=True)
 
+    def _show_demo_lms_guard_snackbar(self) -> None:
+        self._show_snackbar(
+            DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+            ft.Icons.INFO_OUTLINE_ROUNDED,
+            C.WARNING,
+        )
+
     def _launch_safe_url(self, url: str) -> None:
         safe = safe_http_url(url)
         if not safe:
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe):
+            self._show_demo_lms_guard_snackbar()
             return
 
         async def _open() -> None:
@@ -2507,6 +2911,8 @@ class AppController:
         url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
         if not url:
             return
+        if _classify_uth_url(url) in {"courses", "thnn"}:
+            url = _normalize_uth_target_url(url, has_credentials=False)
         activity_data = None
         with self._data_lock:
             for item in self.all_data:
@@ -2678,19 +3084,27 @@ class AppController:
             daemon=True,
         ).start()
 
-    def _close_app_webview(self, *, update_page: bool = True) -> bool:
+    def _close_app_webview(
+        self, *, update_page: bool = True, clear_browser_storage: bool = False
+    ) -> bool:
         host = getattr(self, "_app_webview_host", None)
         pane = getattr(self, "_app_webview_pane", None)
         was_visible = bool(host is not None and getattr(host, "visible", False))
         self._app_webview_pane = None
+        if pane is not None:
+            try:
+                if clear_browser_storage:
+                    try:
+                        pane.dispose(clear_browser_storage=True)
+                    except TypeError:
+                        pane.dispose()
+                else:
+                    pane.dispose()
+            except Exception:
+                logger.debug("App WebView dispose skipped", exc_info=True)
         if host is not None:
             host.visible = False
             host.content = None
-        if pane is not None:
-            try:
-                pane.dispose()
-            except Exception:
-                logger.debug("App WebView dispose skipped", exc_info=True)
         if (was_visible or pane is not None) and update_page:
             try:
                 self.page.update()
@@ -2698,11 +3112,63 @@ class AppController:
                 pass
         return was_visible or pane is not None
 
+    def _build_webview_auth_service(
+        self,
+        *,
+        courses_client=None,
+        thnn_client=None,
+        portal_client=None,
+    ):
+        svc_cls = _resolve_webview_auth_cls()
+        if svc_cls is None:
+            return None
+        kwargs = {
+            "courses_client": courses_client,
+            "thnn_client": thnn_client,
+            "portal_client": portal_client,
+            "credentials_provider": self._committed_webview_credentials,
+        }
+        try:
+            params = inspect.signature(svc_cls).parameters
+            if "account_epoch_getter" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                kwargs["account_epoch_getter"] = lambda: getattr(
+                    self, "_account_epoch", 0
+                )
+        except (TypeError, ValueError):
+            pass
+        return svc_cls(**kwargs)
+
+    def _get_webview_auth_service(self):
+        svc = getattr(self, "_webview_auth_service", None)
+        if svc is not None:
+            return svc
+        coord = getattr(self, "_courses_coordinator", None)
+        orch = getattr(self, "orchestrator", None)
+        courses_client = getattr(orch, "client", None)
+        thnn_client = getattr(orch, "thnn_client", None)
+        if coord is not None:
+            client_for = getattr(coord, "_client_for", None)
+            if callable(client_for):
+                if courses_client is None:
+                    courses_client = client_for("courses")
+                if thnn_client is None:
+                    thnn_client = client_for("thnn")
+        portal_client = getattr(self, "_portal_client", None)
+        svc = self._build_webview_auth_service(
+            courses_client=courses_client,
+            thnn_client=thnn_client,
+            portal_client=portal_client,
+        )
+        self._webview_auth_service = svc
+        return svc
+
     def _open_url_in_app(self, url: str, title: str = "") -> None:
-        from core.moodle_sites import moodle_site_from_url
         from core.url_validation import validate_public_https_url
         from gui.components.courses.embedded_webview_host import (
             _is_flet_webview_platform,
+            _is_inappwebview_mobile_platform,
             _is_windows_webview2_platform,
             _webview2_runtime_available,
         )
@@ -2713,10 +3179,26 @@ class AppController:
         if validated is None:
             logger.warning("Blocked invalid or non-HTTPS URL")
             return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(validated):
+            self._show_demo_lms_guard_snackbar()
+            return
+
+        site_kind = _classify_uth_url(validated)
+        committed_user, committed_pass = self._committed_webview_credentials()
+        has_creds = bool(
+            not is_demo_account(committed_user)
+            and committed_user.strip()
+            and committed_pass.strip()
+        )
+        if site_kind in {"courses", "thnn", "portal"}:
+            validated = _normalize_uth_target_url(
+                validated, has_credentials=has_creds
+            )
 
         host = getattr(self, "_app_webview_host", None)
         supports_embedded = host is not None and (
-            _is_flet_webview_platform(self.page)
+            _is_inappwebview_mobile_platform(self.page)
+            or _is_flet_webview_platform(self.page)
             or (
                 _is_windows_webview2_platform(self.page)
                 and _webview2_runtime_available()
@@ -2731,40 +3213,61 @@ class AppController:
                 except Exception:
                     pass
 
-            moodle_site = moodle_site_from_url(validated)
-            moodle_site_id = moodle_site.identity if moodle_site is not None else None
-            source = "thnn" if moodle_site_id == "thnn" else "courses"
+            source = "thnn" if site_kind == "thnn" else "courses"
             preview_server = None
             session_client = None
-            if moodle_site_id in {"courses", "thnn"}:
-                coord = getattr(self, "_courses_coordinator", None)
-                if coord is not None:
+            coord = getattr(self, "_courses_coordinator", None)
+            if coord is not None:
+                ensure_srv = getattr(coord, "ensure_preview_server", None)
+                if callable(ensure_srv):
+                    preview_server = ensure_srv()
+                else:
                     preview_server = getattr(coord, "preview_server", None)
+            if preview_server is None:
+                preview_server = getattr(self, "_preview_server", None)
+            if site_kind in {"courses", "thnn"}:
+                if coord is not None:
                     client_for = getattr(coord, "_client_for", None)
                     if callable(client_for):
                         session_client = client_for(source)
-                if session_client is None and moodle_site_id == "courses":
-                    session_client = getattr(
-                        getattr(self, "orchestrator", None), "client", None
-                    )
+                if session_client is None:
+                    orch = getattr(self, "orchestrator", None)
+                    if site_kind == "thnn":
+                        session_client = getattr(orch, "thnn_client", None)
+                    else:
+                        session_client = getattr(orch, "client", None)
 
+            webview_auth_service = self._get_webview_auth_service()
             left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds()
             account_ns = (
                 f"{settings.MOODLE_BASE_URL}|{settings.UTH_USERNAME or 'anon'}"
             )
-            pane = CoursesWebViewPane(
-                page=self.page,
-                source=source,
-                title=(title or "").strip() or "Trình duyệt trong ứng dụng",
-                url=validated,
-                preview_server=preview_server,
-                session_client=session_client,
-                on_back=self._close_app_webview,
-                on_open_external=self._open_url_external,
-                show_expand_toggle=False,
-                pane_width=pane_w,
-                account_namespace=account_ns,
-            )
+            pane_kwargs = {
+                "page": self.page,
+                "source": source,
+                "title": (title or "").strip() or "Trình duyệt trong ứng dụng",
+                "url": validated,
+                "preview_server": preview_server,
+                "session_client": session_client,
+                "webview_auth_service": webview_auth_service,
+                "on_back": self._close_app_webview,
+                "on_open_external": self._open_url_external,
+                "show_expand_toggle": False,
+                "pane_width": pane_w,
+                "account_namespace": account_ns,
+            }
+            try:
+                pane_params = inspect.signature(CoursesWebViewPane).parameters
+                if "account_epoch_getter" in pane_params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in pane_params.values()
+                ):
+                    pane_kwargs["account_epoch_getter"] = lambda: getattr(
+                        self, "_account_epoch", 0
+                    )
+            except (TypeError, ValueError):
+                pass
+            pane = CoursesWebViewPane(**pane_kwargs)
             self._app_webview_pane = pane
             host.content = pane
             host.visible = True
@@ -2790,6 +3293,9 @@ class AppController:
         validated = validate_https_url(url)
         if validated is None:
             logger.warning("Blocked invalid or non-HTTPS external URL")
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(validated):
+            self._show_demo_lms_guard_snackbar()
             return
 
         async def _launch() -> None:
@@ -3363,9 +3869,13 @@ class AppController:
         )
         if not callable(reconcile):
             return
+        effective_clear_only = bool(
+            clear_only or is_demo_account(settings.UTH_USERNAME)
+        )
+        effective_sessions = () if effective_clear_only else sessions
         await reconcile(
-            sessions,
-            clear_only=clear_only,
+            effective_sessions,
+            clear_only=effective_clear_only,
             fetch_day=self._fetch_tomorrow_sessions,
             identity_getter=lambda: getattr(self, "_settings_identity", None),
             android_bridge=getattr(self, "_android_background", None),
@@ -3660,29 +4170,50 @@ class AppController:
         )
         from gui.components.course_grade_table import match_portal_course_to_summary
 
+        account_epoch = getattr(self, "_account_epoch", 0)
+
+        def _epoch_is_current() -> bool:
+            return account_epoch == getattr(self, "_account_epoch", 0)
+
         def _work() -> MoodleCourseGradesResult:
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             store = getattr(self, "_course_cache_store", None)
             catalog_service = getattr(self, "_course_catalog_service", None)
             if store is None or catalog_service is None:
-                return self._lookup_legacy_monitor_grades(portal_course)
+                return (
+                    self._lookup_legacy_monitor_grades(portal_course)
+                    if _epoch_is_current()
+                    else MoodleCourseGradesResult()
+                )
 
             courses: list = []
             try:
                 courses = list(getattr(store.load_catalog(), "courses", None) or [])
             except Exception:
                 courses = []
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             if not courses:
                 try:
                     courses = list(catalog_service.refresh_catalog(include_thnn=True) or [])
                 except Exception:
                     logger.debug("On-demand catalog refresh failed", exc_info=True)
                     courses = []
+                if not _epoch_is_current():
+                    return MoodleCourseGradesResult()
 
             matched = match_portal_course_to_summary(
                 portal_course, courses, semester_name=semester_name
             )
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             if matched is None:
-                return self._lookup_legacy_monitor_grades(portal_course)
+                return (
+                    self._lookup_legacy_monitor_grades(portal_course)
+                    if _epoch_is_current()
+                    else MoodleCourseGradesResult()
+                )
 
             try:
                 grades = list(
@@ -3693,6 +4224,9 @@ class AppController:
                 logger.debug("On-demand load_course_grades failed", exc_info=True)
                 grades = []
 
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
+
             if grades:
                 last_synced = 0
                 try:
@@ -3700,6 +4234,8 @@ class AppController:
                     last_synced = int(getattr(detail, "last_synced_at", 0) or 0)
                 except Exception:
                     pass
+                if not _epoch_is_current():
+                    return MoodleCourseGradesResult()
                 return MoodleCourseGradesResult(
                     grades=grades,
                     course_id=matched.id,
@@ -3710,6 +4246,8 @@ class AppController:
                 )
 
             legacy_res = self._lookup_legacy_monitor_grades(portal_course)
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             if legacy_res.grades:
                 return legacy_res
             return MoodleCourseGradesResult(
@@ -3719,7 +4257,10 @@ class AppController:
                 needs_async_fetch=False,
             )
 
-        return await asyncio.to_thread(_work)
+        result = await asyncio.to_thread(_work)
+        if not _epoch_is_current():
+            return MoodleCourseGradesResult()
+        return result
 
     async def _check_grades_background(self):
         """Chạy cùng chu kỳ cập nhật Tổng quan qua GradeMonitor (WS nhẹ).
@@ -3754,7 +4295,8 @@ class AppController:
 
         if account_epoch != getattr(self, "_account_epoch", 0):
             return
-        await self._notify_grade_changes(grade_changes)
+        if grade_changes and not is_demo_account(settings.UTH_USERNAME):
+            await self._notify_grade_changes(grade_changes)
 
     async def _notify_grade_changes(self, grade_changes: list) -> None:
         if not grade_changes:
@@ -3862,9 +4404,17 @@ class AppController:
             False,
         )
 
+    def _has_detail_prefetch_credentials(self) -> bool:
+        if settings.MOODLE_WS_TOKEN:
+            return True
+        if not is_demo_account(settings.UTH_USERNAME):
+            return False
+        client = getattr(getattr(self, "orchestrator", None), "client", None)
+        return bool(getattr(client, "has_site_credentials", False))
+
     def _schedule_card_detail_warmup(self) -> bool:
         """Schedule one ordered card-cache pass without affecting sync UI."""
-        if not settings.MOODLE_WS_TOKEN:
+        if not self._has_detail_prefetch_credentials():
             return False
         with self._data_lock:
             activities = list(self.all_data)
@@ -3884,7 +4434,7 @@ class AppController:
 
     def _schedule_cached_detail_hydration(self, has_cached_snapshot: bool) -> bool:
         """Hydrate incomplete cached cards immediately without blocking startup."""
-        if not has_cached_snapshot or not settings.MOODLE_WS_TOKEN:
+        if not has_cached_snapshot or not self._has_detail_prefetch_credentials():
             return False
         with self._data_lock:
             cached_items = list(self.all_data)
@@ -4036,6 +4586,10 @@ class AppController:
         if not bridge or not bridge.available:
             return
         try:
+            if is_demo_account(settings.UTH_USERNAME):
+                await bridge.logout()
+                await bridge.configure("", token_origin="")
+                return True
             token, token_origin = self._native_background_credentials()
             await bridge.configure(token, token_origin=token_origin)
             native_data = await bridge.cached_activities()
@@ -4085,17 +4639,23 @@ class AppController:
         if self._is_loading:
             return
         if not self._has_sync_credentials():
+            self._restore_refresh_button()
             return
         account_epoch = getattr(self, "_account_epoch", 0)
+        sync_generation = getattr(self, "_sync_generation", 0)
         data_cache = self._data_cache
 
         def _epoch_is_current() -> bool:
-            return account_epoch == getattr(self, "_account_epoch", 0)
+            return (
+                account_epoch == getattr(self, "_account_epoch", 0)
+                and sync_generation == getattr(self, "_sync_generation", 0)
+            )
 
         sync_source = "user" if trigger == "manual" else "scheduler"
         self._diag_breadcrumb("refresh", "started", sync_source)
         self._is_loading = True
         self._active_sync_epoch = account_epoch
+        self._active_sync_generation = sync_generation
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         old_prefetch = getattr(self, "_prefetch_cancel_event", None)
         if old_prefetch is not None:
@@ -4170,6 +4730,9 @@ class AppController:
                 return
             if not outcome.can_commit:
                 raise RuntimeError(outcome.error or "Incomplete Moodle activity snapshot")
+            orch_ref = getattr(self, "orchestrator", None)
+            if orch_ref is not None and hasattr(orch_ref, "is_logged_in"):
+                orch_ref.is_logged_in = True
             result = list(outcome.activities or [])
 
             cache = self.orchestrator.get_cached_details_snapshot()
@@ -4229,19 +4792,28 @@ class AppController:
             self.page.update()
             if not _epoch_is_current():
                 return
+            demo_mode = is_demo_account(settings.UTH_USERNAME)
             native_schedule_result = None
             if self._android_background and self._android_background.available:
                 try:
-                    token, token_origin = self._native_background_credentials()
-                    await self._android_background.configure(
-                        token, token_origin=token_origin
-                    )
-                    if not _epoch_is_current():
-                        return
-                    native_schedule_result = await self._android_background.import_activities(
-                        data_copy,
-                        authoritative=True,
-                    )
+                    if demo_mode:
+                        await self._android_background.logout()
+                        if not _epoch_is_current():
+                            return
+                        await self._android_background.configure(
+                            "", token_origin=""
+                        )
+                    else:
+                        token, token_origin = self._native_background_credentials()
+                        await self._android_background.configure(
+                            token, token_origin=token_origin
+                        )
+                        if not _epoch_is_current():
+                            return
+                        native_schedule_result = await self._android_background.import_activities(
+                            data_copy,
+                            authoritative=True,
+                        )
                     if not _epoch_is_current():
                         return
                     self.orchestrator.android_background_diagnostics = (
@@ -4253,44 +4825,50 @@ class AppController:
                 return
             # Bắn thông báo thông minh cho người dùng
             if hasattr(self, 'notifier') and self.notifier:
-                try:
-                    with self._data_lock:
-                        dispatch_copy = list(self.all_data)
-                    if native_schedule_result is None:
-                        dispatch_result = await self.notifier.dispatch(dispatch_copy)
-                        if not _epoch_is_current():
-                            return
-                        schedule_result = await self.notifier.reconcile_schedules(
-                            dispatch_copy
-                        )
-                    else:
-                        from core.notification_types import ScheduleResult
+                if demo_mode:
+                    try:
+                        await self.notifier.reconcile_schedules([])
+                    except Exception as e:
+                        logger.debug("Demo schedule clear skipped: %s", e)
+                else:
+                    try:
+                        with self._data_lock:
+                            dispatch_copy = list(self.all_data)
+                        if native_schedule_result is None:
+                            dispatch_result = await self.notifier.dispatch(dispatch_copy)
+                            if not _epoch_is_current():
+                                return
+                            schedule_result = await self.notifier.reconcile_schedules(
+                                dispatch_copy
+                            )
+                        else:
+                            from core.notification_types import ScheduleResult
 
-                        dispatch_result = await self.notifier.dispatch_with_native_local(
-                            dispatch_copy,
-                            native_schedule_result,
+                            dispatch_result = await self.notifier.dispatch_with_native_local(
+                                dispatch_copy,
+                                native_schedule_result,
+                            )
+                            schedule_result = ScheduleResult(
+                                desired=int(native_schedule_result.get("scheduled", 0) or 0),
+                                scheduled=int(native_schedule_result.get("scheduled", 0) or 0),
+                                cancelled=int(native_schedule_result.get("cancelled", 0) or 0),
+                            )
+                        logger.info(
+                            "[Notifications] delivered=%d filtered=%d scheduled=%d "
+                            "cancelled=%d failed=%d",
+                            dispatch_result.delivered,
+                            dispatch_result.filtered,
+                            schedule_result.scheduled,
+                            schedule_result.cancelled,
+                            schedule_result.failed,
                         )
-                        schedule_result = ScheduleResult(
-                            desired=int(native_schedule_result.get("scheduled", 0) or 0),
-                            scheduled=int(native_schedule_result.get("scheduled", 0) or 0),
-                            cancelled=int(native_schedule_result.get("cancelled", 0) or 0),
-                        )
-                    logger.info(
-                        "[Notifications] delivered=%d filtered=%d scheduled=%d "
-                        "cancelled=%d failed=%d",
-                        dispatch_result.delivered,
-                        dispatch_result.filtered,
-                        schedule_result.scheduled,
-                        schedule_result.cancelled,
-                        schedule_result.failed,
-                    )
-                except Exception as e:
-                    logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
+                    except Exception as e:
+                        logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
-                if not _epoch_is_current():
-                    return
-                # PERF-OPT: Grade check moved to background task to not block main data display
-                self._safe_run_task(self._check_grades_background)
+                    if not _epoch_is_current():
+                        return
+                    # PERF-OPT: Grade check moved to background task to not block main data display
+                    self._safe_run_task(self._check_grades_background)
 
             if not _epoch_is_current():
                 return
@@ -4320,6 +4898,14 @@ class AppController:
         except Exception as exc:
             if not _epoch_is_current():
                 return
+            orch_ref = getattr(self, "orchestrator", None)
+            if (
+                not is_demo_account(settings.UTH_USERNAME)
+                and not str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
+                and orch_ref is not None
+                and hasattr(orch_ref, "is_logged_in")
+            ):
+                orch_ref.is_logged_in = False
             self._diag_breadcrumb("refresh", "failed", "moodle")
             logger.exception(f"[Load] Lỗi: {exc}")
             try:
@@ -4349,10 +4935,15 @@ class AppController:
                 self.error_state.visible = True
                 self._set_sync_status("error", "Lỗi kết nối server")
         finally:
-            if getattr(self, "_active_sync_epoch", None) == account_epoch:
+            if (
+                getattr(self, "_active_sync_epoch", None) == account_epoch
+                and getattr(self, "_active_sync_generation", sync_generation)
+                == sync_generation
+            ):
                 self.refresh_btn.disabled = False
-                self._is_loading          = False
-                self._active_sync_epoch   = None
+                self._is_loading = False
+                self._active_sync_epoch = None
+                self._active_sync_generation = None
                 self.page.update()
 
     async def _close_detail(self):
@@ -4430,9 +5021,14 @@ class AppController:
             or safe_http_url(mod.url)
             or (f"{origin}/mod/quiz/view.php?id={mod.cmid}" if mod.cmid else "")
         )
+        if url and _classify_uth_url(url) in {"courses", "thnn"}:
+            url = _normalize_uth_target_url(url, has_credentials=False)
         activity: dict = {}
         for item in self._snapshot_all_data():
-            if (url and item.get("url") == url) or (
+            item_url = str(item.get("url") or "")
+            if item_url and _classify_uth_url(item_url) in {"courses", "thnn"}:
+                item_url = _normalize_uth_target_url(item_url, has_credentials=False)
+            if (url and item_url == url) or (
                 mod.cmid
                 and item.get("cmid") == mod.cmid
                 and item.get("course_id") == course.id
@@ -4445,11 +5041,22 @@ class AppController:
         activity.setdefault("cmid", mod.cmid)
         activity["type"] = "quiz"
         activity["site_identity"] = course.source
-        if url:
-            activity["url"] = url
+        resolved_quiz_url = str(activity.get("url") or url or "")
+        if resolved_quiz_url and _classify_uth_url(resolved_quiz_url) in {
+            "courses",
+            "thnn",
+        }:
+            resolved_quiz_url = _normalize_uth_target_url(
+                resolved_quiz_url, has_credentials=False
+            )
+        if resolved_quiz_url:
+            activity["url"] = resolved_quiz_url
         return activity
 
     def _start_course_quiz(self, course: "CourseSummary", mod: "CourseModuleItem") -> None:
+        if is_demo_account(settings.UTH_USERNAME):
+            self._show_demo_lms_guard_snackbar()
+            return
         player_view = getattr(self, "quiz_player_view", None)
         activity = self._build_course_quiz_activity(course, mod)
         url = str(activity.get("url") or "")
@@ -4789,7 +5396,7 @@ class AppController:
             if not _is_current():
                 return
             self.view_manager.show_course_grades_data(courses)
-            if changes:
+            if changes and not is_demo_account(settings.UTH_USERNAME):
                 await self._notify_grade_changes(changes)
         except Exception as e:
             if not _is_current():
@@ -5269,7 +5876,7 @@ class AppController:
         sb = ft.SnackBar(
             content=ft.Row([
                 ft.Icon(icon, color=color, size=16),
-                ft.Text(msg, size=13, color=C.TEXT_PRIMARY),
+                ft.Text(msg, size=13, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8),
             bgcolor=C.SURFACE,
             duration=duration,
@@ -5665,6 +6272,14 @@ class AppController:
         if platform_utils.IS_WINDOWS:
             affirmative = "Cài đặt và thoát"
             content = "Ứng dụng sẽ đóng để cài bản cập nhật."
+        elif platform_utils.IS_ANDROID and getattr(
+            self, "_update_manual_download", False
+        ):
+            affirmative = "Mở trang tải APK"
+            content = (
+                "Bản cập nhật này đổi định danh gói ứng dụng nên cần tải và cài thủ công "
+                "một lần từ GitHub Releases. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
+            )
         elif platform_utils.IS_ANDROID:
             affirmative = "Mở trình cài đặt"
             content = "Mở trình cài đặt Android cho bản cập nhật đã tải?"
@@ -5676,12 +6291,14 @@ class AppController:
                 "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
             )
 
+        modal_token = _new_modal_occlusion_token()
+
         def cancel(_event):
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self.page.pop_dialog()
 
         def confirm(_event):
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self.page.pop_dialog()
             coordinator = getattr(self, "_update_coordinator", None)
             if coordinator is not None:
@@ -5703,9 +6320,11 @@ class AppController:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
             bgcolor=C.BG,
-            on_dismiss=lambda _e: _set_webview_occlusion("modal_dialog", False),
+            on_dismiss=lambda _e: _call_modal_occlusion(
+                "modal_dialog", False, token=modal_token
+            ),
         )
-        _set_webview_occlusion("modal_dialog", True)
+        _call_modal_occlusion("modal_dialog", True, token=modal_token)
         self.page.show_dialog(dialog)
 
 
@@ -5769,14 +6388,20 @@ class AppController:
                     token, token_origin=token_origin
                 )
                 needs_exact_alarm = (
-                    milestones_changed
-                    and any(
-                        int(value) <= 60
-                        for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
+                    not is_demo_account(settings.UTH_USERNAME)
+                    and (
+                        (
+                            milestones_changed
+                            and any(
+                                int(value) <= 60
+                                for value in (settings.NOTIFY_MILESTONES_MINUTES or [])
+                            )
+                        )
+                        or (
+                            class_schedule_settings_changed
+                            and bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED)
+                        )
                     )
-                ) or (
-                    class_schedule_settings_changed
-                    and bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED)
                 )
                 if needs_exact_alarm:
                     diagnostics = await self._android_background.diagnostics()
@@ -5801,8 +6426,25 @@ class AppController:
                 self._reconcile_class_schedule_notifications, schedule_snapshot
             )
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
-    def _on_activity_status_changed(self, url: str, new_status: str):
+    def _on_activity_status_changed(
+        self,
+        url: str,
+        new_status: str,
+        expected_account_epoch: int | None = None,
+    ):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
+        current_epoch = getattr(self, "_account_epoch", 0)
+        if (
+            expected_account_epoch is not None
+            and expected_account_epoch != current_epoch
+        ):
+            logger.info(
+                "Discarding stale activity status update for %s (epoch %s != %s)",
+                url,
+                expected_account_epoch,
+                current_epoch,
+            )
+            return
         new_status = normalize_submission_status(new_status)
         updated = False
         import time
@@ -5860,17 +6502,18 @@ class AppController:
 
             # A successful/manual submission must cancel every remaining local
             # deadline reminder immediately instead of waiting for the next sync.
-            mobile_bridge = getattr(self, "_android_background", None)
-            if mobile_bridge is not None and mobile_bridge.available:
-                self._safe_run_task(
-                    mobile_bridge.import_activities,
-                    data_copy,
-                    authoritative=True,
-                )
-            elif getattr(self, "notifier", None) is not None:
-                self._safe_run_task(
-                    self.notifier.reconcile_schedules, data_copy
-                )
+            if not is_demo_account(settings.UTH_USERNAME):
+                mobile_bridge = getattr(self, "_android_background", None)
+                if mobile_bridge is not None and mobile_bridge.available:
+                    self._safe_run_task(
+                        mobile_bridge.import_activities,
+                        data_copy,
+                        authoritative=True,
+                    )
+                elif getattr(self, "notifier", None) is not None:
+                    self._safe_run_task(
+                        self.notifier.reconcile_schedules, data_copy
+                    )
 
     def _show_detail(self, data: dict):
         self._dismiss_desktop_filter_menu()
@@ -6030,27 +6673,38 @@ class AppController:
             except Exception:
                 logger.warning("Countdown refresh failed", exc_info=True)
 
+    @staticmethod
+    def _run_shutdown_step(label: str, step) -> None:
+        try:
+            step()
+        except Exception:
+            logger.debug("Ignored shutdown step error (%s)", label, exc_info=True)
+
     def _prepare_async_shutdown(self) -> None:
         """Close asyncio coordinators and Flet UI hosts on the event loop thread."""
         page_alive = getattr(self, "_page_alive", None)
         if page_alive is not None:
-            page_alive.clear()
+            self._run_shutdown_step("page_alive.clear", page_alive.clear)
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         prefetch_cancel = getattr(self, "_prefetch_cancel_event", None)
         if prefetch_cancel is not None:
-            prefetch_cancel.set()
+            self._run_shutdown_step("prefetch_cancel.set", prefetch_cancel.set)
         detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
-            detail_warm_cancel.set()
+            self._run_shutdown_step("detail_warm_cancel.set", detail_warm_cancel.set)
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
-            coordinator.close()
+            self._run_shutdown_step("sync_coordinator.close", coordinator.close)
         schedule_coordinator = getattr(self, "_today_schedule_coordinator", None)
         if schedule_coordinator is not None:
-            schedule_coordinator.close()
+            self._run_shutdown_step(
+                "today_schedule_coordinator.close", schedule_coordinator.close
+            )
         close_wv = getattr(self, "_close_app_webview", None)
         if callable(close_wv):
-            close_wv(update_page=False)
+            self._run_shutdown_step(
+                "close_app_webview", lambda: close_wv(update_page=False)
+            )
 
     def _shutdown_for_exit(self) -> None:
         lock = getattr(self, "_exit_cleanup_lock", None)
@@ -6064,44 +6718,84 @@ class AppController:
 
         view_manager = getattr(self, "view_manager", None)
         if view_manager is not None:
-            view_manager.cancel_pending_settings_navigation()
+            cancel_nav = getattr(
+                view_manager, "cancel_pending_settings_navigation", None
+            )
+            if callable(cancel_nav):
+                self._run_shutdown_step(
+                    "view_manager.cancel_pending_settings_navigation", cancel_nav
+                )
         else:
             settings_view = getattr(self, "settings_view", None)
             cancel_load = getattr(settings_view, "cancel_pending_load", None)
             if callable(cancel_load):
-                cancel_load()
+                self._run_shutdown_step(
+                    "settings_view.cancel_pending_load", cancel_load
+                )
+
         activation_broker = getattr(self, "activation_broker", None)
         if activation_broker is not None:
-            activation_broker.close(timeout_seconds=1.0)
+            close_broker = getattr(activation_broker, "close", None)
+            if callable(close_broker):
+                self._run_shutdown_step(
+                    "activation_broker.close",
+                    lambda: close_broker(timeout_seconds=1.0),
+                )
+
         tray = getattr(self, "tray", None)
         if tray is not None:
-            tray.close(timeout_seconds=1.0)
+            close_tray = getattr(tray, "close", None)
+            if callable(close_tray):
+                self._run_shutdown_step(
+                    "tray.close", lambda: close_tray(timeout_seconds=1.0)
+                )
+
         page_alive = getattr(self, "_page_alive", None)
         if page_alive is not None:
-            page_alive.clear()
+            self._run_shutdown_step("page_alive.clear", page_alive.clear)
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         prefetch_cancel = getattr(self, "_prefetch_cancel_event", None)
         if prefetch_cancel is not None:
-            prefetch_cancel.set()
+            self._run_shutdown_step("prefetch_cancel.set", prefetch_cancel.set)
         detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
-            detail_warm_cancel.set()
+            self._run_shutdown_step("detail_warm_cancel.set", detail_warm_cancel.set)
+
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
-            coordinator.close()
+            close_sync = getattr(coordinator, "close", None)
+            if callable(close_sync):
+                self._run_shutdown_step("sync_coordinator.close", close_sync)
+
         schedule_coordinator = getattr(self, "_today_schedule_coordinator", None)
         if schedule_coordinator is not None:
-            schedule_coordinator.close()
+            close_sched = getattr(schedule_coordinator, "close", None)
+            if callable(close_sched):
+                self._run_shutdown_step(
+                    "today_schedule_coordinator.close", close_sched
+                )
+
         update_coordinator = getattr(self, "_update_coordinator", None)
         if update_coordinator is not None:
-            update_coordinator.shutdown(timeout_seconds=1.0)
-        self._close_app_webview(update_page=False)
+            shutdown_upd = getattr(update_coordinator, "shutdown", None)
+            if callable(shutdown_upd):
+                self._run_shutdown_step(
+                    "update_coordinator.shutdown",
+                    lambda: shutdown_upd(timeout_seconds=1.0),
+                )
+
+        close_wv = getattr(self, "_close_app_webview", None)
+        if callable(close_wv):
+            self._run_shutdown_step(
+                "close_app_webview", lambda: close_wv(update_page=False)
+            )
+
         courses_coord = getattr(self, "_courses_coordinator", None)
         if courses_coord is not None:
-            try:
-                courses_coord.close()
-            except Exception:
-                logger.debug("Ignored courses coordinator close error", exc_info=True)
+            close_courses = getattr(courses_coord, "close", None)
+            if callable(close_courses):
+                self._run_shutdown_step("courses_coordinator.close", close_courses)
+
         # Close NotificationManager & WindowsNotifier scheduler threads cleanly.
         seen_notifiers: set[int] = set()
         for notif_mgr in (
@@ -6113,28 +6807,18 @@ class AppController:
             seen_notifiers.add(id(notif_mgr))
             close_mgr = getattr(notif_mgr, "close", None)
             if callable(close_mgr):
-                try:
-                    close_mgr()
-                except Exception:
-                    logger.debug("Ignored notification manager close error", exc_info=True)
+                self._run_shutdown_step("notifier.close", close_mgr)
             for channel in getattr(notif_mgr, "notifiers", ()) or ():
                 close_ch = getattr(channel, "close", None)
                 if callable(close_ch):
-                    try:
-                        close_ch()
-                    except Exception:
-                        logger.debug("Ignored notifier channel close error", exc_info=True)
+                    self._run_shutdown_step("notifier_channel.close", close_ch)
+
         orchestrator = getattr(self, "orchestrator", None)
         for client_attr in ("client", "thnn_client"):
             client = getattr(orchestrator, client_attr, None)
             close_client = getattr(client, "close", None)
             if callable(close_client):
-                try:
-                    close_client()
-                except Exception:
-                    logger.debug(
-                        "Ignored orchestrator %s close error", client_attr, exc_info=True
-                    )
+                self._run_shutdown_step(f"orchestrator.{client_attr}.close", close_client)
 
     def _on_disconnect(self, e):
         self._shutdown_for_exit()

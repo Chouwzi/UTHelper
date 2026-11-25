@@ -8,9 +8,11 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import inspect
 import logging
 from dataclasses import replace
 from urllib.parse import urlsplit
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
 from gui.core.theme import (
     C,
@@ -27,7 +29,11 @@ import platform_utils as _pu  # live runtime capability and UI-profile detection
 from gui.components.color_picker import open_color_picker
 
 # Import settings section helpers
-from gui.components.settings.account_section import init_account_controls, build_account_section
+from gui.components.settings.account_section import (
+    build_account_section,
+    init_account_controls,
+    refresh_demo_account_banner,
+)
 from gui.components.settings.display_section import init_display_controls, build_display_section
 from gui.components.settings.system_section import init_system_controls, build_system_section
 from gui.components.settings.privacy_section import init_privacy_controls, build_privacy_section
@@ -1257,6 +1263,7 @@ class SettingsView(ft.Container):
         if hasattr(self, '_test_loading_bar'):
             self._test_loading_bar.color = C.ACCENT
             self._test_loading_bar.bgcolor = C.SURFACE
+        refresh_demo_account_banner(self)
 
         # Reset button
         if hasattr(self, 'btn_reset'):
@@ -1583,18 +1590,21 @@ class SettingsView(ft.Container):
         self.update()
 
     async def _handle_test_login(self, e):
-        import inspect
-
-        user = self._username_field.value.strip()
-        pwd = self._password_field.value.strip()
-        if not user or not pwd:
+        raw_user = self._username_field.value or ""
+        user = (
+            normalize_demo_username(raw_user)
+            if is_demo_account(raw_user)
+            else raw_user.strip()
+        )
+        pwd = self._password_field.value or ""
+        if not user or not pwd.strip():
             self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
             if hasattr(self, "_test_login_status_icon"):
                 self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
                 self._test_login_status_icon.color = C.CRITICAL
                 self._test_login_status_icon.visible = True
-            self.update()
+            self._safe_update(self)
             return
 
         self._test_login_btn.disabled = True
@@ -1608,7 +1618,7 @@ class SettingsView(ft.Container):
         self._test_login_status.value = ""
         if hasattr(self, "_test_login_status_icon"):
             self._test_login_status_icon.visible = False
-        self.update()
+        self._safe_update(self)
 
         try:
             login_fn = self._orchestrator.client.login
@@ -1639,23 +1649,36 @@ class SettingsView(ft.Container):
                 )
 
             if success:
+                self._username_field.value = user
+                self._password_field.value = pwd
                 if self._baseline_snapshot is not None:
                     self._baseline_snapshot = replace(
                         self._baseline_snapshot,
                         uth_username=user,
                         uth_password=pwd,
                     )
+                refresh_demo_account_banner(self, user)
                 account_cb = getattr(self, "on_account_login", None)
                 if callable(account_cb):
                     cb_res = account_cb(user, pwd)
                     if inspect.isawaitable(cb_res):
                         await cb_res
                 else:
-                    if supports_persist:
-                        settings.UTH_USERNAME = user
-                        settings.UTH_PASSWORD = pwd
+                    settings.UTH_USERNAME = user
+                    settings.UTH_PASSWORD = pwd
+                    if is_demo_account(user):
+                        settings.MOODLE_WS_TOKEN = ""
+                        settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                    elif supports_persist:
                         settings.UTH_CREDENTIALS_ORIGIN = ""
-                        await asyncio.to_thread(save_settings)
+                    has_persisted_auth = (
+                        is_demo_account(user)
+                        or not supports_persist
+                        or bool(str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip())
+                    )
+                    if self._orchestrator is not None:
+                        self._orchestrator.is_logged_in = has_persisted_auth
+                    await asyncio.to_thread(save_settings)
                     legacy_cb = getattr(self, "on_save", None) or getattr(
                         self, "_on_saved", None
                     )
@@ -1663,8 +1686,14 @@ class SettingsView(ft.Container):
                         cb_res = legacy_cb()
                         if inspect.isawaitable(cb_res):
                             await cb_res
+                    if self._orchestrator is not None and has_persisted_auth:
+                        self._orchestrator.is_logged_in = True
                 if hasattr(self, "_unsaved_dot"):
                     self._unsaved_dot.visible = self.has_changes()
+                if hasattr(self, "_update_save_button_state") and callable(
+                    getattr(self, "_update_save_button_state")
+                ):
+                    self._update_save_button_state()
                 self._test_login_status.value = "Đã kết nối với hệ thống UTH"
                 self._test_login_status.color = C.SAFE
                 if hasattr(self, "_test_login_status_icon"):
@@ -1694,11 +1723,9 @@ class SettingsView(ft.Container):
             self._test_login_btn.text = "Kiểm tra kết nối"
             self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
             self._test_loading_bar.visible = False
-            self.update()
+            self._safe_update(self)
 
     async def _handle_logout(self, _e=None):
-        import inspect
-
         if hasattr(self, "_logout_btn"):
             self._logout_btn.disabled = True
         self._test_login_btn.disabled = True
@@ -1711,6 +1738,7 @@ class SettingsView(ft.Container):
                     uth_username="",
                     uth_password="",
                 )
+            refresh_demo_account_banner(self, "")
             logout_cb = getattr(self, "on_logout", None)
             if callable(logout_cb):
                 cb_res = logout_cb()
@@ -1756,7 +1784,7 @@ class SettingsView(ft.Container):
             if hasattr(self, "_logout_btn"):
                 self._logout_btn.disabled = False
             self._test_login_btn.disabled = False
-            self.update()
+            self._safe_update(self)
 
     def _marshal_ui(self, fn):
         """Marshal worker-thread control mutations onto the Flet event loop when active."""
@@ -1828,15 +1856,34 @@ class SettingsView(ft.Container):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mobile') and self._on_test_mobile: self._on_test_mobile(t)
 
+    def _block_external_test_in_demo_mode(self) -> bool:
+        if not is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return False
+        debug_text = getattr(self, "_debug_info_text", None)
+        if debug_text is not None:
+            debug_text.value = (
+                "Phiên xem thử (Demo) đang hoạt động ngoại tuyến (Sandbox) · "
+                "Không gửi thông báo thử nghiệm ra kênh ngoài."
+            )
+            debug_text.color = C.WARNING
+            self._safe_update(debug_text)
+        return True
+
     def _do_test_tele(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_tele') and self._on_test_tele: self._on_test_tele(t)
 
     def _do_test_discord(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_discord') and self._on_test_discord: self._on_test_discord(t)
 
     def _do_test_mail(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mail') and self._on_test_mail: self._on_test_mail(t)
 
@@ -1894,18 +1941,35 @@ class SettingsView(ft.Container):
 
     def _do_test_moodle_connection(self):
         """Quick Moodle API connectivity test."""
+        if is_demo_account(settings.UTH_USERNAME):
+            self._debug_info_text.value = (
+                "Phiên xem thử (Demo) đang hoạt động ngoại tuyến (Sandbox) · "
+                "Không gửi yêu cầu mạng tới máy chủ Moodle."
+            )
+            self._debug_info_text.color = C.SAFE
+            self._safe_update(self._debug_info_text)
+            return
         import threading
         self._debug_info_text.value = "Đang kiểm tra kết nối Moodle..."
         self._debug_info_text.color = C.TEXT_SECONDARY
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
         def _worker():
             try:
                 ok = self._orchestrator.client.login(force=True)
                 if ok:
-                    token = self._orchestrator.client.token or "?"
+                    token = (
+                        getattr(self._orchestrator.client, "token", None)
+                        or settings.MOODLE_WS_TOKEN
+                        or "?"
+                    )
                     masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
-                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {self._orchestrator.client.user_id}"
+                    uid = (
+                        getattr(self._orchestrator.client, "user_id", None)
+                        or getattr(self._orchestrator, "_userid_cache", None)
+                        or "?"
+                    )
+                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {uid}"
                     color = C.SAFE
                 else:
                     result = "Đăng nhập Moodle thất bại!"
@@ -2349,6 +2413,8 @@ class SettingsView(ft.Container):
     # Broadcast all channels
     def _do_test_broadcast(self):
         """Send mock notification to ALL registered channels simultaneously."""
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         sent = []
         if self._on_test_tray and not _pu.IS_MOBILE:
@@ -2373,15 +2439,23 @@ class SettingsView(ft.Container):
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         self._debug_info_text.value = f"Broadcast [{t}] tới: {', '.join(sent) or 'Không có kênh nào'}"
         self._debug_info_text.color = C.SAFE if sent else C.WARNING
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
     # Network latency test
     def _do_test_latency(self):
         """Ping Moodle server and measure response time."""
+        if is_demo_account(settings.UTH_USERNAME):
+            self._debug_info_text.value = (
+                "Phiên xem thử (Demo) sử dụng dữ liệu mẫu ngoại tuyến · "
+                "Bỏ qua ping máy chủ Moodle."
+            )
+            self._debug_info_text.color = C.SAFE
+            self._safe_update(self._debug_info_text)
+            return
         import threading
         self._debug_info_text.value = "Đang ping Moodle..."
         self._debug_info_text.color = C.TEXT_SECONDARY
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
         def _ping():
             import time, urllib.request
@@ -2680,6 +2754,12 @@ class SettingsView(ft.Container):
 
     def _capture_form_snapshot(self) -> SettingsFormSnapshot:
         """Map controls to the canonical form model in exactly one place."""
+        raw_username = self._username_field.value
+        normalized_username = (
+            normalize_demo_username(raw_username)
+            if is_demo_account(raw_username)
+            else raw_username
+        )
         return SettingsFormSnapshot.from_form_values(
             {
                 "theme": self._selected_theme,
@@ -2691,7 +2771,7 @@ class SettingsView(ft.Container):
                 "color_attendance": self._c_tb_att.value,
                 "color_open": self._c_tb_open.value,
                 "color_other": self._c_tb_other.value,
-                "uth_username": self._username_field.value,
+                "uth_username": normalized_username,
                 "uth_password": self._password_field.value,
                 "always_on_top": self._sw_always_on_top.value,
                 "include_submitted": self._sw_submitted.value,
@@ -2747,6 +2827,7 @@ class SettingsView(ft.Container):
         SettingsView._sync_color_swatch_boxes(self)
         self._username_field.value = snapshot.uth_username
         self._password_field.value = snapshot.uth_password
+        refresh_demo_account_banner(self, snapshot.uth_username)
         self._sw_always_on_top.value = snapshot.always_on_top
         self._sw_submitted.value = snapshot.include_submitted
         self._sw_graded.value = snapshot.include_graded
