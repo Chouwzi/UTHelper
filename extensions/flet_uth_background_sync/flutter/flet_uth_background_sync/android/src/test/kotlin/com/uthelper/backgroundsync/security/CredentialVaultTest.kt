@@ -15,6 +15,8 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
 import java.io.IOException
+import java.security.KeyStoreException
+import java.security.UnrecoverableKeyException
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import javax.crypto.KeyGenerator
@@ -172,5 +174,76 @@ class CredentialVaultTest {
             ?.filter { it.name.endsWith(".tmp") }
             .orEmpty()
         assertTrue(leftovers.isEmpty())
+    }
+
+    @Test
+    fun appSecretVaultEvictsCorruptedKeystoreAliasOnGeneralSecurityExceptionAndSurvivesDeleteKeyFailure() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val deletedAliases = mutableListOf<String>()
+        var corruptedAlias: String? = null
+        var throwOnDelete = false
+
+        val keyProvider = object : VaultKeyProvider {
+            private val keys = linkedMapOf<String, SecretKey>()
+
+            override fun getExistingKey(alias: String): SecretKey? {
+                if (alias == corruptedAlias) {
+                    throw UnrecoverableKeyException("Hardware AndroidKeyStore alias invalidated")
+                }
+                return keys[alias]
+            }
+
+            override fun getOrCreateKey(alias: String): SecretKey {
+                getExistingKey(alias)?.let { return it }
+                return KeyGenerator.getInstance("AES").apply { init(256) }.generateKey().also {
+                    keys[alias] = it
+                }
+            }
+
+            override fun deleteKey(alias: String) {
+                deletedAliases.add(alias)
+                if (throwOnDelete) {
+                    throw KeyStoreException("KeyStore deleteEntry failed")
+                }
+                if (corruptedAlias == alias) {
+                    corruptedAlias = null
+                }
+                keys.remove(alias)
+            }
+        }
+
+        val vault = AppSecretVault(context, keyProvider)
+        vault.clear()
+        deletedAliases.clear()
+
+        vault.writeAll(mapOf("UTH_PASSWORD" to "before-corruption"))
+        assertEquals(mapOf("UTH_PASSWORD" to "before-corruption"), vault.readAll())
+
+        // 1. Hardware AndroidKeyStore invalidates alias -> readAll() must delete file AND evict alias
+        //    so the very next writeAll() -> getOrCreateKey() recovers cleanly instead of failing.
+        val secretsFile = File(context.noBackupFilesDir, "uth_app_secrets.json")
+        assertTrue(secretsFile.exists())
+        corruptedAlias = "uthelper_app_secrets_v1"
+
+        assertEquals(emptyMap<String, String>(), vault.readAll())
+        assertFalse(secretsFile.exists())
+        assertEquals(listOf("uthelper_app_secrets_v1"), deletedAliases)
+
+        vault.writeAll(mapOf("UTH_PASSWORD" to "recovered-after-eviction"))
+        assertEquals(mapOf("UTH_PASSWORD" to "recovered-after-eviction"), vault.readAll())
+
+        // 2. Even if deleteKey() itself throws KeyStoreException during AEAD/GeneralSecurityException
+        //    recovery, readAll() must remain exception-safe and fail closed with emptyMap().
+        deletedAliases.clear()
+        throwOnDelete = true
+        val tampered = JSONObject(secretsFile.readText()).put("ciphertext", "AAAA")
+        secretsFile.writeText(tampered.toString())
+
+        assertEquals(emptyMap<String, String>(), vault.readAll())
+        assertFalse(secretsFile.exists())
+        assertEquals(listOf("uthelper_app_secrets_v1"), deletedAliases)
+
+        throwOnDelete = false
+        vault.clear()
     }
 }

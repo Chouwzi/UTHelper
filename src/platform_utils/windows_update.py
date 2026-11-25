@@ -910,6 +910,10 @@ if ($ExpectedConfigSha256) {
   }
 }
 $config = [System.Text.Encoding]::UTF8.GetString($cfgBytes) | ConvertFrom-Json
+$handoffOwnerSid = $null
+try {
+  $handoffOwnerSid = (Get-Acl -LiteralPath $ConfigPath).GetOwner([System.Security.Principal.SecurityIdentifier])
+} catch {}
 $exitCode = 1
 $stageDir = $null
 $statusParent = $null
@@ -1073,11 +1077,45 @@ try {
       ($resolvedStatusDir.Equals($resolvedStatusParent, [System.StringComparison]::OrdinalIgnoreCase)) -and
       ($statusFileName -match '^handoff-[0-9a-f]+\.status\.json$')
     ) {
+      $staleCutoff = (Get-Date).ToUniversalTime().AddMinutes(-15)
+      Get-ChildItem -LiteralPath $resolvedStatusParent -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if (
+          ($_.Name -ne $statusFileName) -and
+          ($_.Name -match '^handoff-[0-9a-f]+\.status\.json(\.tmp)?$') -and
+          (-not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -and
+          ($_.LastWriteTimeUtc -lt $staleCutoff)
+        ) {
+          Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+      }
       $safeStatusPath = Join-Path $resolvedStatusParent $statusFileName
       $statusTmp = Join-Path $resolvedStatusParent ($statusFileName + '.tmp')
       $statusJson = @{ exit_code = $exitCode } | ConvertTo-Json -Compress
       $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
       [System.IO.File]::WriteAllText($statusTmp, $statusJson, $utf8NoBom)
+      if ($handoffOwnerSid) {
+        try {
+          $statusFileAcl = New-Object System.Security.AccessControl.FileSecurity
+          $statusFileAcl.SetOwner($adminOwnerSid)
+          $statusFileAcl.SetAccessRuleProtection($true, $false)
+          foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+            $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+            $statusFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+              $sid,
+              [System.Security.AccessControl.FileSystemRights]::FullControl,
+              [System.Security.AccessControl.AccessControlType]::Allow
+            )))
+          }
+          if ($trustedOwnerSids -notcontains $handoffOwnerSid.Value) {
+            $statusFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+              $handoffOwnerSid,
+              [System.Security.AccessControl.FileSystemRights]'Read, Synchronize, Delete',
+              [System.Security.AccessControl.AccessControlType]::Allow
+            )))
+          }
+          [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
+        } catch {}
+      }
       Move-Item -LiteralPath $statusTmp -Destination $safeStatusPath -Force
     }
   }
@@ -1096,8 +1134,13 @@ $exitCode = -1
 while ((Get-Date) -lt $deadline) {
   if ($statusPath -and (Test-Path -LiteralPath $statusPath)) {
     try {
-      $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      $statusItem = Get-Item -LiteralPath $statusPath -Force -ErrorAction Stop
+      if ($statusItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { break }
+      $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
       $exitCode = [int]$status.exit_code
+      if ($statusItem.Name -match '^handoff-[0-9a-f]+\.status\.json$') {
+        try { [System.IO.File]::Delete($statusItem.FullName) } catch {}
+      }
       break
     } catch {}
   }
@@ -1134,7 +1177,59 @@ if ($exitCode -eq 0 -or $exitCode -eq 3010) {
 Set-Location -LiteralPath $env:TEMP
 $handoffDir = [string]$config.handoff_dir
 if ($handoffDir -and (Test-Path -LiteralPath $handoffDir)) {
-  Remove-Item -LiteralPath $handoffDir -Recurse -Force -ErrorAction SilentlyContinue
+  $dirItem = Get-Item -LiteralPath $handoffDir -Force -ErrorAction SilentlyContinue
+  if (
+    $dirItem -and
+    $dirItem.PSIsContainer -and
+    ($dirItem.Name -match '^handoff-[0-9a-f]+$') -and
+    (-not ($dirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -and
+    $dirItem.Parent -and
+    ($dirItem.Parent.Name -eq 'update_handoff') -and
+    (-not ($dirItem.Parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+  ) {
+    try {
+      $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $dirRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentSid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow
+      )
+      $fileRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentSid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+      )
+      $children = @(Get-ChildItem -LiteralPath $dirItem.FullName -Force -ErrorAction SilentlyContinue)
+      $hasReparseChild = $false
+      foreach ($child in $children) {
+        if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+          $hasReparseChild = $true
+          break
+        }
+      }
+      if (-not $hasReparseChild) {
+        $dirAcl = [System.IO.Directory]::GetAccessControl(
+          $dirItem.FullName,
+          [System.Security.AccessControl.AccessControlSections]::Access
+        )
+        $dirAcl.SetAccessRule($dirRule)
+        [System.IO.Directory]::SetAccessControl($dirItem.FullName, $dirAcl)
+        foreach ($child in $children) {
+          if (-not $child.PSIsContainer) {
+            $childAcl = [System.IO.File]::GetAccessControl(
+              $child.FullName,
+              [System.Security.AccessControl.AccessControlSections]::Access
+            )
+            $childAcl.SetAccessRule($fileRule)
+            [System.IO.File]::SetAccessControl($child.FullName, $childAcl)
+          }
+        }
+        Remove-Item -LiteralPath $dirItem.FullName -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 """
 
