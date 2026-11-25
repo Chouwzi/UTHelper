@@ -489,7 +489,9 @@ class TodayScheduleCoordinator:
 
     def _signal_wake(self) -> None:
         loop = self._loop
-        if loop is not None and not loop.is_closed():
+        if loop is not None:
+            if loop.is_closed():
+                return
             try:
                 running = asyncio.get_running_loop()
             except RuntimeError:
@@ -497,10 +499,13 @@ class TodayScheduleCoordinator:
             if running is not loop:
                 try:
                     loop.call_soon_threadsafe(self._wake_event.set)
-                    return
                 except RuntimeError:
                     pass
-        self._wake_event.set()
+                return
+        try:
+            self._wake_event.set()
+        except RuntimeError:
+            pass
 
     def _publish(self, state: TodayScheduleViewState) -> None:
         self.state = state

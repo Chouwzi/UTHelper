@@ -399,7 +399,7 @@ class UpdateCoordinator:
             has_pending_download = getattr(
                 self._downloader, "has_pending_download", None
             )
-            if callable(has_pending_download):
+            if candidate.automatic_install_allowed and callable(has_pending_download):
                 try:
                     pending = bool(has_pending_download(candidate.package))
                 except Exception:
@@ -477,6 +477,33 @@ class UpdateCoordinator:
                 self._ready_external_url = store_url
             self._finish_download()
             self._emit(UpdateEventKind.READY_TO_INSTALL, candidate=candidate)
+            return
+
+        if (
+            not candidate.automatic_install_allowed
+            and candidate.manifest.schema_version == 3
+            and candidate.package.platform == "android"
+        ):
+            expected_url = (
+                "https://github.com/Chouwzi/UTHelper/releases/tag/"
+                f"v{candidate.manifest.release_version}"
+            )
+            release_url = candidate.manifest.release_notes_url
+            if release_url != expected_url:
+                self._finish_download()
+                self._emit(
+                    UpdateEventKind.FAILED,
+                    candidate=candidate,
+                    message="invalid manual release page",
+                )
+                return
+            with self._lock:
+                self._ready_external_url = release_url
+            self._finish_download()
+            self._emit(
+                UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
+                candidate=candidate,
+            )
             return
 
         self._emit(UpdateEventKind.DOWNLOADING, candidate=candidate, progress=0.0)

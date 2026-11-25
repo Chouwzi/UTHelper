@@ -62,7 +62,7 @@ _REQUIRED_NOTIFICATION_RECEIVERS = (
 
 _CLEAN_CHPLAY_MANIFEST_XML = """<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.uthelper.uthelper"
+    package="io.github.chouwzi.uthelper"
     android:versionCode="2005001"
     android:versionName="2.5.1">
   <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35" />

@@ -17,10 +17,33 @@ from core.academic_radar.models import (
     SemesterGradeData,
 )
 from core.academic_radar.normalizer import SemesterNormalizer
-from core.portal_client import PortalClient
+from core.demo_sandbox import is_demo_account, normalize_demo_username
+from core.portal_client import PortalAuthenticationError, PortalClient
 from core.safe_file_io import SafeFileIO
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_credentials(
+    username: str | None = "", password: str | None = None
+) -> tuple[str, str]:
+    if username is not None and username != "" and not username.strip():
+        return "", ""
+    explicit_username = bool(username and username.strip())
+    stored_user = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+    resolved_user = username.strip() if explicit_username and username is not None else stored_user
+    if not explicit_username and (password is None or password == ""):
+        resolved_pwd = str(getattr(settings, "UTH_PASSWORD", "") or "")
+    elif password is None:
+        active_norm = normalize_demo_username(stored_user).casefold()
+        target_norm = normalize_demo_username(resolved_user).casefold()
+        if active_norm and target_norm == active_norm:
+            resolved_pwd = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        else:
+            resolved_pwd = ""
+    else:
+        resolved_pwd = str(password)
+    return resolved_user, resolved_pwd
 
 
 def _safe_moodle_float(val: Any) -> float | None:
@@ -40,7 +63,7 @@ def _safe_moodle_float(val: Any) -> float | None:
 
 def _namespace_digest(username: str) -> str:
     base = str(getattr(settings, "PORTAL_API_BASE", "") or "").strip()
-    owner = username.strip() or "anonymous"
+    owner = normalize_demo_username(username) or "anonymous"
     return hashlib.sha256(f"{base}|{owner}".casefold().encode("utf-8")).hexdigest()[:12]
 
 
@@ -102,15 +125,27 @@ class AcademicGradeService:
     def load_academic_data(
         self,
         username: str = "",
-        password: str = "",
+        password: str | None = None,
         force_refresh: bool = False,
     ) -> list[SemesterGradeData]:
         """Loads all semesters.
 
         Uses daily cache if available (fetched once per day) unless force_refresh is True.
         """
-        username = str(username or getattr(settings, "UTH_USERNAME", "") or "").strip()
-        password = str(password or getattr(settings, "UTH_PASSWORD", "") or "")
+        username, password = _resolve_credentials(username, password)
+
+        if is_demo_account(username):
+            raw_transcript = self._portal_client.fetch_full_transcript(
+                username, password
+            )
+            return (
+                self._normalizer.normalize_transcript(raw_transcript)
+                if raw_transcript
+                else []
+            )
+
+        if not username or not password:
+            return []
 
         today_str = date.today().isoformat()
         cache = self._read_cache(username)
@@ -121,17 +156,18 @@ class AcademicGradeService:
                 logger.info("Using cached academic transcript for today (%s)", today_str)
                 return self._normalizer.normalize_transcript(transcript)
 
-        # Fetch from Portal if credentials are provided
-        if username and password:
-            try:
-                logger.info("Fetching full academic transcript from Portal...")
-                raw_transcript = self._portal_client.fetch_full_transcript(username, password)
-                if raw_transcript:
-                    logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
-                    self._write_cache(raw_transcript, username)
-                    return self._normalizer.normalize_transcript(raw_transcript)
-            except Exception as exc:
-                logger.warning("Portal academic fetch failed: %s; checking stale cache", exc)
+        try:
+            logger.info("Fetching full academic transcript from Portal...")
+            raw_transcript = self._portal_client.fetch_full_transcript(username, password)
+            if raw_transcript:
+                logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
+                self._write_cache(raw_transcript, username)
+                return self._normalizer.normalize_transcript(raw_transcript)
+        except PortalAuthenticationError:
+            self.clear_session()
+            raise
+        except Exception as exc:
+            logger.warning("Portal academic fetch failed: %s; checking stale cache", exc)
 
         # Fallback to stale cache if network failed
         if cache and isinstance(cache.get("transcript"), list):
@@ -143,12 +179,19 @@ class AcademicGradeService:
     def load_credit_progress(
         self,
         username: str = "",
-        password: str = "",
+        password: str | None = None,
         force_refresh: bool = False,
     ) -> CreditProgress | None:
         """Loads graduation credit progress (canDat/hienTai); daily cache, stale fallback."""
-        username = str(username or getattr(settings, "UTH_USERNAME", "") or "").strip()
-        password = str(password or getattr(settings, "UTH_PASSWORD", "") or "")
+        username, password = _resolve_credentials(username, password)
+
+        if is_demo_account(username):
+            body = self._portal_client.fetch_credit_progress(username, password)
+            return parse_credit_progress(body)
+
+        if not username or not password:
+            return None
+
         _, progress_cache_file = self._cache_paths(username)
 
         cache: dict[str, Any] | None = None
@@ -164,22 +207,24 @@ class AcademicGradeService:
             if progress:
                 return progress
 
-        if username and password:
-            try:
-                body = self._portal_client.fetch_credit_progress(username, password)
-                progress = parse_credit_progress(body)
-                if progress:
-                    try:
-                        self._cache_dir.mkdir(parents=True, exist_ok=True)
-                        SafeFileIO.write_json_atomic(
-                            progress_cache_file,
-                            {"cached_date": date.today().isoformat(), "body": body},
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to write credit progress cache: %s", exc)
-                    return progress
-            except Exception as exc:
-                logger.warning("Portal credit progress fetch failed: %s", exc)
+        try:
+            body = self._portal_client.fetch_credit_progress(username, password)
+            progress = parse_credit_progress(body)
+            if progress:
+                try:
+                    self._cache_dir.mkdir(parents=True, exist_ok=True)
+                    SafeFileIO.write_json_atomic(
+                        progress_cache_file,
+                        {"cached_date": date.today().isoformat(), "body": body},
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to write credit progress cache: %s", exc)
+                return progress
+        except PortalAuthenticationError:
+            self.clear_session()
+            raise
+        except Exception as exc:
+            logger.warning("Portal credit progress fetch failed: %s", exc)
 
         if cache:
             return parse_credit_progress(cache.get("body"))

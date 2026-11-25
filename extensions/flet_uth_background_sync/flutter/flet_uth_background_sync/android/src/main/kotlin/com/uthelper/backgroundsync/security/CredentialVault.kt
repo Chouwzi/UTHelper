@@ -170,8 +170,10 @@ class AppSecretVault internal constructor(
         } catch (ioError: IOException) {
             throw ioError
         } catch (_: GeneralSecurityException) {
-            // Permanent keystore invalidation or AEAD tag mismatch: fail closed and drop corrupt blob.
+            // Permanent keystore invalidation or AEAD tag mismatch: fail closed, drop corrupt blob,
+            // and evict the potentially corrupted AndroidKeyStore key alias before next getOrCreateKey().
             secretsFile.delete()
+            runCatching { keyProvider.deleteKey(KEY_ALIAS) }
             emptyMap()
         } catch (_: JSONException) {
             secretsFile.delete()
