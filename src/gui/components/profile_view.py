@@ -628,7 +628,7 @@ class ProfileView(ft.Container):
                 fit=ft.BoxFit.COVER,
                 border_radius=12,
                 anti_alias=True,
-                semantics_label="Trường Đại học Công nghệ Tp. Hồ Chí Minh",
+                semantics_label="Trường Đại học Giao thông Vận tải TP. Hồ Chí Minh",
             ),
             border_radius=12,
         )
@@ -655,8 +655,14 @@ class ProfileView(ft.Container):
                     tight=True,
                     expand=True,
                 ),
-                # Mockup: a thin vertical rule separates the two columns.
-                ft.VerticalDivider(width=1, thickness=1, color=C.BORDER),
+                # Keep an explicit height and stronger contrast so the center
+                # rule remains visible across desktop themes.
+                ft.Container(
+                    width=1,
+                    height=128,
+                    bgcolor=C.BORDER_STRONG,
+                    margin=ft.Margin.symmetric(horizontal=12),
+                ),
                 ft.Column(
                     controls=[_info_row(*item) for item in right_items],
                     spacing=9,

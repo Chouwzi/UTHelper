@@ -450,8 +450,10 @@ def test_profile_view_desktop_card_matches_mockup_layout():
     info_grid = card.content.controls[1]
     assert len(info_grid.controls) == 3
     divider = info_grid.controls[1]
-    assert isinstance(divider, ft.VerticalDivider)
-    assert divider.thickness == 1
+    assert isinstance(divider, ft.Container)
+    assert divider.width == 1
+    assert divider.height == 128
+    assert divider.bgcolor == C.BORDER_STRONG
     assert len(info_grid.controls[0].controls) == 4
     assert len(info_grid.controls[2].controls) == 5
     assert info_grid.controls[0].controls[0].controls[1].value == "Khoa:"
