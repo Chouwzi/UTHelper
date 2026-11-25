@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import config
+import flet as ft
 from core.student_profile import (
     ProfileSnapshot,
     parse_other_fee_rows,
@@ -306,9 +307,13 @@ def test_profile_view_semester_pills_cover_every_semester_with_status_tooltip():
     assert "Còn nợ" in pills[0].tooltip
     assert "HK1" in labels[1]
     assert "Đã đóng" in pills[1].tooltip
-    # Kỳ mới nhất (còn nợ) đang được chọn -> pill đầu tiên tô đặc màu trạng thái.
-    assert pills[0].bgcolor == C.CRITICAL
-    assert pills[1].bgcolor != C.CRITICAL
+    # Kỳ mới nhất (đang chọn) dùng màu badge "Đại học - chính quy": nền xanh
+    # nhạt + chữ xanh dương (không còn tô đặc như trước); các pill còn lại
+    # là nền surface viền nhạt (trạng thái nằm trong tooltip).
+    assert pills[0].bgcolor == ft.Colors.with_opacity(0.12, C.ACCENT)
+    assert pills[0].content.color == C.ACCENT
+    assert pills[1].bgcolor == C.SURFACE
+    assert pills[1].border is not None
 
 
 def test_profile_view_theme_refresh_does_not_crash():
@@ -413,6 +418,139 @@ def test_profile_view_mobile_detail_sheet_is_skipped_without_a_page(monkeypatch)
 
     view._open_fee_detail(view._snapshot.tuition_rows[0])
     assert view._detail_sheet is None
+
+
+# ---------------------------------------------------------------------------
+# 3c. Mockup-faithful redesign (desktop card + phone layout)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_view_desktop_card_matches_mockup_layout():
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+
+    # Big page title + subtitle underneath (desktop mockup header).
+    assert view._title.size == 22
+    assert "tình trạng đóng học phí" in view._subtitle.value
+
+    card = view._data_host.controls[0]
+    # Identity row: avatar · name/MSSV/badge · UTH campus photo in the corner.
+    identity = card.content.controls[0]
+    campus_image = identity.controls[2].content
+    assert campus_image.src.startswith("data:image/jpeg;base64,")
+    name_block = identity.controls[1]
+    assert name_block.controls[0].value == "Nguyễn Văn A"
+    assert name_block.controls[1].value == "MSSV: SV001"
+    # "Hệ đào tạo" is the blue badge under the MSSV line.
+    badge = name_block.controls[2]
+    assert badge.content.controls[1].value == "Chưa rõ hệ đào tạo"
+
+    # 2-column info grid split by a thin vertical rule: 4 rows on the left,
+    # the divider in the middle, 5 rows on the right.
+    info_grid = card.content.controls[1]
+    assert len(info_grid.controls) == 3
+    divider = info_grid.controls[1]
+    assert isinstance(divider, ft.VerticalDivider)
+    assert divider.thickness == 1
+    assert len(info_grid.controls[0].controls) == 4
+    assert len(info_grid.controls[2].controls) == 5
+    assert info_grid.controls[0].controls[0].controls[1].value == "Khoa:"
+    assert info_grid.controls[2].controls[4].controls[1].value == "Email:"
+
+    # Active tab uses the same light-blue badge look as the selected pill.
+    assert view._tab_tuition.bgcolor == ft.Colors.with_opacity(0.12, C.ACCENT)
+    assert view._tab_tuition.content.controls[1].color == C.ACCENT
+
+    # Four summary tiles of identical height — the status tile included.
+    tiles = view._data_host.controls[1].controls
+    assert len(tiles) == 4
+    assert len({tile.height for tile in tiles}) == 1
+
+
+def test_profile_view_mobile_footer_and_info_toggle(monkeypatch):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+
+    # Sticky "Tổng:" bar under the cards, filtered by semester + tab.
+    assert view._footer.visible is True
+    assert view._footer_text.value == format_vnd(4500000)
+    # Mockup: light-blue band; red while the selected semester owes money…
+    assert view._footer_text.color == C.CRITICAL
+    # …and green once everything is paid.
+    view.select_semester(SEMESTER_1)
+    assert view._footer_text.value == format_vnd(4500000)
+    assert view._footer_text.color == C.SAFE
+
+    # "Thông tin chi tiết" is a single toggle row until tapped…
+    section = view._data_host.controls[2]
+    assert isinstance(section, ft.Container)
+    assert view._info_expanded is False
+    # …then it expands into the toggle + the info panel.
+    view._toggle_info()
+    assert view._info_expanded is True
+    expanded = view._data_host.controls[2]
+    assert isinstance(expanded, ft.Column)
+    assert len(expanded.controls) == 2
+
+    # No data on screen -> the total bar hides with it.
+    view.show_error("Không tải được hồ sơ từ Portal.")
+    assert view._footer.visible is False
+
+
+def test_profile_view_mobile_semester_dropdown_opens_picker(monkeypatch):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    shown: list = []
+    popped: list = []
+    page = SimpleNamespace(
+        show_dialog=lambda sheet: shown.append(sheet),
+        pop_dialog=lambda: popped.append(True),
+    )
+    view = _make_view(page=page)
+    view.update_snapshot(_make_snapshot())
+
+    # Mockup dropdown: selected semester + chevron, tap opens the picker.
+    semester_block = view._data_host.controls[3]
+    dropdown = semester_block.controls[1]
+    assert dropdown.on_click is not None
+
+    dropdown.on_click(None)
+    assert len(shown) == 1
+    assert view._semester_sheet is shown[0]
+    # Header row + one option per semester.
+    assert len(shown[0].content.content.controls[1:]) == 2
+
+    # Choosing the older semester re-renders and closes the sheet.
+    view._pick_semester(SEMESTER_1)
+    assert view._selected_semester == SEMESTER_1
+    assert popped == [True]
+    assert view._semester_sheet is None
+
+
+def test_profile_view_mobile_fee_card_shows_mockup_lines(monkeypatch):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+
+    # Newest semester (debt) is selected: one card with mockup lines.
+    cards = view._table_host.content.controls
+    assert len(cards) == 1
+    lines = cards[0].content.controls[0].controls
+    title, meta, price = lines
+    assert title.value == "XD phần mềm hướng đối tượng"
+    assert "Mã LHP: 0120122010" in meta.value
+    assert "TC: 3" in meta.value
+    assert price.value == format_vnd(4500000)
+    # Unpaid fee: red price, "Còn nợ" pill at the right edge.
+    assert price.color == C.CRITICAL
+    pill = cards[0].content.controls[1]
+    assert pill.content.controls[1].value == "Còn nợ"
 
 
 # ---------------------------------------------------------------------------
