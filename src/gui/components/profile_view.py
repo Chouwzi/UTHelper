@@ -1392,6 +1392,7 @@ class ProfileView(ft.Container):
             color=C.SAFE,
         )
         return ft.Container(
+            width=float("inf"),
             content=ft.Row(
                 controls=[
                     ft.Text(

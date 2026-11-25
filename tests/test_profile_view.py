@@ -484,6 +484,8 @@ def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):
 
     # Sticky "Tổng:" bar under the cards, filtered by semester + tab.
     assert view._footer.visible is True
+    assert view._footer.width == float("inf")
+    assert view._footer.content.alignment == ft.MainAxisAlignment.CENTER
     assert view._footer_text.value == format_vnd(4500000)
     # Mockup: light-blue band; red while the selected semester owes money…
     assert view._footer_text.color == C.CRITICAL
