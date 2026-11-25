@@ -520,21 +520,38 @@ class ProfileView(ft.Container):
         else:
             self._avatar_image = None
             self._avatar_src = ""
-            self._avatar_text = ft.Text(
-                initials_of(profile.full_name, profile.student_id),
-                size=18 if mobile else 26,
-                weight=ft.FontWeight.W_700,
-                color=C.ON_ACCENT,
-            )
+            if self._avatar_text is None:
+                self._avatar_text = ft.Text(
+                    initials_of(profile.full_name, profile.student_id),
+                    size=18 if mobile else 26,
+                    weight=ft.FontWeight.W_700,
+                    color=C.ON_ACCENT,
+                )
+            else:
+                self._avatar_text.value = initials_of(
+                    profile.full_name, profile.student_id
+                )
+                self._avatar_text.size = 18 if mobile else 26
+                self._avatar_text.color = C.ON_ACCENT
             avatar_content = self._avatar_text
-        self._avatar = ft.Container(
-            content=avatar_content,
-            width=avatar_size,
-            height=avatar_size,
-            border_radius=avatar_size // 2,
-            bgcolor=C.ACCENT,
-            alignment=ft.Alignment(0, 0),
-        )
+        if self._avatar is None:
+            self._avatar = ft.Container(
+                content=avatar_content,
+                width=avatar_size,
+                height=avatar_size,
+                border_radius=avatar_size // 2,
+                bgcolor=C.ACCENT,
+                alignment=ft.Alignment(0, 0),
+            )
+        else:
+            # Keep the same outer control mounted during semester/tab refreshes
+            # so the avatar does not flash or jump as the profile is rebuilt.
+            self._avatar.content = avatar_content
+            self._avatar.width = avatar_size
+            self._avatar.height = avatar_size
+            self._avatar.border_radius = avatar_size // 2
+            self._avatar.bgcolor = C.ACCENT
+            self._avatar.alignment = ft.Alignment(0, 0)
         self._name_text = ft.Text(
             profile.full_name or "Chưa có dữ liệu sinh viên",
             size=15 if mobile else 21,

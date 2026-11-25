@@ -346,10 +346,12 @@ def test_profile_view_uses_portal_avatar_and_falls_back_to_initials():
     assert view._avatar_image is not None
     assert view._avatar_image.src == "data:image/png;base64,QUJD"
     first = view._avatar_image
+    avatar_shell = view._avatar
     view.update_snapshot(
         ProfileSnapshot(**{**snapshot.__dict__, "avatar": "data:image/png;base64,QUJD"})
     )
     assert view._avatar_image is first
+    assert view._avatar is avatar_shell
 
 
 def test_profile_view_mobile_renders_tappable_cards_instead_of_table(
@@ -360,6 +362,7 @@ def test_profile_view_mobile_renders_tappable_cards_instead_of_table(
     monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
     view = _make_view()
     view.update_snapshot(_make_snapshot())
+    avatar = view._avatar
 
     # No DataTable / no horizontal scroll on phones: one card per fee.
     assert view._table is None
@@ -368,6 +371,7 @@ def test_profile_view_mobile_renders_tappable_cards_instead_of_table(
     assert cards[0].on_click is not None
 
     view.select_tab(TAB_OTHER)
+    assert view._avatar is avatar
     other_cards = view._table_host.content.controls
     assert len(other_cards) == 1
     assert other_cards[0].on_click is not None
