@@ -7,7 +7,7 @@ from core.activity_status import normalize_submission_status
 from core.activity_time_policy import is_late_submission_active
 from gui.core.theme import C, _TYPE_LABELS, _TYPE_COLORS
 from config import settings
-from core.display_utils import urgency_str, clean_course_name  # re-exported
+from core.display_utils import urgency_str, clean_course_name  # noqa: F401  (re-exported)
 
 # clean_course_name is imported from core.display_utils above
 
@@ -491,6 +491,46 @@ def cleanup_image_cache():
         logger.warning(f"Lỗi khi chạy dọn dẹp cache ảnh: {e}")
 
 
+def _parse_trusted_moodle_pluginfile_url(
+    url: str, origin: str
+) -> tuple[str, str] | None:
+    """Validate a Moodle pluginfile URL against the trusted HTTPS origin.
+
+    Returns ``(webservice_path, plain_path)`` or ``None`` when the URL is not
+    a clean HTTPS ``/pluginfile.php/...`` URL on exactly ``origin``.
+    """
+    if not isinstance(url, str) or not isinstance(origin, str):
+        return None
+    if re.search(r"[\x00-\x20\x7f\\]", url):
+        return None
+    try:
+        parsed = _urlparse.urlsplit(url)
+        trusted = _urlparse.urlsplit(origin)
+        port = parsed.port
+        trusted_port = trusted.port
+    except ValueError:
+        return None
+    if (
+        trusted.scheme != "https"
+        or not trusted.hostname
+        or parsed.scheme != "https"
+        or parsed.hostname != trusted.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port or 443) != (trusted_port or 443)
+    ):
+        return None
+    path = parsed.path
+    if path.startswith("/webservice/pluginfile.php/"):
+        path = path[len("/webservice"):]
+    if not path.startswith("/pluginfile.php/"):
+        return None
+    segments = _urlparse.unquote(path).split("/")
+    if any(seg in {".", ".."} or "\\" in seg for seg in segments):
+        return None
+    return "/webservice" + path, path
+
+
 def pre_cache_description_images(html_content: str) -> str:
     """
     Tải xuống và cache toàn bộ ảnh từ description_html vào ổ đĩa local,
@@ -507,30 +547,35 @@ def pre_cache_description_images(html_content: str) -> str:
     cache_dir = _USER_DATA_DIR / "cache" / "images"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    token = settings.MOODLE_WS_TOKEN
-    base_url = settings.MOODLE_BASE_URL or "https://courses.ut.edu.vn"
-    base_domain = base_url.replace("https://", "").replace("http://", "")
+    base_url = (settings.MOODLE_BASE_URL or "https://courses.ut.edu.vn").rstrip("/")
+    parsed_base = urllib.parse.urlsplit(base_url)
+    trusted_origin = (
+        f"{parsed_base.scheme}://{parsed_base.netloc}" if parsed_base.netloc else ""
+    )
+    # Only attach the WS token when it was issued by this exact origin.
+    token = (
+        settings.MOODLE_WS_TOKEN
+        if settings.MOODLE_WS_TOKEN
+        and settings.MOODLE_WS_TOKEN_ORIGIN.rstrip("/") == trusted_origin
+        else ""
+    )
 
     for tag in img_tags:
         src_match = re.search(r'src="([^"]+)"', tag)
         if not src_match:
             continue
-        
-        orig_url = src_match.group(1)
-        if "pluginfile.php" not in orig_url or base_domain not in orig_url:
-            continue
 
+        orig_url = src_match.group(1)
+        trusted = _parse_trusted_moodle_pluginfile_url(orig_url, trusted_origin)
+        if trusted is None:
+            continue
+        ws_path, _plain_path = trusted
         parsed_url = urllib.parse.urlparse(orig_url)
-        path = parsed_url.path
-        
-        # Chuẩn hoá sang webservice/pluginfile.php
-        if not path.startswith("/webservice/"):
-            path = path.replace("/pluginfile.php", "/webservice/pluginfile.php")
-            
-        auth_url = f"{parsed_url.scheme}://{parsed_url.netloc}{path}"
-        if token:
-            auth_url += f"?token={token}"
-            
+
+        # Public URL (never carries the token) used for HTML fallback.
+        public_url = f"{trusted_origin}{ws_path}"
+        auth_url = f"{public_url}?token={token}" if token else public_url
+
         url_hash = hashlib.sha256(parsed_url.path.encode('utf-8')).hexdigest()
         ext = os.path.splitext(parsed_url.path)[1]
         if not ext or len(ext) > 5:
@@ -598,8 +643,8 @@ def pre_cache_description_images(html_content: str) -> str:
             new_tag = tag.replace(orig_url, assets_rel_path)
             html_content = html_content.replace(tag, new_tag)
         else:
-            # Fallback sang link web service trực tuyến có kèm token
-            new_tag = tag.replace(orig_url, auth_url)
+            # Fallback sang link web service trực tuyến, KHÔNG kèm token
+            new_tag = tag.replace(orig_url, public_url)
             html_content = html_content.replace(tag, new_tag)
 
     # Chạy dọn dẹp cache sau mỗi lần tải ảnh mới
