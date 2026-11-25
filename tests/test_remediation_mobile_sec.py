@@ -646,6 +646,564 @@ def test_sec_c04_handoff_and_status_cleanup_after_completion_while_preserving_se
             windows_update._unseal_and_remove_handoff_dir(handoff_dir)
 
 
+def _adapt_install_script_for_tmp_programdata(
+    raw_script: str,
+    *,
+    user_sid_str: str,
+    is_admin: bool,
+) -> str:
+    """Redirect CommonApplicationData to $env:ProgramData so tests never touch C:\\ProgramData.
+
+    When running unprivileged (Medium-IL), allow current user as trusted directory owner for
+    tmp_path\\ProgramData setup ONLY while keeping the entire `finally:` status-writing block
+    100% unmodified byte-for-byte.
+    """
+    adapted = raw_script.replace(
+        "[Environment]::GetFolderPath('CommonApplicationData')",
+        "$env:ProgramData",
+    )
+    if not is_admin:
+        adapted = adapted.replace(
+            "if ($trustedOwnerSids -notcontains $verifiedOwner)",
+            f"if (($trustedOwnerSids + @('{user_sid_str}')) -notcontains $verifiedOwner)",
+            1,
+        )
+        adapted = adapted.replace(
+            "$adminAcl.AddAccessRule($rule)\n  }",
+            "$adminAcl.AddAccessRule($rule)\n  }\n"
+            f"  $adminAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
+            f"(New-Object System.Security.Principal.SecurityIdentifier('{user_sid_str}')), "
+            "[System.Security.AccessControl.FileSystemRights]::FullControl, "
+            "$inherit, $prop, "
+            "[System.Security.AccessControl.AccessControlType]::Allow)))",
+            1,
+        )
+        adapted = adapted.replace(
+            "$readOnlyStatusAcl.AddAccessRule($usersReadRule)",
+            "$readOnlyStatusAcl.AddAccessRule($usersReadRule)\n"
+            f"  $readOnlyStatusAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
+            f"(New-Object System.Security.Principal.SecurityIdentifier('{user_sid_str}')), "
+            "[System.Security.AccessControl.FileSystemRights]::FullControl, "
+            "$inherit, $prop, "
+            "[System.Security.AccessControl.AccessControlType]::Allow)))",
+            1,
+        )
+    return adapted
+
+
+def test_sec_c04_install_helper_finally_writes_deletable_status_and_sweeps_stale_files_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from platform_utils import windows_update
+
+    if os.name != "nt" or not shutil.which("powershell.exe"):
+        install_src = windows_update._INSTALL_HELPER_SCRIPT
+        finally_block = install_src.split("} finally {", 1)[1]
+        assert "[System.IO.File]::SetAccessControl" not in finally_block or (
+            "$statusFileAcl.SetOwner(" not in finally_block
+        )
+        return
+
+    import ntsecuritycon
+    import win32api
+    import win32security
+
+    local_app_data = tmp_path / "LocalAppData"
+    program_data = tmp_path / "ProgramData"
+    msi_path = tmp_path / "UTHelper-2.6.0.msi"
+    msi_path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"msi-payload")
+    relaunch_exe = tmp_path / "UTHelper.exe"
+    relaunch_exe.write_bytes(b"MZ")
+
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+    real_popen = subprocess.Popen
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("ProgramData", str(program_data))
+    monkeypatch.setattr(windows_update.sys, "platform", "win32")
+    monkeypatch.setattr(windows_update.os, "getpid", lambda: 999_999_999)
+    monkeypatch.setattr(windows_update, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(windows_update, "_shell_execute_runas", lambda *_a: 0)
+    monkeypatch.setattr(
+        windows_update.subprocess,
+        "Popen",
+        lambda argv, **kw: popen_calls.append((list(argv), dict(kw))) or object(),
+    )
+
+    pkg = _make_msi_package(msi_path)
+    launcher = windows_update.WindowsPackageLauncher(relaunch_executable=relaunch_exe)
+    assert launcher.launch(msi_path, pkg).acknowledged is True
+    monkeypatch.setattr(windows_update.subprocess, "Popen", real_popen)
+
+    handoff_dir = next((local_app_data / "UTHelper" / "update_handoff").glob("handoff-*"))
+    config_path = handoff_dir / "config.json"
+    install_ps1 = handoff_dir / "install_helper.ps1"
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    status_path = Path(config_data["status_path"])
+    status_parent = status_path.parent
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+    )
+    try:
+        user_sid = win32security.GetTokenInformation(
+            token, win32security.TokenUser
+        )[0]
+        user_sid_str = win32security.ConvertSidToStringSid(user_sid)
+    finally:
+        win32api.CloseHandle(token)
+
+    is_admin = bool(windows_update._ORIGINAL_SUBPROCESS_RUN and False)
+    try:
+        import ctypes
+
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except OSError:
+        is_admin = False
+
+    try:
+        # Seed a stale (>15m) and a fresh (<15m) status file to verify stale sweep behavior.
+        status_parent.mkdir(parents=True, exist_ok=True)
+        stale_status = status_parent / "handoff-0000deadbeef.status.json"
+        fresh_status = status_parent / "handoff-1111feedface.status.json"
+        stale_status.write_text('{"exit_code": 0}', encoding="utf-8")
+        fresh_status.write_text('{"exit_code": 0}', encoding="utf-8")
+        old_ts = time.time() - 1800.0
+        os.utime(stale_status, (old_ts, old_ts))
+
+        # Tamper msi_path bytes AFTER launch so install_helper.ps1 reaches SHA-256 failure
+        # ($exitCode = 1) and runs its REAL `finally:` status-writing + ACL block end-to-end!
+        msi_path.write_bytes(bytes.fromhex("D0CF11E0A1B11AE1") + b"tampered-after-launch")
+
+        raw_install = install_ps1.read_text(encoding="utf-8")
+        adapted_install = _adapt_install_script_for_tmp_programdata(
+            raw_install, user_sid_str=user_sid_str, is_admin=is_admin
+        )
+        test_runner_ps1 = tmp_path / "run_install_e2e.ps1"
+        test_runner_ps1.write_text(adapted_install, encoding="utf-8")
+        config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest().lower()
+
+        relaunch_argv, relaunch_kwargs = popen_calls[0]
+        ps_exe = relaunch_argv[0]
+        child_env = dict(relaunch_kwargs["env"])  # type: ignore[arg-type]
+
+        install_proc = subprocess.run(
+            [
+                ps_exe,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(test_runner_ps1),
+                "-ConfigPath",
+                str(config_path),
+                "-ExpectedSha256",
+                pkg.sha256.lower(),
+                "-ExpectedKind",
+                "launch_msi",
+                "-ExpectedConfigSha256",
+                config_sha,
+            ],
+            env=child_env,
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert install_proc.returncode == 0, install_proc.stderr + install_proc.stdout
+        assert status_path.exists(), "install_helper.ps1 finally block did not write status_path"
+        assert not stale_status.exists(), "Stale status file (>15m) was not swept"
+        assert fresh_status.exists(), "Fresh concurrent status file (<15m) must not be swept"
+
+        # Verify status_path itself received an EXPLICIT protected DACL (SE_DACL_PROTECTED != 0)
+        # with Delete granted to handoffOwnerSid (and zero WriteData).
+        sd = win32security.GetNamedSecurityInfo(
+            str(status_path),
+            win32security.SE_FILE_OBJECT,
+            win32security.DACL_SECURITY_INFORMATION,
+        )
+        control, _rev = sd.GetSecurityDescriptorControl()
+        assert (control & win32security.SE_DACL_PROTECTED) != 0, (
+            "status_path lacks SE_DACL_PROTECTED — SetAccessControl/Set-Acl failed in finally!"
+        )
+
+        # Strip test-only CreateFiles rule from status_parent so relaunch_helper.ps1 runs
+        # against a strictly read-only status_parent (ReadAndExecute ONLY).
+        if not is_admin:
+            ro_parent_dacl = win32security.ACL()
+            ro_parent_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE,
+                ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_EXECUTE,
+                user_sid,
+            )
+            win32security.SetNamedSecurityInfo(
+                str(status_parent),
+                win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION
+                | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                ro_parent_dacl,
+                None,
+            )
+
+        clean_kwargs = {
+            k: v
+            for k, v in relaunch_kwargs.items()
+            if k in {"env", "cwd", "stdin", "stdout", "stderr"}
+        }
+        relaunch_proc = real_popen(relaunch_argv, **clean_kwargs)
+        rc = relaunch_proc.wait(timeout=15)
+        assert rc == 0
+        assert not status_path.exists(), "relaunch_helper.ps1 failed to delete status_path written by install_helper.ps1"
+        assert not handoff_dir.exists(), "relaunch_helper.ps1 failed to delete handoff_dir"
+    finally:
+        if status_parent.exists():
+            cleanup_dacl = win32security.ACL()
+            cleanup_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE,
+                ntsecuritycon.GENERIC_ALL,
+                user_sid,
+            )
+            for target in [status_parent, *status_parent.glob("*")]:
+                try:
+                    win32security.SetNamedSecurityInfo(
+                        str(target),
+                        win32security.SE_FILE_OBJECT,
+                        win32security.DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        cleanup_dacl,
+                        None,
+                    )
+                except Exception:
+                    pass
+        if handoff_dir.exists():
+            windows_update._unseal_and_remove_handoff_dir(handoff_dir)
+
+
+def test_sec_c04_relaunch_helper_rejects_corrupt_or_empty_status_json_without_false_zero_exit(
+    tmp_path: Path,
+) -> None:
+    from platform_utils import windows_update
+
+    relaunch_src = windows_update._RELAUNCH_HELPER_SCRIPT
+    if os.name != "nt" or not shutil.which("powershell.exe"):
+        assert "ConvertFrom-Json -ErrorAction Stop" in relaunch_src
+        assert "TryParse" in relaunch_src
+        return
+
+    ps_exe = shutil.which("powershell.exe")
+    assert ps_exe is not None
+
+    canary_file = tmp_path / "false_relaunch_canary.txt"
+    relaunch_cmd = tmp_path / "fake_relaunch.cmd"
+    relaunch_cmd.write_text(
+        f'@echo off\r\necho RELAUNCHED > "{canary_file}"\r\n',
+        encoding="utf-8",
+    )
+
+    update_handoff_parent = tmp_path / "UTHelper" / "update_handoff"
+    update_handoff_parent.mkdir(parents=True, exist_ok=True)
+    status_dir = tmp_path / "ProgramData" / "UTHelper" / "update_status"
+    status_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Corrupt / empty / null-exit_code payloads MUST NOT coerce $null -> [int]0 and relaunch!
+    for idx, bad_payload in enumerate(("", "{}", '{"exit_code": null}', "{not-valid-json")):
+        hdir = update_handoff_parent / f"handoff-{idx:024x}"
+        hdir.mkdir()
+        status_file = status_dir / f"{hdir.name}.status.json"
+        status_file.write_text(bad_payload, encoding="utf-8")
+        cfg_file = hdir / "config.json"
+        relaunch_ps1 = hdir / "relaunch_helper.ps1"
+        install_ps1 = hdir / "install_helper.ps1"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "package_path": str(tmp_path / "dummy.msi"),
+                    "expected_sha256": "0" * 64,
+                    "kind": "launch_msi",
+                    "parent_pid": 999_999_999,
+                    "status_path": str(status_file),
+                    "handoff_dir": str(hdir),
+                    "wait_timeout_seconds": 1,
+                    "status_wait_timeout_seconds": 0.8,
+                    "relaunch_path": str(relaunch_cmd),
+                    "fallback_relaunch_path": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        relaunch_ps1.write_text(relaunch_src, encoding="utf-8")
+        install_ps1.write_text("# noop\n", encoding="utf-8")
+        windows_update._seal_handoff_readonly_dacl(
+            hdir, (cfg_file, install_ps1, relaunch_ps1)
+        )
+
+        proc = subprocess.run(
+            [
+                ps_exe,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(relaunch_ps1),
+                "-ConfigPath",
+                str(cfg_file),
+            ],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0
+        time.sleep(0.25)
+        assert not canary_file.exists(), (
+            f"Corrupt status payload {bad_payload!r} falsely coerced exit_code=0 and relaunched!"
+        )
+        assert not hdir.exists(), "handoff_dir should still be cleaned up after timeout"
+        status_file.unlink(missing_ok=True)
+
+    # 2. Transient partial/corrupt status followed by valid non-zero status retries cleanly,
+    #    deletes status_file + handoff_dir, and does NOT relaunch.
+    transient_hdir = update_handoff_parent / "handoff-999999999999999999999999"
+    transient_hdir.mkdir()
+    transient_status = status_dir / f"{transient_hdir.name}.status.json"
+    transient_status.write_text("{partial", encoding="utf-8")
+    transient_cfg = transient_hdir / "config.json"
+    transient_relaunch = transient_hdir / "relaunch_helper.ps1"
+    transient_install = transient_hdir / "install_helper.ps1"
+    transient_cfg.write_text(
+        json.dumps(
+            {
+                "package_path": str(tmp_path / "dummy.msi"),
+                "expected_sha256": "0" * 64,
+                "kind": "launch_msi",
+                "parent_pid": 999_999_999,
+                "status_path": str(transient_status),
+                "handoff_dir": str(transient_hdir),
+                "wait_timeout_seconds": 1,
+                "status_wait_timeout_seconds": 5.0,
+                "relaunch_path": str(relaunch_cmd),
+                "fallback_relaunch_path": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    transient_relaunch.write_text(relaunch_src, encoding="utf-8")
+    transient_install.write_text("# noop\n", encoding="utf-8")
+    windows_update._seal_handoff_readonly_dacl(
+        transient_hdir, (transient_cfg, transient_install, transient_relaunch)
+    )
+    t_proc = subprocess.Popen(
+        [
+            ps_exe,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(transient_relaunch),
+            "-ConfigPath",
+            str(transient_cfg),
+        ],
+        cwd=str(tmp_path),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        time.sleep(0.45)
+        assert t_proc.poll() is None, "relaunch_helper exited prematurely on partial JSON"
+        transient_status.write_text('{"exit_code": 1602}', encoding="utf-8")
+        assert t_proc.wait(timeout=10) == 0
+        time.sleep(0.2)
+        assert not canary_file.exists()
+        assert not transient_status.exists()
+        assert not transient_hdir.exists()
+    finally:
+        if t_proc.poll() is None:
+            t_proc.kill()
+            t_proc.wait(timeout=2)
+
+
+def test_sec_c04_install_helper_locks_programdata_before_waiting_on_parent_pid(
+    tmp_path: Path,
+) -> None:
+    from platform_utils import windows_update
+
+    install_src = windows_update._INSTALL_HELPER_SCRIPT
+    lock_pos = install_src.index("Assert-TrustedAdminDir $uthelperProgramData")
+    wait_pos = install_src.index("while ((Get-Date) -lt $deadline)")
+    assert lock_pos < wait_pos, (
+        "ProgramData\\UTHelper\\update_status MUST be locked BEFORE waiting for $parentPid to exit!"
+    )
+    # Also verify $statusParent stays $null until Assert-TrustedAdminDir succeeds on all 3 dirs.
+    assert "$statusParent = $candidateStatusParent" in install_src
+    assert install_src.index("Assert-TrustedAdminDir $candidateStatusParent") < install_src.index(
+        "$statusParent = $candidateStatusParent"
+    )
+
+    if os.name != "nt" or not shutil.which("powershell.exe"):
+        return
+
+    import ctypes
+    import win32api
+    import win32security
+
+    ps_exe = shutil.which("powershell.exe")
+    assert ps_exe is not None
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32security.TOKEN_QUERY
+    )
+    try:
+        user_sid = win32security.GetTokenInformation(
+            token, win32security.TokenUser
+        )[0]
+        user_sid_str = win32security.ConvertSidToStringSid(user_sid)
+    finally:
+        win32api.CloseHandle(token)
+
+    is_admin = False
+    try:
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except OSError:
+        is_admin = False
+
+    program_data = tmp_path / "ProgramDataEarlyLock"
+    program_data.mkdir(parents=True, exist_ok=True)
+    hdir = tmp_path / "UTHelper" / "update_handoff" / "handoff-abcdef0123456789abcdef01"
+    hdir.mkdir(parents=True)
+    status_path = program_data / "UTHelper" / "update_status" / f"{hdir.name}.status.json"
+
+    # Spawn a live dummy parent process so $parentPid is alive for several seconds.
+    dummy_parent = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        cfg_file = hdir / "config.json"
+        cfg_bytes = json.dumps(
+            {
+                "package_path": str(tmp_path / "missing.msi"),
+                "expected_sha256": "0" * 64,
+                "kind": "launch_msi",
+                "parent_pid": dummy_parent.pid,
+                "status_path": str(status_path),
+                "handoff_dir": str(hdir),
+                "wait_timeout_seconds": 8,
+                "relaunch_path": "",
+                "fallback_relaunch_path": "",
+            }
+        ).encode("utf-8")
+        cfg_file.write_bytes(cfg_bytes)
+        cfg_sha = hashlib.sha256(cfg_bytes).hexdigest().lower()
+
+        runner_ps1 = tmp_path / "run_early_lock.ps1"
+        runner_ps1.write_text(
+            _adapt_install_script_for_tmp_programdata(
+                install_src, user_sid_str=user_sid_str, is_admin=is_admin
+            ),
+            encoding="utf-8",
+        )
+        child_env = os.environ.copy()
+        child_env["ProgramData"] = str(program_data)
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        child_env["PSModulePath"] = str(
+            Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "Modules"
+        )
+
+        helper_proc = subprocess.Popen(
+            [
+                ps_exe,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(runner_ps1),
+                "-ConfigPath",
+                str(cfg_file),
+                "-ExpectedSha256",
+                "0" * 64,
+                "-ExpectedKind",
+                "launch_msi",
+                "-ExpectedConfigSha256",
+                cfg_sha,
+            ],
+            env=child_env,
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            # Poll up to 4s while dummy_parent is STILL alive: update_status dir MUST be created
+            # and locked BEFORE dummy_parent exits!
+            deadline = time.monotonic() + 4.0
+            locked_early = False
+            while time.monotonic() < deadline:
+                assert dummy_parent.poll() is None
+                if (program_data / "UTHelper" / "update_status").is_dir():
+                    locked_early = True
+                    break
+                time.sleep(0.1)
+            assert locked_early is True, (
+                "update_status was not locked while $parentPid was still alive!"
+            )
+            dummy_parent.terminate()
+            dummy_parent.wait(timeout=3)
+            helper_proc.wait(timeout=10)
+            assert status_path.is_file()
+        finally:
+            if helper_proc.poll() is None:
+                helper_proc.kill()
+                helper_proc.wait(timeout=2)
+            if program_data.exists() and not is_admin:
+                import ntsecuritycon
+
+                cleanup_dacl = win32security.ACL()
+                cleanup_dacl.AddAccessAllowedAceEx(
+                    win32security.ACL_REVISION,
+                    win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE,
+                    ntsecuritycon.GENERIC_ALL,
+                    user_sid,
+                )
+                for target in [program_data, *program_data.rglob("*")]:
+                    try:
+                        win32security.SetNamedSecurityInfo(
+                            str(target),
+                            win32security.SE_FILE_OBJECT,
+                            win32security.DACL_SECURITY_INFORMATION,
+                            None,
+                            None,
+                            cleanup_dacl,
+                            None,
+                        )
+                    except Exception:
+                        pass
+    finally:
+        if dummy_parent.poll() is None:
+            dummy_parent.kill()
+            dummy_parent.wait(timeout=2)
+
+
 # ---------------------------------------------------------------------------
 # SEC-C06: Android AppSecretVault Evicts Corrupted Keystore Alias
 # ---------------------------------------------------------------------------
