@@ -1596,15 +1596,15 @@ class SettingsView(ft.Container):
             if is_demo_account(raw_user)
             else raw_user.strip()
         )
-        pwd = (self._password_field.value or "").strip()
-        if not user or not pwd:
+        pwd = self._password_field.value or ""
+        if not user or not pwd.strip():
             self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
             if hasattr(self, "_test_login_status_icon"):
                 self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
                 self._test_login_status_icon.color = C.CRITICAL
                 self._test_login_status_icon.visible = True
-            self.update()
+            self._safe_update(self)
             return
 
         self._test_login_btn.disabled = True
@@ -1618,7 +1618,7 @@ class SettingsView(ft.Container):
         self._test_login_status.value = ""
         if hasattr(self, "_test_login_status_icon"):
             self._test_login_status_icon.visible = False
-        self.update()
+        self._safe_update(self)
 
         try:
             login_fn = self._orchestrator.client.login
@@ -1663,8 +1663,6 @@ class SettingsView(ft.Container):
                     cb_res = account_cb(user, pwd)
                     if inspect.isawaitable(cb_res):
                         await cb_res
-                    if self._orchestrator is not None:
-                        self._orchestrator.is_logged_in = True
                 else:
                     settings.UTH_USERNAME = user
                     settings.UTH_PASSWORD = pwd
@@ -1673,8 +1671,13 @@ class SettingsView(ft.Container):
                         settings.MOODLE_WS_TOKEN_ORIGIN = ""
                     elif supports_persist:
                         settings.UTH_CREDENTIALS_ORIGIN = ""
+                    has_persisted_auth = (
+                        is_demo_account(user)
+                        or not supports_persist
+                        or bool(str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip())
+                    )
                     if self._orchestrator is not None:
-                        self._orchestrator.is_logged_in = True
+                        self._orchestrator.is_logged_in = has_persisted_auth
                     await asyncio.to_thread(save_settings)
                     legacy_cb = getattr(self, "on_save", None) or getattr(
                         self, "_on_saved", None
@@ -1683,7 +1686,7 @@ class SettingsView(ft.Container):
                         cb_res = legacy_cb()
                         if inspect.isawaitable(cb_res):
                             await cb_res
-                    if self._orchestrator is not None:
+                    if self._orchestrator is not None and has_persisted_auth:
                         self._orchestrator.is_logged_in = True
                 if hasattr(self, "_unsaved_dot"):
                     self._unsaved_dot.visible = self.has_changes()
@@ -1720,7 +1723,7 @@ class SettingsView(ft.Container):
             self._test_login_btn.text = "Kiểm tra kết nối"
             self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
             self._test_loading_bar.visible = False
-            self.update()
+            self._safe_update(self)
 
     async def _handle_logout(self, _e=None):
         if hasattr(self, "_logout_btn"):
@@ -1781,7 +1784,7 @@ class SettingsView(ft.Container):
             if hasattr(self, "_logout_btn"):
                 self._logout_btn.disabled = False
             self._test_login_btn.disabled = False
-            self.update()
+            self._safe_update(self)
 
     def _marshal_ui(self, fn):
         """Marshal worker-thread control mutations onto the Flet event loop when active."""
@@ -1853,15 +1856,34 @@ class SettingsView(ft.Container):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mobile') and self._on_test_mobile: self._on_test_mobile(t)
 
+    def _block_external_test_in_demo_mode(self) -> bool:
+        if not is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return False
+        debug_text = getattr(self, "_debug_info_text", None)
+        if debug_text is not None:
+            debug_text.value = (
+                "Phiên xem thử (Demo) đang hoạt động ngoại tuyến (Sandbox) · "
+                "Không gửi thông báo thử nghiệm ra kênh ngoài."
+            )
+            debug_text.color = C.WARNING
+            self._safe_update(debug_text)
+        return True
+
     def _do_test_tele(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_tele') and self._on_test_tele: self._on_test_tele(t)
 
     def _do_test_discord(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_discord') and self._on_test_discord: self._on_test_discord(t)
 
     def _do_test_mail(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mail') and self._on_test_mail: self._on_test_mail(t)
 
@@ -2391,6 +2413,8 @@ class SettingsView(ft.Container):
     # Broadcast all channels
     def _do_test_broadcast(self):
         """Send mock notification to ALL registered channels simultaneously."""
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         sent = []
         if self._on_test_tray and not _pu.IS_MOBILE:
@@ -2415,7 +2439,7 @@ class SettingsView(ft.Container):
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         self._debug_info_text.value = f"Broadcast [{t}] tới: {', '.join(sent) or 'Không có kênh nào'}"
         self._debug_info_text.color = C.SAFE if sent else C.WARNING
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
     # Network latency test
     def _do_test_latency(self):
