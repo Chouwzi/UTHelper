@@ -165,6 +165,18 @@ def test_d02_detail_view_reset_for_account_switch_clears_all_mutable_state():
     view._file_edit_dialog.open = True
     view._delete_confirm_dialog.open = True
     view._replace_confirm_dialog.open = True
+    view._edit_filename.value = "secret_student_a.pdf"
+    view._edit_filepath.value = "/private_folder/"
+    view._edit_status.value = "Tên file không hợp lệ"
+    view._edit_status.visible = True
+    view._delete_confirm_text.value = "Xóa file secret_student_a.pdf?"
+    view._submission_status_value.value = "Đã nộp"
+    view._countdown_txt.value = "Còn 2 giờ"
+    view._deadline_txt.value = "25/11/2026 23:59"
+    view._opentime_txt.value = "20/11/2026 08:00"
+    view._opentime_row.visible = True
+    view._cutoff_txt.value = "26/11/2026 23:59"
+    view._cutoff_row.visible = True
     view._quiz_launch_target = object()
 
     prev_view_gen = view._view_generation
@@ -196,6 +208,18 @@ def test_d02_detail_view_reset_for_account_switch_clears_all_mutable_state():
     assert view._file_edit_dialog.open is False
     assert view._delete_confirm_dialog.open is False
     assert view._replace_confirm_dialog.open is False
+    assert view._edit_filename.value == ""
+    assert view._edit_filepath.value == "/"
+    assert view._edit_status.value == ""
+    assert view._edit_status.visible is False
+    assert view._delete_confirm_text.value == ""
+    assert view._submission_status_value.value == ""
+    assert view._countdown_txt.value == ""
+    assert view._deadline_txt.value == ""
+    assert view._opentime_txt.value == ""
+    assert view._opentime_row.visible is False
+    assert view._cutoff_txt.value == ""
+    assert view._cutoff_row.visible is False
 
 
 def test_d02_inflight_mutation_and_finalize_dropped_after_reset_for_account_switch():
@@ -495,6 +519,385 @@ def test_d02_teardown_account_session_resets_detail_view_and_closes_overlay(monk
     assert detail_view._current_url == ""
     assert detail_switcher.content is empty_detail
     assert controller._detail_host.ignore_interactions is True
+
+
+def test_d02_same_identity_relogin_preserves_singleton_detail_view_and_mounted_pane_assignment(
+    monkeypatch,
+):
+    """Regression guard for critic #36 [HIGH]:
+    Same-identity _complete_login_success() (e.g., Settings 'Kiểm tra kết nối' or
+    Quiz LoginDialog with unchanged credentials) must cancel in-flight syncs via
+    _sync_generation WITHOUT bricking singleton DetailView or mounted PaneAssignmentView,
+    and un-reset DetailViews must never wedge _is_uploading = True in finally."""
+    from core.sync_coordinator import FetchOutcome
+
+    async def _scenario():
+        monkeypatch.setattr(settings, "UTH_USERNAME", "2251120001")
+        monkeypatch.setattr(settings, "UTH_PASSWORD", "pass_a")
+        monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "tok_a")
+
+        snapshot_loads: list[str] = []
+        mutate_calls: list[str] = []
+        finalize_calls: list[str] = []
+        stale_mutate_started = threading.Event()
+        stale_mutate_release = threading.Event()
+        stale_finalize_started = threading.Event()
+        stale_finalize_release = threading.Event()
+        block_mode = {"block": False}
+
+        class _TrackingWorkflow:
+            def load_snapshot(self, target, prefetched_status=None):
+                snapshot_loads.append(target.url)
+                return SubmissionSnapshotResult.success(
+                    _make_snapshot(raw_status="draft")
+                )
+
+            def mutate_files(self, target, intent, *, selected_files=()):
+                if block_mode["block"]:
+                    stale_mutate_started.set()
+                    assert stale_mutate_release.wait(5)
+                mutate_calls.append(target.url)
+                return SubmissionMutationResult.success(
+                    _make_snapshot(raw_status="submitted"),
+                    MutationOutcome.SUBMITTED_FOR_GRADING,
+                )
+
+            def finalize_submission(self, target, intent):
+                if block_mode["block"]:
+                    stale_finalize_started.set()
+                    assert stale_finalize_release.wait(5)
+                finalize_calls.append(target.url)
+                return SubmissionMutationResult.success(
+                    _make_snapshot(raw_status="submitted"),
+                    MutationOutcome.SUBMITTED_FOR_GRADING,
+                )
+
+        first_sync_started = asyncio.Event()
+        first_sync_release = asyncio.Event()
+        sync_invocations = {"count": 0}
+
+        async def _fetch_outcomes():
+            sync_invocations["count"] += 1
+            if sync_invocations["count"] == 1:
+                first_sync_started.set()
+                await first_sync_release.wait()
+                return FetchOutcome.complete(
+                    [
+                        {
+                            "title": "Stale First Sync",
+                            "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=99999",
+                            "submission_status": "not_submitted",
+                        }
+                    ]
+                )
+            return FetchOutcome.complete(
+                [
+                    {
+                        "title": "Fresh Re-Login Sync",
+                        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=55555",
+                        "submission_status": "not_submitted",
+                        "details": {},
+                    }
+                ]
+            )
+
+        orch = SimpleNamespace(
+            is_logged_in=True,
+            fetch_activity_outcome_async=_fetch_outcomes,
+            get_cached_details_snapshot=lambda: {},
+            moodle_service=SimpleNamespace(clear_all_caches=Mock()),
+            clear_detail_cache=Mock(),
+            invalidate_detail_cache=Mock(),
+        )
+        controller = _build_minimal_sync_controller(orch)
+        controller._settings_identity = ("2251120001", "pass_a")
+        controller._account_epoch = 0
+
+        page = controller.page
+        assign_url = "https://courses.ut.edu.vn/mod/assign/view.php?id=55555"
+        pane_url = "https://courses.ut.edu.vn/mod/assign/view.php?id=66666"
+
+        # Singleton DetailView constructed at AppController.__init__ (epoch 0)
+        singleton_dv = DetailView(
+            page,
+            on_close=Mock(),
+            get_client=lambda: object(),
+            get_account_epoch=lambda: getattr(controller, "_account_epoch", 0),
+            on_status_changed=controller._on_activity_status_changed,
+            submission_workflow_factory=lambda _c: _TrackingWorkflow(),
+            embedded_in_pane=False,
+        )
+        controller.detail_view = singleton_dv
+
+        # Mounted CoursesTabView PaneAssignmentView DetailView (embedded_in_pane=True)
+        pane_dv = DetailView(
+            page,
+            on_close=Mock(),
+            get_client=lambda: object(),
+            get_account_epoch=lambda: getattr(controller, "_account_epoch", 0),
+            on_status_changed=controller._on_activity_status_changed,
+            submission_workflow_factory=lambda _c: _TrackingWorkflow(),
+            embedded_in_pane=True,
+        )
+
+        # Start an in-flight sync #1 before same-identity re-login
+        stale_sync_task = asyncio.create_task(controller._perform_data_sync("manual"))
+        await first_sync_started.wait()
+
+        # Trigger same-identity _complete_login_success() ("Kiểm tra kết nối" / Quiz reauth)
+        await controller._complete_login_success()
+        first_sync_release.set()
+        await stale_sync_task
+
+        # Same-identity re-login cancelled stale sync #1 & committed fresh sync #2,
+        # WITHOUT advancing _account_epoch!
+        assert controller._account_epoch == 0
+        assert [item["title"] for item in controller.all_data] == ["Fresh Re-Login Sync"]
+
+        # 1. Singleton DetailView MUST still load snapshots and complete mutations + finalize!
+        snapshot_loads.clear()
+        singleton_dv.update_detail(
+            {"url": assign_url, "course_id": 101, "type": "assignment"}
+        )
+        await asyncio.sleep(0.05)
+        assert snapshot_loads == [assign_url]
+        assert singleton_dv._submission_snapshot is not None
+
+        singleton_dv._selected_files = [
+            SimpleNamespace(
+                name="work.pdf",
+                size=4,
+                path=None,
+                bytes=b"work",
+                mime_type="application/pdf",
+            )
+        ]
+        await singleton_dv._execute_file_mutation(MutationOperation.ADD, False)
+        assert singleton_dv._is_uploading is False
+        assert singleton_dv._upload_progress.visible is False
+        assert mutate_calls == [assign_url]
+
+        await singleton_dv._execute_finalize_submission()
+        assert singleton_dv._is_uploading is False
+        assert singleton_dv._upload_progress.visible is False
+        assert finalize_calls == [assign_url]
+
+        # 2. Mounted PaneAssignmentView (embedded_in_pane=True) MUST ALSO still work!
+        snapshot_loads.clear()
+        pane_dv.update_detail(
+            {"url": pane_url, "course_id": 202, "type": "assignment"}
+        )
+        await asyncio.sleep(0.05)
+        assert snapshot_loads == [pane_url]
+
+        pane_dv._selected_files = [
+            SimpleNamespace(
+                name="pane.pdf",
+                size=4,
+                path=None,
+                bytes=b"pane",
+                mime_type="application/pdf",
+            )
+        ]
+        await pane_dv._execute_file_mutation(MutationOperation.ADD, False)
+        assert pane_dv._is_uploading is False
+        assert pane_dv._upload_progress.visible is False
+        assert mutate_calls[-1] == pane_url
+
+        # 3. Defense-in-depth: if an un-reset embedded DetailView has an in-flight
+        #    mutation or finalize when _account_epoch DOES advance (real account switch),
+        #    finally: MUST still reset _is_uploading=False and _upload_progress.visible=False
+        #    without calling _page.update()!
+        block_mode["block"] = True
+        pane_dv._selected_files = [
+            SimpleNamespace(
+                name="race.pdf",
+                size=4,
+                path=None,
+                bytes=b"race",
+                mime_type="application/pdf",
+            )
+        ]
+        mut_task = asyncio.create_task(
+            pane_dv._execute_file_mutation(MutationOperation.ADD, False)
+        )
+        assert await asyncio.to_thread(stale_mutate_started.wait, 2)
+        assert pane_dv._is_uploading is True
+        assert pane_dv._upload_progress.visible is True
+
+        # Switch accounts (epoch 0 -> 1) without calling reset_for_account_switch on pane_dv
+        controller._account_epoch = 1
+        page.update.reset_mock()
+        stale_mutate_release.set()
+        await mut_task
+        assert pane_dv._is_uploading is False
+        assert pane_dv._upload_progress.visible is False
+        page.update.assert_not_called()
+
+        # Same check for _execute_finalize_submission on un-reset embedded view
+        pane_dv2 = DetailView(
+            page,
+            on_close=Mock(),
+            get_client=lambda: object(),
+            get_account_epoch=lambda: getattr(controller, "_account_epoch", 0),
+            on_status_changed=controller._on_activity_status_changed,
+            submission_workflow_factory=lambda _c: _TrackingWorkflow(),
+            embedded_in_pane=True,
+        )
+        block_mode["block"] = False
+        pane_dv2.update_detail(
+            {"url": pane_url, "course_id": 202, "type": "assignment"}
+        )
+        await asyncio.sleep(0.05)
+        block_mode["block"] = True
+        fin_task = asyncio.create_task(pane_dv2._execute_finalize_submission())
+        assert await asyncio.to_thread(stale_finalize_started.wait, 2)
+        assert pane_dv2._is_uploading is True
+        controller._account_epoch = 2
+        page.update.reset_mock()
+        stale_finalize_release.set()
+        await fin_task
+        assert pane_dv2._is_uploading is False
+        assert pane_dv2._upload_progress.visible is False
+        page.update.assert_not_called()
+
+    asyncio.run(_scenario())
+
+
+def test_d02_forwarded_expected_epoch_and_embedded_pane_late_update_detail_guard():
+    """Regression guard for critic #36 [MEDIUM]:
+    1. _execute_file_mutation, _execute_finalize_submission, and _async_load_submitted_files
+       forward captured expected_account_epoch explicitly through _apply_mutation_result /
+       _apply_submission_snapshot into _notify_submission_status.
+    2. Embedded PaneAssignmentView DetailView (embedded_in_pane=True) bails out at the very top
+       of update_detail() / show_loading() if account context changed, without mutating controls
+       or invoking _quiz_player_view.prepare_activity."""
+
+    async def _scenario():
+        state = {"epoch": 7}
+        recorded_status: list[tuple[str, str, int | None]] = []
+
+        def _on_status(
+            url: str, status: str, *, expected_account_epoch: int | None = None
+        ):
+            recorded_status.append((url, status, expected_account_epoch))
+
+        class _EpochFlippingBeforeNotifyWorkflow:
+            def load_snapshot(self, target, prefetched_status=None):
+                return SubmissionSnapshotResult.success(
+                    _make_snapshot(raw_status="draft")
+                )
+
+            def mutate_files(self, target, intent, *, selected_files=()):
+                return SubmissionMutationResult.success(
+                    _make_snapshot(raw_status="submitted"),
+                    MutationOutcome.SUBMITTED_FOR_GRADING,
+                )
+
+            def finalize_submission(self, target, intent):
+                return SubmissionMutationResult.success(
+                    _make_snapshot(raw_status="graded"),
+                    MutationOutcome.SUBMITTED_FOR_GRADING,
+                )
+
+        page = _make_mock_page()
+        assign_url = "https://courses.ut.edu.vn/mod/assign/view.php?id=55555"
+        singleton_dv = DetailView(
+            page,
+            on_close=Mock(),
+            get_client=lambda: object(),
+            get_account_epoch=lambda: state["epoch"],
+            on_status_changed=_on_status,
+            submission_workflow_factory=lambda _c: _EpochFlippingBeforeNotifyWorkflow(),
+            embedded_in_pane=False,
+        )
+        singleton_dv.update_detail(
+            {"url": assign_url, "course_id": 101, "type": "other"}
+        )
+
+        # Spy on _apply_submission_snapshot to prove expected_account_epoch=7 is passed explicitly
+        orig_apply_snap = singleton_dv._apply_submission_snapshot
+        forwarded_epochs: list[int | None] = []
+
+        def _spy_apply_snap(snapshot, *, expected_account_epoch: int | None = None):
+            forwarded_epochs.append(expected_account_epoch)
+            # Even if _owner_account_epoch is cleared mid-apply, explicit arg wins!
+            singleton_dv._owner_account_epoch = 999
+            return orig_apply_snap(
+                snapshot, expected_account_epoch=expected_account_epoch
+            )
+
+        singleton_dv._apply_submission_snapshot = _spy_apply_snap
+
+        # (a) _async_load_submitted_files forwards expected_epoch=7
+        singleton_dv._owner_account_epoch = 7
+        load_gen, view_gen = singleton_dv._reserve_submission_snapshot_load()
+        await singleton_dv._async_load_submitted_files(
+            object(), assign_url, 101, None, load_gen, view_gen
+        )
+
+        # (b) _execute_file_mutation forwards expected_epoch=7
+        singleton_dv._owner_account_epoch = 7
+        singleton_dv._selected_files = [
+            SimpleNamespace(
+                name="a.pdf", size=3, path=None, bytes=b"abc", mime_type="application/pdf"
+            )
+        ]
+        await singleton_dv._execute_file_mutation(MutationOperation.ADD, False)
+
+        # (c) _execute_finalize_submission forwards expected_epoch=7
+        singleton_dv._owner_account_epoch = 7
+        await singleton_dv._execute_finalize_submission()
+
+        assert forwarded_epochs == [7, 7, 7]
+        assert [ep for (_u, _s, ep) in recorded_status] == [7, 7, 7]
+
+        # Part B: Embedded PaneAssignmentView DetailView ignores late update_detail / show_loading
+        quiz_player = SimpleNamespace(
+            prepare_activity=Mock(return_value=(object(), None))
+        )
+        state["epoch"] = 3
+        embedded_pane = DetailView(
+            page,
+            on_close=Mock(),
+            get_client=lambda: object(),
+            get_account_epoch=lambda: state["epoch"],
+            quiz_player_view=quiz_player,
+            submission_workflow_factory=lambda _c: _EpochFlippingBeforeNotifyWorkflow(),
+            embedded_in_pane=True,
+        )
+
+        # Switch to Account B (epoch 3 -> 4) BEFORE CoursesCoordinator._load_pane_assignment_async finishes!
+        state["epoch"] = 4
+        run_task_mock = Mock()
+        page.run_task = run_task_mock
+
+        embedded_pane.show_loading(
+            {
+                "title": "Account A Loading",
+                "url": assign_url,
+                "course_id": 101,
+                "type": "assignment",
+            }
+        )
+        assert embedded_pane._title_text.value == ""
+        assert embedded_pane._current_url == ""
+        assert embedded_pane.visible is False
+
+        embedded_pane.update_detail(
+            {
+                "title": "Account A Secret Quiz",
+                "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=777",
+                "course_id": 101,
+                "type": "quiz",
+            }
+        )
+        assert embedded_pane._title_text.value == ""
+        assert embedded_pane._current_url == ""
+        quiz_player.prepare_activity.assert_not_called()
+        run_task_mock.assert_not_called()
+
+    asyncio.run(_scenario())
 
 
 # ===========================================================================

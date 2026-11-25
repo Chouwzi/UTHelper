@@ -334,7 +334,9 @@ class AppController:
         self._pending_updates = {}
         
         self._account_epoch = 0
+        self._sync_generation = 0
         self._active_sync_epoch: int | None = None
+        self._active_sync_generation: int | None = None
         self._grades_request_epoch = 0
         self._course_grades_request_epoch = 0
         self._prefetch_cancel_event = threading.Event()
@@ -645,15 +647,29 @@ class AppController:
         new_username = str(new_identity[0] or "").strip()
         # 1. Flip identity & advance epochs BEFORE scheduling or mutating anything.
         self._settings_identity = new_identity
-        self._account_epoch = getattr(self, "_account_epoch", 0) + 1
-        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
-        self._detail_request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
-        self._grades_request_epoch = getattr(self, "_grades_request_epoch", 0) + 1
-        self._course_grades_request_epoch = (
-            getattr(self, "_course_grades_request_epoch", 0) + 1
+        should_advance_account_epoch = bool(
+            reset_moodle_and_caches
+            or account_switched_or_logged_out
+            or mark_logged_out
         )
+        if should_advance_account_epoch:
+            self._account_epoch = getattr(self, "_account_epoch", 0) + 1
+            self._detail_request_epoch = (
+                getattr(self, "_detail_request_epoch", 0) + 1
+            )
+            self._grades_request_epoch = (
+                getattr(self, "_grades_request_epoch", 0) + 1
+            )
+            self._course_grades_request_epoch = (
+                getattr(self, "_course_grades_request_epoch", 0) + 1
+            )
+        else:
+            self._account_epoch = getattr(self, "_account_epoch", 0)
+        self._sync_generation = getattr(self, "_sync_generation", 0) + 1
+        self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._is_loading = False
         self._active_sync_epoch = None
+        self._active_sync_generation = None
         self._restore_refresh_button()
 
         # 2. Invalidate in-flight sync coalescing & cancel background warmers.
@@ -870,6 +886,14 @@ class AppController:
         # 7. Clear UI surfaces when visible so stale account data disappears immediately.
         if reset_moodle_and_caches or clear_ui:
             self._teardown_detail_view_for_account_switch(clear_ui=clear_ui)
+        else:
+            detail_view = getattr(self, "detail_view", None)
+            if detail_view is not None and hasattr(
+                detail_view, "_owner_account_epoch"
+            ):
+                detail_view._owner_account_epoch = getattr(
+                    self, "_account_epoch", 0
+                )
         if clear_ui:
             quiz_player_view = getattr(self, "quiz_player_view", None)
             if quiz_player_view is not None and getattr(
@@ -4275,15 +4299,20 @@ class AppController:
             self._restore_refresh_button()
             return
         account_epoch = getattr(self, "_account_epoch", 0)
+        sync_generation = getattr(self, "_sync_generation", 0)
         data_cache = self._data_cache
 
         def _epoch_is_current() -> bool:
-            return account_epoch == getattr(self, "_account_epoch", 0)
+            return (
+                account_epoch == getattr(self, "_account_epoch", 0)
+                and sync_generation == getattr(self, "_sync_generation", 0)
+            )
 
         sync_source = "user" if trigger == "manual" else "scheduler"
         self._diag_breadcrumb("refresh", "started", sync_source)
         self._is_loading = True
         self._active_sync_epoch = account_epoch
+        self._active_sync_generation = sync_generation
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         old_prefetch = getattr(self, "_prefetch_cancel_event", None)
         if old_prefetch is not None:
@@ -4563,10 +4592,15 @@ class AppController:
                 self.error_state.visible = True
                 self._set_sync_status("error", "Lỗi kết nối server")
         finally:
-            if getattr(self, "_active_sync_epoch", None) == account_epoch:
+            if (
+                getattr(self, "_active_sync_epoch", None) == account_epoch
+                and getattr(self, "_active_sync_generation", sync_generation)
+                == sync_generation
+            ):
                 self.refresh_btn.disabled = False
-                self._is_loading          = False
-                self._active_sync_epoch   = None
+                self._is_loading = False
+                self._active_sync_epoch = None
+                self._active_sync_generation = None
                 self.page.update()
 
     async def _close_detail(self):

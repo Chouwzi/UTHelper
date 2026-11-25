@@ -171,7 +171,9 @@ class DetailView(ft.Container):
         self._view_generation = 0
         self._snapshot_load_generation = 0
         self._account_generation = 0
-        self._owner_account_epoch = self._current_account_epoch()
+        self._owner_account_epoch = (
+            self._current_account_epoch() if self._embedded_in_pane else None
+        )
         self._pane_width: float | None = None
 
     def _current_account_epoch(self) -> int | None:
@@ -278,6 +280,9 @@ class DetailView(ft.Container):
             "_quiz_open_btn",
             "_quiz_auth_btn",
             "_quiz_runtime_notice",
+            "_edit_status",
+            "_opentime_row",
+            "_cutoff_row",
         ):
             ctrl = getattr(self, ctrl_attr, None)
             if ctrl is not None:
@@ -287,10 +292,21 @@ class DetailView(ft.Container):
             "_course_text",
             "_upload_status",
             "_submission_policy_text",
+            "_edit_filename",
+            "_edit_status",
+            "_delete_confirm_text",
+            "_submission_status_value",
+            "_countdown_txt",
+            "_deadline_txt",
+            "_opentime_txt",
+            "_cutoff_txt",
         ):
             txt = getattr(self, text_attr, None)
             if txt is not None:
                 txt.value = ""
+        edit_fp = getattr(self, "_edit_filepath", None)
+        if edit_fp is not None:
+            edit_fp.value = "/"
         for col_attr in ("_content_col", "_file_list_col", "_submitted_files_col"):
             col = getattr(self, col_attr, None)
             controls = getattr(col, "controls", None)
@@ -1114,6 +1130,15 @@ class DetailView(ft.Container):
                 btn.visible = False
 
     def show_loading(self, data: dict):
+        if getattr(self, "_embedded_in_pane", False):
+            if not DetailView._is_account_context_current(
+                self,
+                getattr(self, "_account_generation", 0),
+                getattr(self, "_owner_account_epoch", None),
+            ):
+                return
+        else:
+            self._owner_account_epoch = DetailView._current_account_epoch(self)
         # Navigation has already changed targets, so invalidate background
         # submission work and hide controls belonging to the previous item.
         self._view_generation += 1
@@ -1206,6 +1231,15 @@ class DetailView(ft.Container):
         return changed
 
     def update_detail(self, data: dict):
+        if getattr(self, "_embedded_in_pane", False):
+            if not DetailView._is_account_context_current(
+                self,
+                getattr(self, "_account_generation", 0),
+                getattr(self, "_owner_account_epoch", None),
+            ):
+                return
+        else:
+            self._owner_account_epoch = DetailView._current_account_epoch(self)
         self._view_generation += 1
         sync_resp = getattr(self, "_sync_responsive_layout", None)
         if callable(sync_resp):
@@ -2089,7 +2123,12 @@ class DetailView(ft.Container):
             )
         self._page.update()
 
-    def _apply_submission_snapshot(self, snapshot: SubmissionSnapshot):
+    def _apply_submission_snapshot(
+        self,
+        snapshot: SubmissionSnapshot,
+        *,
+        expected_account_epoch: int | None = None,
+    ):
         """Replace displayed submission state with one authoritative snapshot."""
         self._submission_snapshot = snapshot
         self._submission_fingerprint = snapshot.fingerprint
@@ -2100,7 +2139,12 @@ class DetailView(ft.Container):
         self._render_submission_policy()
         self._build_submitted_files_ui()
 
-        DetailView._notify_submission_status(self, snapshot, self._current_url)
+        DetailView._notify_submission_status(
+            self,
+            snapshot,
+            self._current_url,
+            expected_account_epoch=expected_account_epoch,
+        )
 
     @staticmethod
     def _map_submission_status(raw_status: str) -> str:
@@ -2156,10 +2200,21 @@ class DetailView(ft.Container):
                     return
             self._on_status_changed(target_url, status)
 
-    def _apply_mutation_result(self, result: SubmissionMutationResult):
+    def _apply_mutation_result(
+        self,
+        result: SubmissionMutationResult,
+        *,
+        expected_account_epoch: int | None = None,
+    ):
         """Render verified server truth, retaining the last truth if refresh failed."""
         if result.snapshot is not None:
-            self._apply_submission_snapshot(result.snapshot)
+            try:
+                self._apply_submission_snapshot(
+                    result.snapshot,
+                    expected_account_epoch=expected_account_epoch,
+                )
+            except TypeError:
+                self._apply_submission_snapshot(result.snapshot)
             if result.partial:
                 changed = DetailView._reconcile_selected_files(
                     self, result.snapshot
@@ -2409,7 +2464,9 @@ class DetailView(ft.Container):
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
-                self._apply_mutation_result(result)
+                self._apply_mutation_result(
+                    result, expected_account_epoch=expected_epoch
+                )
                 if result.ok:
                     self._selected_files.clear()
                     self._file_list_col.controls.clear()
@@ -2433,15 +2490,18 @@ class DetailView(ft.Container):
                     "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
                 )
         finally:
-            if self._is_account_context_current(
-                account_generation, expected_epoch
-            ) and self._is_current_mutation_context(
+            if getattr(
+                self, "_account_generation", 0
+            ) == account_generation and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._is_uploading = False
                 self._upload_progress.visible = False
-                self._render_submission_policy()
-                self._page.update()
+                if self._is_account_context_current(
+                    account_generation, expected_epoch
+                ):
+                    self._render_submission_policy()
+                    self._page.update()
 
     async def _execute_finalize_submission(self):
         client = self._get_client() if self._get_client else None
@@ -2493,7 +2553,9 @@ class DetailView(ft.Container):
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
-                self._apply_mutation_result(result)
+                self._apply_mutation_result(
+                    result, expected_account_epoch=expected_epoch
+                )
                 if result.ok:
                     self._upload_progress.value = 1.0
             elif result.snapshot is not None:
@@ -2514,15 +2576,18 @@ class DetailView(ft.Container):
                     "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
                 )
         finally:
-            if self._is_account_context_current(
-                account_generation, expected_epoch
-            ) and self._is_current_mutation_context(
+            if getattr(
+                self, "_account_generation", 0
+            ) == account_generation and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._is_uploading = False
                 self._upload_progress.visible = False
-                self._render_submission_policy()
-                self._page.update()
+                if self._is_account_context_current(
+                    account_generation, expected_epoch
+                ):
+                    self._render_submission_policy()
+                    self._page.update()
 
     def _is_current_mutation_context(
         self, generation: int, target_url: str, target_course_id: int | None
@@ -2606,7 +2671,13 @@ class DetailView(ft.Container):
             ):
                 return
             if result.ok and result.snapshot is not None:
-                self._apply_submission_snapshot(result.snapshot)
+                try:
+                    self._apply_submission_snapshot(
+                        result.snapshot,
+                        expected_account_epoch=expected_epoch,
+                    )
+                except TypeError:
+                    self._apply_submission_snapshot(result.snapshot)
             elif result.issue is not None:
                 self._resolve_pending_submission_status_on_error()
                 failed = SubmissionMutationResult.failure(result.issue, None)
