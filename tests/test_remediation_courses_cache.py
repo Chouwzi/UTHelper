@@ -717,13 +717,13 @@ def test_d05_stacked_modal_dialogs_keep_dock_occluded_until_outer_dialog_closes(
         set_global_webview_occlusion,
     )
 
+    clear_global_webview_occlusion()
     dock = WindowsWebView2Dock(page_title="UTHelper", url="https://courses.ut.edu.vn/")
     notifications: list[bool] = []
     dock._notify_occlusion_changed = lambda: notifications.append(  # type: ignore[method-assign]
         is_globally_occluded()
     )
     try:
-        clear_global_webview_occlusion()
         with _OCCLUSION_LOCK:
             _ACTIVE_DOCKS.add(dock)
 

@@ -122,7 +122,28 @@ def _resolve_lazy_attr(name: str):
     return __getattr__(name)
 
 
-def _set_webview_occlusion(reason: str, occluded: bool) -> None:
+def _new_modal_occlusion_token() -> str:
+    import uuid
+
+    return f"dlg:{uuid.uuid4().hex}"
+
+
+def _call_modal_occlusion(
+    reason: str, occluded: bool, *, token: str | None = None
+) -> None:
+    """Invoke `_set_webview_occlusion` with token support and 2-arg test-monkeypatch fallback."""
+    if token is not None:
+        try:
+            _set_webview_occlusion(reason, occluded, token=token)
+            return
+        except TypeError:
+            pass
+    _set_webview_occlusion(reason, occluded)
+
+
+def _set_webview_occlusion(
+    reason: str, occluded: bool, *, token: str | None = None
+) -> None:
     """Best-effort bridge to global WebView2 occlusion coordinator."""
     try:
         from gui.components.courses.embedded_webview_host import (
@@ -131,6 +152,12 @@ def _set_webview_occlusion(reason: str, occluded: bool) -> None:
     except ImportError:
         return
     try:
+        if token is not None:
+            try:
+                set_global_webview_occlusion(reason, bool(occluded), token=token)
+                return
+            except TypeError:
+                pass
         set_global_webview_occlusion(reason, bool(occluded))
     except Exception:
         logger.debug("WebView occlusion update failed", exc_info=True)
@@ -445,7 +472,9 @@ class AppController:
         except Exception:
             logger.debug("Diagnostic breadcrumb failed", exc_info=True)
 
-    def _attach_modal_occlusion_release(self) -> bool:
+    def _attach_modal_occlusion_release(
+        self, *, occlusion_token: str | None = None
+    ) -> bool:
         """Hook the active modal dialog's on_dismiss to release WebView occlusion."""
         dlg = None
         dialogs_ctrl = getattr(self.page, "_dialogs", None)
@@ -464,6 +493,11 @@ class AppController:
                     ):
                         dlg = candidate
                         break
+                    if getattr(candidate, "open", False) and hasattr(
+                        candidate, "on_dismiss"
+                    ):
+                        dlg = candidate
+                        break
         if dlg is None:
             candidate = getattr(self.page, "dialog", None)
             if candidate is not None and getattr(candidate, "open", False):
@@ -479,7 +513,9 @@ class AppController:
                     if inspect.isawaitable(res):
                         await res
             finally:
-                _set_webview_occlusion("modal_dialog", False)
+                _call_modal_occlusion(
+                    "modal_dialog", False, token=occlusion_token
+                )
 
         try:
             dlg.on_dismiss = _on_dismiss
@@ -492,10 +528,11 @@ class AppController:
 
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "user", screen="login")
-        _set_webview_occlusion("modal_dialog", True)
+        modal_token = _new_modal_occlusion_token()
+        _call_modal_occlusion("modal_dialog", True, token=modal_token)
 
         async def _on_login_success():
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             # UX-5: Show success snackbar after dialog closes
@@ -505,10 +542,10 @@ class AppController:
         try:
             await show_login_dialog(self.page, self.orchestrator, _on_login_success)
         except Exception:
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             raise
-        if not self._attach_modal_occlusion_release():
-            _set_webview_occlusion("modal_dialog", False)
+        if not self._attach_modal_occlusion_release(occlusion_token=modal_token):
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
 
     async def _show_quiz_auth_dialog(self, retry_callback):
         """Reuse the app credential dialog, then retry Moodle session setup."""
@@ -516,10 +553,11 @@ class AppController:
 
         self._diag_screen("login")
         self._diag_breadcrumb("login", "started", "quiz_player", screen="login")
-        _set_webview_occlusion("modal_dialog", True)
+        modal_token = _new_modal_occlusion_token()
+        _call_modal_occlusion("modal_dialog", True, token=modal_token)
 
         async def _on_login_success():
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self._diag_breadcrumb("login", "succeeded", "moodle", screen="home")
             self._diag_screen("home")
             await self._complete_login_success()
@@ -536,10 +574,10 @@ class AppController:
                 allow_cancel=True,
             )
         except Exception:
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             raise
-        if not self._attach_modal_occlusion_release():
-            _set_webview_occlusion("modal_dialog", False)
+        if not self._attach_modal_occlusion_release(occlusion_token=modal_token):
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
 
     def _restore_refresh_button(self) -> None:
         refresh_btn = getattr(self, "refresh_btn", None)
@@ -5855,6 +5893,14 @@ class AppController:
         if platform_utils.IS_WINDOWS:
             affirmative = "Cài đặt và thoát"
             content = "Ứng dụng sẽ đóng để cài bản cập nhật."
+        elif platform_utils.IS_ANDROID and getattr(
+            self, "_update_manual_download", False
+        ):
+            affirmative = "Mở trang tải APK"
+            content = (
+                "Bản cập nhật này đổi định danh gói ứng dụng nên cần tải và cài thủ công "
+                "một lần từ GitHub Releases. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
+            )
         elif platform_utils.IS_ANDROID:
             affirmative = "Mở trình cài đặt"
             content = "Mở trình cài đặt Android cho bản cập nhật đã tải?"
@@ -5866,12 +5912,14 @@ class AppController:
                 "định kỳ. UTHelper chỉ mở trang phát hành sau khi bạn xác nhận."
             )
 
+        modal_token = _new_modal_occlusion_token()
+
         def cancel(_event):
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self.page.pop_dialog()
 
         def confirm(_event):
-            _set_webview_occlusion("modal_dialog", False)
+            _call_modal_occlusion("modal_dialog", False, token=modal_token)
             self.page.pop_dialog()
             coordinator = getattr(self, "_update_coordinator", None)
             if coordinator is not None:
@@ -5893,9 +5941,11 @@ class AppController:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
             bgcolor=C.BG,
-            on_dismiss=lambda _e: _set_webview_occlusion("modal_dialog", False),
+            on_dismiss=lambda _e: _call_modal_occlusion(
+                "modal_dialog", False, token=modal_token
+            ),
         )
-        _set_webview_occlusion("modal_dialog", True)
+        _call_modal_occlusion("modal_dialog", True, token=modal_token)
         self.page.show_dialog(dialog)
 
 
