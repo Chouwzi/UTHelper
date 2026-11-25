@@ -15,9 +15,9 @@ Desktop
 
 Phone (``UI_IS_MOBILE``)
   Compact header (back · centered title), compact profile card with a
-  chevron, 2×2 summary tiles, collapsible "Thông tin chi tiết", a semester
-  *dropdown* (bottom-sheet picker), segmented tabs, one tappable card per
-  fee (detail bottom sheet) and a sticky "Tổng:" bar at the bottom.
+  chevron that expands the student details in place, 2×2 summary tiles, a
+  semester *dropdown* (scrollable bottom-sheet picker), segmented tabs, one
+  tappable card per fee (detail bottom sheet) and a sticky "Tổng:" bar.
 
 Data arrives from the controller through ``update_snapshot`` (cached first,
 then fresh), so the screen renders instantly offline and refreshes itself.
@@ -323,7 +323,7 @@ class ProfileView(ft.Container):
         self._table_host_width: float | None = None
         # Opened fee-detail bottom sheet (mobile); None when closed.
         self._detail_sheet: ft.BottomSheet | None = None
-        # Opened semester picker sheet (mobile) + "Thông tin chi tiết" state.
+        # Mobile profile disclosure and semester picker state.
         self._semester_sheet: ft.BottomSheet | None = None
         self._info_expanded: bool = False
         self._updated_text: ft.Text | None = None
@@ -477,10 +477,6 @@ class ProfileView(ft.Container):
             self._build_student_card(snapshot),
             self._build_summary(),
         ]
-        if platform_utils.UI_IS_MOBILE:
-            # Phone mockup order: card · summary · "Thông tin chi tiết" ·
-            # Học kỳ (dropdown) · tabs · fee cards.
-            controls.append(self._build_info_section())
         controls.append(self._build_semester_block(snapshot))
         controls.extend(
             [
@@ -589,34 +585,67 @@ class ProfileView(ft.Container):
             (ft.Icons.EMAIL_ROUNDED, "Email", profile.email),
         ]
         if mobile:
-            # Phone: the grid hides behind the "Thông tin chi tiết" section.
-            identity: ft.Control = ft.Row(
-                controls=[
-                    self._avatar,
-                    ft.Column(
-                        controls=[self._name_text, self._sid_text, badge],
-                        spacing=5,
-                        tight=True,
-                        expand=True,
-                    ),
-                    ft.Icon(
-                        ft.Icons.CHEVRON_RIGHT_ROUNDED,
-                        size=22,
-                        color=C.TEXT_SECONDARY,
-                    ),
-                ],
-                spacing=12,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            # The name/MSSV card itself is the disclosure control. Details
+            # expand inside this card so there is no duplicate section below.
+            identity = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        self._avatar,
+                        ft.Column(
+                            controls=[self._name_text, self._sid_text, badge],
+                            spacing=5,
+                            tight=True,
+                            expand=True,
+                        ),
+                        ft.Icon(
+                            ft.Icons.EXPAND_LESS_ROUNDED
+                            if self._info_expanded
+                            else ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                            size=22,
+                            color=C.TEXT_SECONDARY,
+                        ),
+                    ],
+                    spacing=12,
+                    tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.Padding.symmetric(horizontal=2, vertical=2),
+                ink=True,
+                on_click=lambda _event: self._toggle_info(),
             )
+            mobile_controls: list[ft.Control] = [identity]
+            if self._info_expanded:
+                detail_items = [
+                    (ft.Icons.WORK_ROUNDED, "Khoa", profile.faculty),
+                    (ft.Icons.MENU_BOOK_ROUNDED, "Ngành", profile.major),
+                    (ft.Icons.CATEGORY_ROUNDED, "Chuyên ngành", profile.specialization),
+                    (ft.Icons.GROUP_ROUNDED, "Lớp", profile.class_name),
+                    (ft.Icons.CALENDAR_TODAY_ROUNDED, "Khóa", profile.cohort),
+                    (ft.Icons.CAKE_ROUNDED, "Ngày sinh", profile.birth_date),
+                    (ft.Icons.LOCATION_ON_ROUNDED, "Nơi sinh", profile.hometown),
+                    (ft.Icons.PHONE_ROUNDED, "Số điện thoại", profile.phone),
+                    (ft.Icons.EMAIL_ROUNDED, "Email", profile.email),
+                ]
+                mobile_controls.extend(
+                    [
+                        ft.Divider(height=1, thickness=1, color=C.BORDER),
+                        ft.Column(
+                            controls=[_info_row(*item) for item in detail_items],
+                            spacing=8,
+                            tight=True,
+                        ),
+                    ]
+                )
             return ft.Container(
-                content=identity,
-                padding=ft.Padding.symmetric(horizontal=14, vertical=14),
+                content=ft.Column(
+                    controls=mobile_controls,
+                    spacing=8,
+                    tight=True,
+                ),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=12),
                 border_radius=14,
                 border=ft.Border.all(1, C.BORDER),
                 bgcolor=C.SURFACE,
-                ink=True,
-                on_click=lambda _event: self._toggle_info(),
             )
 
         # Desktop: identity row with the UTH campus photo in the top-right
@@ -881,7 +910,7 @@ class ProfileView(ft.Container):
                         ft.Icon(
                             ft.Icons.EXPAND_MORE_ROUNDED,
                             size=22,
-                            color=C.TEXT_SECONDARY,
+                            color=C.ACCENT,
                         ),
                     ],
                     spacing=8,
@@ -890,7 +919,7 @@ class ProfileView(ft.Container):
                 ),
                 padding=ft.Padding.symmetric(horizontal=14, vertical=13),
                 border_radius=10,
-                border=ft.Border.all(1, C.BORDER),
+                border=ft.Border.all(1, C.ACCENT),
                 bgcolor=C.SURFACE,
                 ink=True,
                 on_click=self._open_semester_picker,
@@ -1338,72 +1367,6 @@ class ProfileView(ft.Container):
         # Mockup: green when everything is paid, red while debt remains.
         self._footer_text.color = C.CRITICAL if debt > 0 else C.SAFE
 
-    def _build_info_section(self) -> ft.Control:
-        """Phone mockup: "Thông tin chi tiết" row that expands the info grid."""
-        toggle = ft.Container(
-            content=ft.Row(
-                controls=[
-                    ft.Icon(
-                        ft.Icons.DESCRIPTION_ROUNDED,
-                        size=18,
-                        color=C.TEXT_SECONDARY,
-                    ),
-                    ft.Text(
-                        "Thông tin chi tiết",
-                        size=13,
-                        weight=ft.FontWeight.W_600,
-                        color=C.TEXT_PRIMARY,
-                        expand=True,
-                    ),
-                    ft.Icon(
-                        ft.Icons.EXPAND_LESS_ROUNDED
-                        if self._info_expanded
-                        else ft.Icons.EXPAND_MORE_ROUNDED,
-                        size=22,
-                        color=C.TEXT_SECONDARY,
-                    ),
-                ],
-                spacing=10,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            padding=ft.Padding.symmetric(horizontal=14, vertical=13),
-            border_radius=12,
-            border=ft.Border.all(1, C.BORDER),
-            bgcolor=C.SURFACE,
-            ink=True,
-            on_click=lambda _event: self._toggle_info(),
-        )
-        if not self._info_expanded or self._snapshot is None:
-            return toggle
-        profile = self._snapshot.profile
-        items = [
-            (ft.Icons.SCHOOL_ROUNDED, "Hệ đào tạo", profile.education_type),
-            (ft.Icons.WORK_ROUNDED, "Khoa", profile.faculty),
-            (ft.Icons.MENU_BOOK_ROUNDED, "Ngành", profile.major),
-            (ft.Icons.CATEGORY_ROUNDED, "Chuyên ngành", profile.specialization),
-            (ft.Icons.GROUP_ROUNDED, "Lớp", profile.class_name),
-            (ft.Icons.CALENDAR_TODAY_ROUNDED, "Khóa", profile.cohort),
-            (ft.Icons.CAKE_ROUNDED, "Ngày sinh", profile.birth_date),
-            (ft.Icons.LOCATION_ON_ROUNDED, "Nơi sinh", profile.hometown),
-            (ft.Icons.PHONE_ROUNDED, "Số điện thoại", profile.phone),
-            (ft.Icons.EMAIL_ROUNDED, "Email", profile.email),
-        ]
-        panel = ft.Container(
-            content=ft.Column(
-                controls=[_info_row(*item) for item in items],
-                spacing=9,
-                tight=True,
-            ),
-            padding=ft.Padding.symmetric(horizontal=14, vertical=14),
-            border_radius=12,
-            border=ft.Border.all(1, C.BORDER),
-            bgcolor=C.SURFACE,
-        )
-        return ft.Column(
-            controls=[toggle, panel], spacing=8, tight=True
-        )
-
     def _toggle_info(self, _event=None) -> None:
         self._info_expanded = not self._info_expanded
         self._render_data()
@@ -1468,6 +1431,9 @@ class ProfileView(ft.Container):
                     ),
                     padding=ft.Padding.symmetric(horizontal=14, vertical=12),
                     border_radius=10,
+                    bgcolor=ft.Colors.with_opacity(0.12, C.ACCENT)
+                    if active
+                    else C.SURFACE,
                     ink=True,
                     on_click=lambda _e, key=name: self._pick_semester(key),
                 )

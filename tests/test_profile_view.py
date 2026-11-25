@@ -486,16 +486,22 @@ def test_profile_view_mobile_footer_and_info_toggle(monkeypatch):
     assert view._footer_text.value == format_vnd(4500000)
     assert view._footer_text.color == C.SAFE
 
-    # "Thông tin chi tiết" is a single toggle row until tapped…
-    section = view._data_host.controls[2]
-    assert isinstance(section, ft.Container)
+    # Tapping the name/MSSV card expands details in that same card.
+    card = view._data_host.controls[0]
+    header = card.content.controls[0]
+    assert header.on_click is not None
     assert view._info_expanded is False
-    # …then it expands into the toggle + the info panel.
-    view._toggle_info()
+    assert header.content.controls[2].icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
+    header.on_click(None)
     assert view._info_expanded is True
-    expanded = view._data_host.controls[2]
-    assert isinstance(expanded, ft.Column)
-    assert len(expanded.controls) == 2
+    expanded_card = view._data_host.controls[0]
+    assert len(expanded_card.content.controls) == 3
+    details = expanded_card.content.controls[2]
+    assert isinstance(details, ft.Column)
+    assert len(details.controls) == 9
+    assert details.controls[0].controls[1].value == "Khoa:"
+    assert details.controls[-1].controls[1].value == "Email:"
+    assert "Thông tin chi tiết" not in str(view._data_host.controls)
 
     # No data on screen -> the total bar hides with it.
     view.show_error("Không tải được hồ sơ từ Portal.")
@@ -516,13 +522,15 @@ def test_profile_view_mobile_semester_dropdown_opens_picker(monkeypatch):
     view.update_snapshot(_make_snapshot())
 
     # Mockup dropdown: selected semester + chevron, tap opens the picker.
-    semester_block = view._data_host.controls[3]
+    semester_block = view._data_host.controls[2]
     dropdown = semester_block.controls[1]
     assert dropdown.on_click is not None
 
     dropdown.on_click(None)
     assert len(shown) == 1
     assert view._semester_sheet is shown[0]
+    assert shown[0].scrollable is True
+    assert shown[0].content.content.scroll == ft.ScrollMode.AUTO
     # Header row + one option per semester.
     assert len(shown[0].content.content.controls[1:]) == 2
 
