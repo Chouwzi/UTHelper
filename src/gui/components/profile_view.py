@@ -320,6 +320,7 @@ class ProfileView(ft.Container):
         self._tab_other: ft.Container | None = None
         self._table: ft.DataTable | None = None
         self._table_host: ft.Container | None = None
+        self._table_host_width: float | None = None
         # Opened fee-detail bottom sheet (mobile); None when closed.
         self._detail_sheet: ft.BottomSheet | None = None
         # Opened semester picker sheet (mobile) + "Thông tin chi tiết" state.
@@ -623,8 +624,8 @@ class ProfileView(ft.Container):
         campus_photo = ft.Container(
             content=ft.Image(
                 src="uth_campus.jpg",
-                width=320,
-                height=170,
+                width=240,
+                height=128,
                 fit=ft.BoxFit.COVER,
                 border_radius=12,
                 anti_alias=True,
@@ -639,7 +640,7 @@ class ProfileView(ft.Container):
                     controls=[self._name_text, self._sid_text, badge],
                     spacing=6,
                     tight=True,
-                    width=340,
+                    width=220,
                 ),
                 campus_photo,
             ],
@@ -999,6 +1000,8 @@ class ProfileView(ft.Container):
         else:
             table = self._build_tuition_table()
         self._table = table
+        if self._table_host_width is not None:
+            table.width = max(0, self._table_host_width - 18)
         self._table_host = ft.Container(
             content=ft.Row(
                 controls=[table],
@@ -1026,6 +1029,7 @@ class ProfileView(ft.Container):
         if table is None or host_width <= 0:
             return
 
+        self._table_host_width = host_width
         # Account for the host's border and inner padding. Keeping the table's
         # width tied to the rendered host makes maximize/restore resize live.
         target_width = max(0, host_width - 18)
