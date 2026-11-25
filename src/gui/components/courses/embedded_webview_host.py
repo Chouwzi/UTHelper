@@ -25,6 +25,7 @@ import flet as ft
 
 import platform_utils
 from gui.components.courses._shared import safe_control_update
+from gui.core import utils as _gui_utils
 from gui.core.theme import C
 from gui.view_models.courses_state import safe_http_url
 
@@ -94,6 +95,22 @@ def _extract_loopback_port(url: str) -> Optional[int]:
     return int(port)
 
 
+def _is_demo_mode_active() -> bool:
+    try:
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+    except ImportError:
+        return False
+    return bool(is_demo_account(getattr(settings, "UTH_USERNAME", "")))
+
+
+def _is_demo_lms_blocked(url: object) -> bool:
+    if not url or not _is_demo_mode_active():
+        return False
+    is_uth_lms_fn = getattr(_gui_utils, "is_uth_lms_url", None)
+    return bool(callable(is_uth_lms_fn) and is_uth_lms_fn(url))
+
+
 def _validate_webview_url(
     url: object,
     *,
@@ -110,6 +127,8 @@ def _validate_webview_url(
             return cleaned
         if allowed_loopback_ports is not None and port in allowed_loopback_ports:
             return cleaned
+        return ""
+    if _is_demo_lms_blocked(cleaned):
         return ""
     return safe_http_url(cleaned, allow_loopback=False)
 
@@ -1854,7 +1873,7 @@ class EmbeddedWebViewHost:
         if self._disposed or self._on_external_url is None:
             return
         ext = safe_http_url(str(getattr(e, "data", "") or ""))
-        if ext:
+        if ext and not _is_demo_lms_blocked(ext):
             self._on_external_url(ext)
 
     def _handle_webview2_loading(self, loading: bool) -> None:
@@ -2130,6 +2149,7 @@ def build_embedded_webview_host(
                     viewer_locked=is_viewer_locked,
                     allowed_loopback_ports=[loop_port] if loop_port is not None else [],
                     require_initial_cookies=require_cookies,
+                    block_uth_lms=_is_demo_mode_active(),
                     expand=True,
                     on_page_started=lambda e: holder_inapp["host"]._handle_flet_page_started(e)
                     if "host" in holder_inapp

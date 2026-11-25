@@ -118,6 +118,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   String? _viewerPrefix;
   Set<int> _allowedLoopbackPorts = const <int>{};
   bool _requireInitialCookies = false;
+  bool _blockUthLms = false;
   Color _bgColor = _defaultSurfaceBgColor;
   String? _normalizedUserAgent;
   bool _prepared = false;
@@ -149,6 +150,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     _viewerLocked = widget.control.getBool('viewer_locked', false) ?? false;
     _requireInitialCookies =
         widget.control.getBool('require_initial_cookies', false) ?? false;
+    _blockUthLms = widget.control.getBool('block_uth_lms', false) ?? false;
     _bgColor = parseAppWebViewColor(widget.control.getString('bgcolor')) ??
         _defaultSurfaceBgColor;
 
@@ -245,6 +247,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
 
     _requireInitialCookies =
         widget.control.getBool('require_initial_cookies', false) ?? false;
+    _blockUthLms = widget.control.getBool('block_uth_lms', false) ?? false;
     final nextHtml = widget.control.getString('html');
     final nextBaseUrl = widget.control.getString('base_url');
     if (nextHtml != null && nextHtml != _initialHtml) {
@@ -441,6 +444,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       viewerLocked: _viewerLocked,
       viewerPrefix: _viewerPrefix,
       allowedLoopbackPorts: _allowedLoopbackPorts,
+      blockUthLms: _blockUthLms,
     );
     final resolved = switch (decision.kind) {
       AppNavigationKind.allow => targetUrl.trim(),
@@ -729,6 +733,8 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         isForMainFrame: true,
         viewerLocked: _viewerLocked,
         currentUrl: _currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl,
+        blockUthLms: _blockUthLms,
+        platform: defaultTargetPlatform,
       );
       if (extPlan != null) {
         unawaited(
@@ -746,6 +752,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       rawPopupUrl,
       viewerLocked: _viewerLocked,
       allowedLoopbackPorts: _allowedLoopbackPorts,
+      blockUthLms: _blockUthLms,
     );
     if (target != null) {
       unawaited(_navigateInternal(controller, target));
@@ -792,7 +799,8 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   void _handlePopupSinkTarget(_PopupSinkEntry sink, String? rawUrl) {
     if (_disposed ||
         !sink.allowInPlaceRedirect ||
-        _consumedPopupSinkKeys.contains(sink.key)) {
+        _consumedPopupSinkKeys.contains(sink.key) ||
+        isTransientPopupSinkBootstrapUrl(rawUrl)) {
       return;
     }
     if (!kIsWeb &&
@@ -804,6 +812,8 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         isForMainFrame: true,
         viewerLocked: _viewerLocked,
         currentUrl: _currentLoadedUrl.isNotEmpty ? _currentLoadedUrl : _initialUrl,
+        blockUthLms: _blockUthLms,
+        platform: defaultTargetPlatform,
       );
       if (extPlan != null) {
         _consumedPopupSinkKeys.add(sink.key);
@@ -825,6 +835,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       rawUrl,
       viewerLocked: _viewerLocked,
       allowedLoopbackPorts: _allowedLoopbackPorts,
+      blockUthLms: _blockUthLms,
     );
     if (deferredTarget != null && _controller != null) {
       _consumedPopupSinkKeys.add(sink.key);
@@ -863,7 +874,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             }
           },
           onLoadStart: (ctrl, url) {
-            _handlePopupSinkTarget(sink, url?.toString());
+            final urlStr = url?.toString();
+            if (sink.allowInPlaceRedirect &&
+                !_consumedPopupSinkKeys.contains(sink.key) &&
+                isTransientPopupSinkBootstrapUrl(urlStr)) {
+              return;
+            }
+            _handlePopupSinkTarget(sink, urlStr);
             unawaited(ctrl.stopLoading().catchError((_) {}));
           },
           shouldOverrideUrlLoading: (_c, action) async {
@@ -926,6 +943,8 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                   isForMainFrame: action.isForMainFrame,
                   viewerLocked: _viewerLocked,
                   currentUrl: effectiveCurrentUrl,
+                  blockUthLms: _blockUthLms,
+                  platform: defaultTargetPlatform,
                 );
                 if (externalPlan != null) {
                   final preDocumentRedirect =
@@ -955,6 +974,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                 viewerLocked: _viewerLocked,
                 viewerPrefix: _viewerPrefix,
                 allowedLoopbackPorts: _allowedLoopbackPorts,
+                blockUthLms: _blockUthLms,
               );
               if (decision.kind == AppNavigationKind.redirectInPlace &&
                   decision.targetUrl != null) {
@@ -1019,6 +1039,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               final extUrl = resolveDownloadExternalUrl(
                 downloadStartRequest.url.toString(),
                 viewerLocked: _viewerLocked,
+                blockUthLms: _blockUthLms,
               );
               if (extUrl != null) {
                 widget.control.triggerEvent('external_url', extUrl);
@@ -1042,6 +1063,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                   viewerLocked: _viewerLocked,
                   viewerPrefix: _viewerPrefix,
                   allowedLoopbackPorts: _allowedLoopbackPorts,
+                  blockUthLms: _blockUthLms,
                 );
                 if (decision.kind == AppNavigationKind.redirectInPlace &&
                     decision.targetUrl != null) {

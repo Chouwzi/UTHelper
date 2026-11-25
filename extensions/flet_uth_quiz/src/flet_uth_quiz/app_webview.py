@@ -167,6 +167,7 @@ class UthAppWebView(LayoutControl):
     viewer_locked: bool = False
     allowed_loopback_ports: list[int] = field(default_factory=list)
     require_initial_cookies: bool = False
+    block_uth_lms: bool = False
     expand: bool | int | None = True
     on_page_started: Optional[ft.ControlEventHandler["UthAppWebView"]] = None
     on_page_ended: Optional[ft.ControlEventHandler["UthAppWebView"]] = None

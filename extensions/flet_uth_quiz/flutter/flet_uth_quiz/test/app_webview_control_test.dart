@@ -1189,6 +1189,12 @@ void main() {
       'file:///sdcard/Download/a.pdf',
       'content://media/external/file/1',
       'oem-internal-debug://secret',
+      'intent://127.0.0.1:54321/pdf-viewer/tok/#Intent;scheme=http;package=com.android.chrome;end',
+      'intent://example.com/#Intent;scheme=http;end',
+      'intent://pay#Intent;scheme=momo;end',
+      'intent://example.com/#Intent;package=com.android.chrome;end',
+      'intent://127.0.0.1/admin#Intent;scheme=https;end',
+      'intent://user@docs.google.com/doc#Intent;scheme=https;end',
     ]) {
       expect(
         resolveExternalAppNavigation(
@@ -1200,6 +1206,54 @@ void main() {
         reason: nonExternal,
       );
     }
+
+    // Demo Mode blockUthLms must cancel live *.ut.edu.vn navigations and intent:// handoffs
+    expect(
+      decideAppWebViewNavigation(
+        'https://courses.ut.edu.vn/course/view.php?id=101',
+        isForMainFrame: true,
+        viewerLocked: false,
+        blockUthLms: true,
+      ).kind,
+      AppNavigationKind.cancel,
+    );
+    expect(
+      decideAppWebViewNavigation(
+        'https://docs.google.com/spreadsheets/d/1/edit',
+        isForMainFrame: true,
+        viewerLocked: false,
+        blockUthLms: true,
+      ).kind,
+      AppNavigationKind.allow,
+    );
+    expect(
+      resolveExternalAppNavigation(
+        'intent://courses.ut.edu.vn/my/#Intent;scheme=https;package=com.android.chrome;end',
+        isForMainFrame: true,
+        viewerLocked: false,
+        blockUthLms: true,
+      ),
+      isNull,
+    );
+    // On iOS, Android-only intent:// URIs must NOT dispatch to launch_external_intent
+    expect(
+      resolveExternalAppNavigation(
+        docsMarketAndHttpsIntent,
+        isForMainFrame: true,
+        viewerLocked: false,
+        platform: TargetPlatform.iOS,
+      ),
+      isNull,
+    );
+    // Deferred popup sink bootstrap ignores transient empty / about:blank loads (TAB-POPUP-04)
+    expect(isTransientPopupSinkBootstrapUrl(null), isTrue);
+    expect(isTransientPopupSinkBootstrapUrl(''), isTrue);
+    expect(isTransientPopupSinkBootstrapUrl('about:blank'), isTrue);
+    expect(isTransientPopupSinkBootstrapUrl('about:blank#popup'), isTrue);
+    expect(
+      isTransientPopupSinkBootstrapUrl('https://docs.google.com/document/d/1/edit'),
+      isFalse,
+    );
   });
 
   test('parseAppWebViewColor, shouldRevealAppWebViewSurface, shouldReloadViaInitialUrl, and debug isInspectable work cleanly', () {

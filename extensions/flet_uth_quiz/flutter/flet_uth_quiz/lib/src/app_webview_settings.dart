@@ -547,6 +547,32 @@ bool _isPlayStoreHttpsUrl(String url) {
   return host == 'play.google.com' && uri.path.startsWith('/store/apps/details');
 }
 
+/// Returns true when [rawUrl] targets a UTH LMS/Portal domain (`ut.edu.vn` or
+/// `*.ut.edu.vn`), used to enforce Demo Mode offline isolation in WebViews.
+bool isUthLmsBrowserUrl(String? rawUrl) {
+  if (rawUrl == null) return false;
+  final trimmed = rawUrl.trim();
+  if (trimmed.isEmpty) return false;
+  final uri = Uri.tryParse(trimmed);
+  if (uri == null || !uri.hasAuthority || uri.host.isEmpty) return false;
+  var host = uri.host.toLowerCase();
+  while (host.endsWith('.')) {
+    host = host.substring(0, host.length - 1);
+  }
+  return host == 'ut.edu.vn' || host.endsWith('.ut.edu.vn');
+}
+
+/// Returns true for empty or initial `about:blank` URLs emitted by Android's
+/// child `WebViewTransport` before the real `window.open` target URL commits.
+bool isTransientPopupSinkBootstrapUrl(String? rawUrl) {
+  if (rawUrl == null) return true;
+  final lowered = rawUrl.trim().toLowerCase();
+  return lowered.isEmpty ||
+      lowered == 'about:blank' ||
+      lowered.startsWith('about:blank?') ||
+      lowered.startsWith('about:blank#');
+}
+
 bool _isSafeMarketFallbackUri(String raw) {
   final trimmed = raw.trim();
   if (trimmed.isEmpty ||
@@ -631,6 +657,8 @@ ExternalAppNavigationPlan? resolveExternalAppNavigation(
   required bool isForMainFrame,
   required bool viewerLocked,
   String? currentUrl,
+  bool blockUthLms = false,
+  TargetPlatform platform = TargetPlatform.android,
 }) {
   if (viewerLocked || !isForMainFrame || rawUrl == null) {
     return null;
@@ -643,8 +671,11 @@ ExternalAppNavigationPlan? resolveExternalAppNavigation(
   }
   final lowered = trimmed.toLowerCase();
   if (lowered.startsWith('intent://')) {
+    if (platform != TargetPlatform.android) return null;
     final markerIndex = lowered.indexOf('#intent;');
     if (markerIndex < 0) return null;
+    final hostAndPath = trimmed.substring('intent://'.length, markerIndex);
+    String? declaredScheme;
     String? marketUri;
     final tail = trimmed.substring(markerIndex + '#Intent;'.length);
     for (final rawPart in tail.split(';')) {
@@ -658,12 +689,35 @@ ExternalAppNavigationPlan? resolveExternalAppNavigation(
             }
           } catch (_) {}
         }
+      } else if (rawPart.toLowerCase().startsWith('scheme=')) {
+        declaredScheme =
+            rawPart.substring('scheme='.length).trim().toLowerCase();
+      }
+    }
+    if (declaredScheme == null ||
+        declaredScheme.isEmpty ||
+        (declaredScheme != 'https' &&
+            !allowedExternalAppSchemes.contains(declaredScheme))) {
+      return null;
+    }
+    if (declaredScheme == 'https') {
+      final candidateHttps = 'https://$hostAndPath';
+      if (hostAndPath.isEmpty || !_isValidHttpsBrowserUrl(candidateHttps)) {
+        return null;
+      }
+      if (blockUthLms && isUthLmsBrowserUrl(candidateHttps)) {
+        return null;
       }
     }
     final httpsFallback = resolveAndroidIntentFallbackUrl(
       trimmed,
       currentUrl: currentUrl,
     );
+    if (blockUthLms &&
+        httpsFallback != null &&
+        isUthLmsBrowserUrl(httpsFallback)) {
+      return null;
+    }
     final storeFallback =
         httpsFallback != null && _isPlayStoreHttpsUrl(httpsFallback);
     return ExternalAppNavigationPlan(
@@ -709,6 +763,7 @@ AppNavigationDecision decideAppWebViewNavigation(
   required bool viewerLocked,
   String? viewerPrefix,
   Set<int> allowedLoopbackPorts = const <int>{},
+  bool blockUthLms = false,
 }) {
   if (rawUrl == null) return const AppNavigationDecision.cancel();
   final trimmed = rawUrl.trim();
@@ -737,6 +792,9 @@ AppNavigationDecision decideAppWebViewNavigation(
       return const AppNavigationDecision.cancel();
     }
     if (_isValidHttpsBrowserUrl(inner)) {
+      if (blockUthLms && isUthLmsBrowserUrl(inner)) {
+        return const AppNavigationDecision.cancel();
+      }
       return const AppNavigationDecision.allow();
     }
     final innerUri = Uri.tryParse(inner);
@@ -793,6 +851,9 @@ AppNavigationDecision decideAppWebViewNavigation(
     if (isForMainFrame) {
       final fallback = resolveAndroidIntentFallbackUrl(trimmed);
       if (fallback != null) {
+        if (blockUthLms && isUthLmsBrowserUrl(fallback)) {
+          return const AppNavigationDecision.cancel();
+        }
         return AppNavigationDecision.redirectInPlace(fallback);
       }
     }
@@ -800,6 +861,9 @@ AppNavigationDecision decideAppWebViewNavigation(
   }
 
   if (_isValidHttpsBrowserUrl(trimmed)) {
+    if (blockUthLms && isUthLmsBrowserUrl(trimmed)) {
+      return const AppNavigationDecision.cancel();
+    }
     return const AppNavigationDecision.allow();
   }
 
@@ -917,6 +981,7 @@ String? resolveCreateWindowInPlaceTarget(
   String? rawUrl, {
   required bool viewerLocked,
   Set<int> allowedLoopbackPorts = const <int>{},
+  bool blockUthLms = false,
 }) {
   if (viewerLocked || rawUrl == null || rawUrl.trim().isEmpty) {
     return null;
@@ -926,6 +991,7 @@ String? resolveCreateWindowInPlaceTarget(
     isForMainFrame: true,
     viewerLocked: false,
     allowedLoopbackPorts: allowedLoopbackPorts,
+    blockUthLms: blockUthLms,
   );
   final target = switch (decision.kind) {
     AppNavigationKind.allow => rawUrl.trim(),
@@ -947,10 +1013,12 @@ String? resolveCreateWindowInPlaceTarget(
 String? resolveDownloadExternalUrl(
   String? rawUrl, {
   required bool viewerLocked,
+  bool blockUthLms = false,
 }) {
   if (viewerLocked || rawUrl == null) return null;
   final trimmed = rawUrl.trim();
   if (!_isValidHttpsBrowserUrl(trimmed)) return null;
+  if (blockUthLms && isUthLmsBrowserUrl(trimmed)) return null;
   return trimmed;
 }
 

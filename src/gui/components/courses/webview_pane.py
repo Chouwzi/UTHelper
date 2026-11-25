@@ -24,6 +24,8 @@ from gui.components.courses._shared import (
 from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     WindowsWebView2Dock,
+    _is_demo_lms_blocked,
+    _is_demo_mode_active,
     _is_flet_webview_platform,
     _is_inappwebview_mobile_platform,
     _webview2_runtime_available,
@@ -406,6 +408,11 @@ class CoursesWebViewPane(ft.Container):
         return self._url
 
     def _mount_engine(self) -> None:
+        if _is_demo_lms_blocked(self._url):
+            self._blocked_navigation = True
+            self._set_nav_loading(False)
+            self._show_blocked_url_card()
+            return
         use_bridge = _is_flet_webview_platform(
             self._page
         ) and not _is_inappwebview_mobile_platform(self._page)
@@ -433,6 +440,7 @@ class CoursesWebViewPane(ft.Container):
         cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
         if (
             is_uth_site
+            and not _is_demo_mode_active()
             and self._session_client is not None
             and hasattr(self._session_client, "get_session_cookies")
         ):
@@ -565,6 +573,9 @@ class CoursesWebViewPane(ft.Container):
     def _on_native_url_or_bridge(self, url: str) -> None:
         if not url or "/session/" in url:
             return
+        if _is_demo_lms_blocked(url):
+            self._on_host_error(f"Blocked disallowed WebView URL: {url}")
+            return
 
         def _apply() -> None:
             self._url = url
@@ -584,6 +595,8 @@ class CoursesWebViewPane(ft.Container):
         return bool(safe_http_url(url, allow_loopback=True)) and bool(checker(url))
 
     def _is_allowed_navigation_url(self, url: str) -> bool:
+        if _is_demo_lms_blocked(url):
+            return False
         if bool(safe_http_url(url)):
             return True
         return self._is_allowed_preview_url(url)

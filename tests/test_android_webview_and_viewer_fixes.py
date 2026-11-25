@@ -1164,5 +1164,319 @@ def test_in_app_webview_dialog_parity_toolbar_url_sync_and_error_fallback(
     assert len(body_buttons) >= 1
 
 
+def test_demo_mode_blocks_mid_session_uth_lms_redirects_across_webview_hosts_and_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """HIGH-SEAM: In Demo Mode (uthelper_demo), non-UTH HTTPS and local preview URLs work,
+    but initial or mid-session redirects/links to *.ut.edu.vn are blocked across
+    EmbeddedWebViewHost, WindowsWebView2Dock, CoursesWebViewPane, and InAppWebViewDialog."""
+    from email.message import Message
+    import importlib.util
+    import sys
+    from urllib.error import HTTPError
+    from urllib.parse import urlsplit
+    import urllib.request
+
+    from config import settings
+    from gui.components import in_app_webview as webview_module
+    from gui.components.courses.embedded_webview_host import (
+        WindowsWebView2Dock,
+        _is_demo_lms_blocked,
+        _is_demo_mode_active,
+    )
+    from gui.components.in_app_webview import (
+        InAppWebViewDialog,
+        _HttpsOnlyRedirectHandler,
+        _fetch_https_preview,
+    )
+    from gui.core import utils as gui_utils
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "uthelper_demo")
+
+    # When PR #136's core.demo_sandbox is not merged yet, verify the standalone fallback
+    # safely returns False without ImportError, then supply the minimal seam to verify
+    # the full end-to-end WebView Demo blocking behavior. Once PR #136 merges, this test
+    # runs directly against the real core.demo_sandbox and gui.core.utils.is_uth_lms_url.
+    if importlib.util.find_spec("core.demo_sandbox") is None:
+        assert _is_demo_mode_active() is False
+        assert _is_demo_lms_blocked("https://courses.ut.edu.vn/my/") is False
+        monkeypatch.setitem(
+            sys.modules,
+            "core.demo_sandbox",
+            SimpleNamespace(
+                is_demo_account=lambda user: str(user or "").strip().casefold()
+                == "uthelper_demo"
+            ),
+        )
+        monkeypatch.setattr(
+            gui_utils,
+            "is_uth_lms_url",
+            lambda raw_url: (
+                isinstance(raw_url, str)
+                and urlsplit(raw_url.strip()).scheme.lower() in ("http", "https")
+                and (
+                    (urlsplit(raw_url.strip()).hostname or "").rstrip(".").casefold()
+                    == "ut.edu.vn"
+                    or (urlsplit(raw_url.strip()).hostname or "")
+                    .rstrip(".")
+                    .casefold()
+                    .endswith(".ut.edu.vn")
+                )
+            ),
+            raising=False,
+        )
+
+    live_page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+
+    # 1. Direct UTH LMS EmbeddedWebViewHost is refused in Demo Mode, while loopback and non-UTH work
+    assert (
+        build_embedded_webview_host(
+            "https://courses.ut.edu.vn/course/view.php?id=101", page=live_page
+        )
+        is None
+    )
+    loopback_host = build_embedded_webview_host(
+        "http://127.0.0.1:51234/pdf-viewer/AbCdEfGh_IjKlMn/pdf_host.html",
+        page=live_page,
+    )
+    assert loopback_host is not None
+    loopback_host.dispose()
+
+    # 2. WindowsWebView2Dock blocks mid-session UTH LMS navigation in Demo Mode
+    dock = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://docs.google.com/spreadsheets/d/1/edit",
+    )
+    try:
+        assert (
+            dock._is_navigation_uri_allowed(
+                "https://docs.google.com/spreadsheets/d/1/htmlview"
+            )
+            is True
+        )
+        assert dock._is_navigation_uri_allowed("https://courses.ut.edu.vn/my/") is False
+        assert (
+            dock._is_navigation_uri_allowed("https://portal.ut.edu.vn/dashboard")
+            is False
+        )
+    finally:
+        dock.dispose()
+
+    # 3. CoursesWebViewPane opened on non-UTH page blocks mid-session redirect and _navigate_link to *.ut.edu.vn
+    launched_ext: list[str] = []
+    pane = CoursesWebViewPane(
+        page=live_page,
+        source="courses",
+        title="Google Docs",
+        url="https://docs.google.com/spreadsheets/d/1/edit",
+        on_back=lambda: None,
+        on_open_external=launched_ext.append,
+    )
+    try:
+        assert pane._host is not None
+        wv = pane._host.control().content
+        assert getattr(wv, "block_uth_lms", False) is True
+
+        # _navigate_link refuses UTH LMS link in Demo Mode
+        pane._navigate_link("https://courses.ut.edu.vn/mod/assign/view.php?id=101")
+        assert pane._url == "https://docs.google.com/spreadsheets/d/1/edit"
+        assert pane._host is not None
+
+        # Mid-session WebView redirect to courses.ut.edu.vn is blocked and tears down host
+        wv.on_url_change(SimpleNamespace(data="https://courses.ut.edu.vn/my/"))
+        assert pane._host is None
+        assert pane._blocked_navigation is True
+        assert "ut.edu.vn" not in pane._url
+    finally:
+        pane.dispose()
+
+    # 4. InAppWebViewDialog blocks direct UTH show(), mid-session UTH redirects, preview fetches, and external launch
+    dialogs: list[Any] = []
+    monkeypatch.setattr(live_page, "show_dialog", dialogs.append, raising=False)
+    monkeypatch.setattr(live_page, "pop_dialog", lambda: None, raising=False)
+
+    assert (
+        InAppWebViewDialog(
+            live_page, url="https://courses.ut.edu.vn/course/view.php?id=101"
+        ).show()
+        is False
+    )
+    assert dialogs == []
+
+    dlg = InAppWebViewDialog(
+        live_page,
+        url="https://docs.google.com/document/d/1/edit",
+        title="Docs",
+        on_open_external=launched_ext.append,
+    )
+    assert dlg.show() is True
+    assert len(dialogs) == 1
+    assert dlg._embedded_host is not None
+    wv_dlg = dlg._embedded_host.control().content
+    wv_dlg.on_url_change(SimpleNamespace(data="https://thnn.ut.edu.vn/my/"))
+    assert dlg._closed is True
+    assert dlg._embedded_host is None
+    assert "ut.edu.vn" not in dlg._url
+
+    # Fallback flet_webview path also closes on mid-session UTH redirect in Demo Mode
+    created_fb: list[dict[str, Any]] = []
+
+    class _FakeWebView(ft.Container):
+        def __init__(self, url, **kwargs):
+            created_fb.append(kwargs)
+            super().__init__(expand=True)
+
+    monkeypatch.setattr(
+        webview_module, "flet_webview", SimpleNamespace(WebView=_FakeWebView)
+    )
+    pop_count = 0
+
+    def _pop():
+        nonlocal pop_count
+        pop_count += 1
+
+    dummy_page = SimpleNamespace(
+        platform=ft.PagePlatform.ANDROID,
+        web=False,
+        width=400,
+        height=800,
+        show_dialog=dialogs.append,
+        pop_dialog=_pop,
+        run_task=lambda *_a, **_k: None,
+        update=lambda: None,
+    )
+    dlg_fb = InAppWebViewDialog(
+        dummy_page,  # type: ignore[arg-type]
+        url="https://docs.google.com/document/d/2/edit",
+        title="Docs 2",
+        on_open_external=launched_ext.append,
+    )
+    assert dlg_fb.show() is True
+    created_fb[0]["on_url_change"](SimpleNamespace(data="https://portal.ut.edu.vn/"))
+    assert pop_count == 1
+    assert dlg_fb._closed is True
+
+    # _handle_open_external refuses if _url is UTH in Demo Mode
+    dlg_fb._url = "https://courses.ut.edu.vn/my/"
+    dlg_fb._handle_open_external()
+    assert launched_ext == []
+
+    # Static HTML preview & redirect handler reject UTH targets in Demo Mode
+    assert _fetch_https_preview("https://courses.ut.edu.vn/my/") == ("", "")
+    handler = _HttpsOnlyRedirectHandler()
+    req = urllib.request.Request("https://example.com/shortlink")
+    with pytest.raises(HTTPError):
+        handler.redirect_request(
+            req, None, 302, "Found", Message(), "https://courses.ut.edu.vn/my/"
+        )
+
+
+def test_in_app_webview_dialog_barrier_dismiss_disposes_host_and_pairs_modal_occlusion(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """MEDIUM-LIFECYCLE: Barrier dismiss (on_dismiss) and close() must idempotently dispose
+    _embedded_host and pair modal_dialog WebView2 occlusion (both 2-arg and tokenized)."""
+    import inspect
+
+    from gui.components.courses import embedded_webview_host as host_mod
+    from gui.components.courses.embedded_webview_host import (
+        clear_global_webview_occlusion,
+        is_globally_occluded,
+        set_global_webview_occlusion,
+    )
+    from gui.components.in_app_webview import (
+        InAppWebViewDialog,
+        _set_modal_webview_occlusion,
+    )
+
+    clear_global_webview_occlusion()
+    try:
+        live_page = _make_live_mobile_page(ft.PagePlatform.ANDROID)
+        dialogs: list[Any] = []
+        monkeypatch.setattr(live_page, "show_dialog", dialogs.append, raising=False)
+        monkeypatch.setattr(live_page, "pop_dialog", lambda: None, raising=False)
+
+        # 1. Barrier dismiss disposes _embedded_host and clears modal_dialog occlusion
+        dlg = InAppWebViewDialog(
+            live_page,
+            url="https://docs.google.com/spreadsheets/d/1/edit",
+            title="Sheet",
+        )
+        assert is_globally_occluded() is False
+        assert dlg.show() is True
+        assert is_globally_occluded() is True
+        assert dlg._embedded_host is not None
+
+        dispose_calls = 0
+        orig_dispose = dlg._embedded_host.dispose
+
+        def _spy_dispose() -> None:
+            nonlocal dispose_calls
+            dispose_calls += 1
+            orig_dispose()
+
+        monkeypatch.setattr(dlg._embedded_host, "dispose", _spy_dispose)
+        alert = dialogs[-1]
+        assert callable(alert.on_dismiss)
+        alert.on_dismiss(None)
+
+        assert dlg._closed is True
+        assert dlg._embedded_host is None
+        assert dlg._webview is None
+        assert dispose_calls == 1
+        assert is_globally_occluded() is False
+
+        # Subsequent close() is a safe idempotent no-op
+        dlg.close()
+        assert dispose_calls == 1
+        assert is_globally_occluded() is False
+
+        # 2. Stacked outer occlusion stays occluded when inner InAppWebViewDialog closes
+        if "token" in inspect.signature(set_global_webview_occlusion).parameters:
+            set_global_webview_occlusion("modal_dialog", True, token="outer_modal_1")
+            assert is_globally_occluded() is True
+
+            dlg2 = InAppWebViewDialog(
+                live_page,
+                url="https://docs.google.com/document/d/2/edit",
+                title="Doc",
+            )
+            assert dlg2.show() is True
+            assert is_globally_occluded() is True
+            dlg2.close()
+            dialogs[-1].on_dismiss(None)
+            assert is_globally_occluded() is True
+
+            set_global_webview_occlusion("modal_dialog", False, token="outer_modal_1")
+            assert is_globally_occluded() is False
+        else:
+            set_global_webview_occlusion("detail_view", True)
+            assert is_globally_occluded() is True
+            dlg2 = InAppWebViewDialog(
+                live_page,
+                url="https://docs.google.com/document/d/2/edit",
+                title="Doc",
+            )
+            assert dlg2.show() is True
+            dlg2.close()
+            assert is_globally_occluded() is True
+            set_global_webview_occlusion("detail_view", False)
+            assert is_globally_occluded() is False
+
+        # 3. Explicit 2-arg TypeError fallback remains safe even if signature lacks token=
+        two_arg_calls: list[tuple[str, bool]] = []
+        with monkeypatch.context() as mp:
+            mp.setattr(
+                host_mod,
+                "set_global_webview_occlusion",
+                lambda reason, occluded: two_arg_calls.append((reason, occluded)),
+            )
+            _set_modal_webview_occlusion(True, token="tok_test")
+            _set_modal_webview_occlusion(False, token="tok_test")
+        assert two_arg_calls == [("modal_dialog", True), ("modal_dialog", False)]
+    finally:
+        clear_global_webview_occlusion()
+
+
 
 

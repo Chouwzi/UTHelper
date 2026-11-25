@@ -7,6 +7,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from typing import Any, Optional
 
@@ -14,6 +15,7 @@ import flet as ft
 from bs4 import BeautifulSoup
 
 from core.url_validation import validate_https_url, validate_public_https_url
+from gui.core import utils as _gui_utils
 from gui.core.theme import C
 from gui.core.utils import html_to_markdown
 
@@ -25,6 +27,35 @@ except ImportError:  # pragma: no cover - optional on non-mobile CI environments
 logger = logging.getLogger(__name__)
 
 _MAX_PREVIEW_BYTES = 2 * 1024 * 1024
+_DEFAULT_DEMO_LMS_WEBVIEW_GUARD_MESSAGE = (
+    "Phiên xem thử (Demo) sử dụng dữ liệu mẫu ngoại tuyến. "
+    "Đăng nhập bằng tài khoản sinh viên UTH để mở cổng LMS trực tuyến."
+)
+
+
+def _is_demo_lms_blocked(url: object) -> bool:
+    if not url:
+        return False
+    try:
+        from config import settings
+        from core.demo_sandbox import is_demo_account
+    except ImportError:
+        return False
+    if not is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+        return False
+    is_uth_lms_fn = getattr(_gui_utils, "is_uth_lms_url", None)
+    return bool(callable(is_uth_lms_fn) and is_uth_lms_fn(url))
+
+
+def _set_modal_webview_occlusion(occluded: bool, *, token: str) -> None:
+    from gui.components.courses.embedded_webview_host import (
+        set_global_webview_occlusion,
+    )
+
+    try:
+        set_global_webview_occlusion("modal_dialog", occluded, token=token)
+    except TypeError:
+        set_global_webview_occlusion("modal_dialog", occluded)
 
 
 class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -32,7 +63,10 @@ class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is None:
             return None
-        if validate_public_https_url(redirected.full_url, resolve_dns=True) is None:
+        if (
+            validate_public_https_url(redirected.full_url, resolve_dns=True) is None
+            or _is_demo_lms_blocked(redirected.full_url)
+        ):
             raise urllib.error.HTTPError(
                 redirected.full_url,
                 code,
@@ -60,7 +94,7 @@ def supports_native_webview(page: Optional[ft.Page]) -> bool:
 def _fetch_https_preview(url: str) -> tuple[str, str]:
     """Fetch bounded HTTPS HTML and convert it into a readable preview."""
     validated = validate_public_https_url(url, resolve_dns=True)
-    if validated is None:
+    if validated is None or _is_demo_lms_blocked(validated):
         return "", ""
     opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
     req = urllib.request.Request(
@@ -73,7 +107,10 @@ def _fetch_https_preview(url: str) -> tuple[str, str]:
     )
     with opener.open(req, timeout=10) as resp:
         final_url = getattr(resp, "geturl", lambda: validated)()
-        if validate_public_https_url(final_url, resolve_dns=True) is None:
+        if (
+            validate_public_https_url(final_url, resolve_dns=True) is None
+            or _is_demo_lms_blocked(final_url)
+        ):
             return "", ""
         raw = resp.read(_MAX_PREVIEW_BYTES + 1)
     if len(raw) > _MAX_PREVIEW_BYTES:
@@ -145,9 +182,38 @@ class InAppWebViewDialog:
         self._webview = None
         self._embedded_host = None
         self._closed = False
+        self._occlusion_token = f"in_app_webview_dlg_{uuid.uuid4().hex}"
+        self._occlusion_active = False
+
+    def _show_demo_guard_snackbar(self) -> None:
+        overlay = getattr(self._page, "overlay", None)
+        if not isinstance(overlay, list):
+            return
+        guard_msg = getattr(
+            _gui_utils,
+            "DEMO_LMS_WEBVIEW_GUARD_MESSAGE",
+            _DEFAULT_DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+        )
+        sb = ft.SnackBar(
+            content=ft.Text(guard_msg, size=13, color=C.TEXT_PRIMARY),
+            bgcolor=C.SURFACE,
+            duration=3000,
+        )
+        overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
+        overlay.append(sb)
+        sb.open = True
+        update_fn = getattr(self._page, "update", None)
+        if callable(update_fn):
+            try:
+                update_fn()
+            except Exception:
+                pass
 
     def show(self) -> bool:
         if not self._url or self._page is None:
+            return False
+        if _is_demo_lms_blocked(self._url):
+            self._show_demo_guard_snackbar()
             return False
 
         host = urllib.parse.urlsplit(self._url).hostname or self._url
@@ -277,6 +343,10 @@ class InAppWebViewDialog:
         committed_state = {"done": False}
 
         def _on_embedded_url_changed(nav_url: str) -> None:
+            if _is_demo_lms_blocked(nav_url):
+                self._show_demo_guard_snackbar()
+                self.close()
+                return
             validated_nav = validate_public_https_url(nav_url, resolve_dns=False)
             if validated_nav:
                 self._url = validated_nav
@@ -294,7 +364,12 @@ class InAppWebViewDialog:
                 self._safe_update(forward_icon_btn)
 
         def _on_embedded_error(reason: str) -> None:
-            if self._closed or committed_state["done"]:
+            if self._closed:
+                return
+            if str(reason or "").startswith("Blocked disallowed WebView URL:"):
+                self.close()
+                return
+            if committed_state["done"]:
                 return
             host_ref = self._embedded_host
             if host_ref is not None:
@@ -407,6 +482,8 @@ class InAppWebViewDialog:
             def _is_safe_native_url(nav_url: str) -> bool:
                 if not nav_url:
                     return True
+                if _is_demo_lms_blocked(nav_url):
+                    return False
                 # Case-insensitive validation: block non-HTTPS schemes and local/private targets.
                 return (
                     validate_https_url(nav_url) is not None
@@ -537,24 +614,36 @@ class InAppWebViewDialog:
             title_padding=ft.Padding.only(left=16, right=8, top=10, bottom=4),
             bgcolor=C.SURFACE,
             shape=ft.RoundedRectangleBorder(radius=14),
-            on_dismiss=lambda _e: setattr(self, "_closed", True),
+            on_dismiss=lambda _e: self._cleanup_on_close(),
         )
+        self._occlusion_active = True
+        _set_modal_webview_occlusion(True, token=self._occlusion_token)
         try:
             self._page.show_dialog(self._dialog)
             return True
         except Exception:
+            self._cleanup_on_close()
             logger.debug("Could not present InAppWebViewDialog", exc_info=True)
             return False
 
-    def close(self) -> None:
+    def _cleanup_on_close(self) -> None:
         self._closed = True
+        if self._occlusion_active:
+            self._occlusion_active = False
+            _set_modal_webview_occlusion(False, token=self._occlusion_token)
         if self._embedded_host is not None:
-            try:
-                self._embedded_host.dispose()
-            except Exception:
-                pass
+            host_ref = self._embedded_host
             self._embedded_host = None
             self._webview = None
+            try:
+                host_ref.dispose()
+            except Exception:
+                pass
+        else:
+            self._webview = None
+
+    def close(self) -> None:
+        self._cleanup_on_close()
         try:
             self._page.pop_dialog()
         except Exception:
@@ -626,6 +715,9 @@ class InAppWebViewDialog:
             logger.debug("Could not schedule in-app HTML preview", exc_info=True)
 
     def _handle_open_external(self, _event=None) -> None:
+        if not self._url or _is_demo_lms_blocked(self._url):
+            self._show_demo_guard_snackbar()
+            return
         if callable(self._on_open_external):
             self._on_open_external(self._url)
             return

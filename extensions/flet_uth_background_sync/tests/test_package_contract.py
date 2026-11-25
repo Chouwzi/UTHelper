@@ -453,6 +453,8 @@ def test_external_intent_launcher_sanitizes_browsable_intents_and_blocks_redirec
     assert "ActivityAware" in plugin
     assert "activity ?: context" in plugin
     assert "buildSafeExternalIntent" in plugin
+    assert "ALLOWED_EXTERNAL_SCHEMES" in plugin
+    assert "isSafePublicHttpsUri" in plugin
     assert "Intent.URI_INTENT_SCHEME" in plugin
     assert "Intent.CATEGORY_BROWSABLE" in plugin
     assert "parsed.component = null" in plugin
