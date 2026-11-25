@@ -13,19 +13,35 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
 | `exe_lts` | Windows `.msi` + Burn `.exe` (`x64`) | GitHub Releases (LTS) | Signed GitHub Releases (Authenticode-pinned `WindowsPackageVerifier` + `WindowsPackageLauncher`) | Retained |
 | `ios_sideload` | iOS unsigned `.ipa` (`io.github.chouwzi.uthelper`, `arm64`) | GitHub Releases (LTS) | Manual user re-signing (Sideloadly / AltStore) | Manual release page link only |
 
-> **Cross-channel & legacy `apk_lts` migration notes**:
+> **Cross-channel, legacy `apk_lts`, and iOS sideload migration notes**:
 > - Store builds and GitHub LTS builds use separate signing certificates (Play
 >   App Signing vs GitHub keystore) and Windows packaging containers (MSIX
 >   container vs Program Files MSI). Users moving between GitHub LTS and a Store
 >   channel must uninstall/reinstall rather than upgrading in place across
 >   tracks.
-> - **One-time reinstall for legacy `v2.2.8`–`v2.5.0` `apk_lts` users**: Starting
->   after `v2.5.0`, Android (`chplay` and `apk_lts`) and iOS (`ipa`) unify on
->   `io.github.chouwzi.uthelper`. Because Android treats a new `applicationId` as
->   a separate app, users upgrading from `v2.2.8`–`v2.5.0` sideloaded APKs must
->   install the new `io.github.chouwzi.uthelper` APK once from GitHub Releases,
->   sign in again, and uninstall the legacy `v2.2.8`–`v2.5.0` app. Subsequent
->   `apk_lts` releases update in place normally.
+> - **One-time reinstall for legacy `v2.2.8`–`v2.5.0` Android `apk_lts` users
+>   (`v2.5.1` Release Notes requirement)**: Starting with `v2.5.1`, Android
+>   (`chplay` and `apk_lts`) and iOS (`ipa`) unify on
+>   `io.github.chouwzi.uthelper`. Because shipped `v2.2.8`–`v2.5.0` Android
+>   `apk_lts` builds (`com.uthelper.uthelper`) reject a new `applicationId`
+>   after download with `"Android đã từ chối gói cập nhật"`, `v2.5.1` Release
+>   Notes must explicitly instruct those users to perform a one-time manual APK
+>   install of the `io.github.chouwzi.uthelper` build from GitHub Releases, sign
+>   in again, and uninstall the old `com.uthelper.uthelper` app. Starting in
+>   `v2.5.1`, the Android updater validates `package.signer_identity` before
+>   downloading and falls back to manual GitHub Releases download on any future
+>   package ID mismatch; subsequent `apk_lts` releases under
+>   `io.github.chouwzi.uthelper` update in place normally.
+> - **One-time reinstall for legacy `v2.2.8`–`v2.5.0` iOS sideload users
+>   (`Sideloadly` / `AltStore`)**: Because `v2.5.1` changes `CFBundleIdentifier`
+>   from `com.uthelper.UTHelper` to `io.github.chouwzi.uthelper` and iOS scopes
+>   the app sandbox and Keychain (`com.uthelper.app_secrets`, without an explicit
+>   `kSecAttrAccessGroup`) to `CFBundleIdentifier`, iOS sideload users must
+>   **uninstall the old `com.uthelper.UTHelper` app first** before installing
+>   `UTHelper-2.5.1.ipa` via Sideloadly or AltStore. Skipping uninstall leaves a
+>   separate Keychain partition, creates a duplicate app icon, and can hit
+>   Apple's 3-app active signing cap on free Apple IDs. After reinstalling, sign
+>   in again once.
 
 ---
 
@@ -114,7 +130,7 @@ built-in offline Reviewer Demo credentials below:
 ```text
 UTHelper is an independent student study companion for Ho Chi Minh City University of Transport (UTH) students. Real accounts require a university-issued student ID (MSSV). For Google Play review and automated testing, please sign in with the built-in Reviewer Demo account above:
 
-1. Launch UTHelper. If the first-run Terms & Privacy dialog ("Điều khoản & Quyền riêng tư") appears, tap the primary accept button ("Đồng ý & Tiếp tục") to continue.
+1. Launch UTHelper. The app opens directly to the "Đăng nhập UTH" sign-in dialog (dismiss any standard Android OS notification permission prompt if shown).
 2. In the "Đăng nhập UTH" sign-in dialog, enter Username `uthelper_demo` in the first field ("Mã số sinh viên (MSSV)") and Password `UTH-Review-2026!` in the second field ("Mật khẩu"), then tap "Đăng nhập" (Sign in).
 3. All 5 primary navigation tabs unlock immediately using realistic, date-relative sample university data through the exact same UI, filtering, search, document reader, and GPA calculation code paths as a live student account:
    - Tab 1 ("Tổng quan"): Upcoming assignments, quizzes, attendance, detail sheets, and today's class schedule.

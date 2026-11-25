@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-20
-- Updated: 2026-11-24
+- Updated: 2026-11-25
 - Extends: [ADR 0003: Platform release update channel](0003-signed-release-update-channel.md)
 
 ## Context
@@ -44,7 +44,7 @@ packages:
 ## Decision
 
 1. **Explicit Distribution Channel Model (`src/core/distribution.py`) & Unified Mobile Package Identity (`io.github.chouwzi.uthelper`)**:
-   - Standardize `[tool.flet] org = "io.github.chouwzi"` and mobile `applicationId` / `CFBundleIdentifier` on **`io.github.chouwzi.uthelper`** across Android (`chplay` `.aab`, `apk_lts` `.apk`) and iOS (`ipa`), matching the verified open-source publisher namespace (`github.com/Chouwzi/UTHelper` / `chouwzi.github.io`) without colliding with UTH's official app (`vn.edu.ut.app`) or unowned `.com` domains. Windows MSI `UpgradeCode` GUIDs, `single_instance.py` local mutex naming (`com.uthelper.UTHelper`), Partner Center `MSSTORE_IDENTITY_NAME`, isolated QA/benchmark IDs (`com.uthelper.qa`, `com.uthelper.benchmark`), and internal Kotlin plugin namespaces (`com.uthelper.backgroundsync`, `com.uthelper.quiz`) remain unchanged.
+   - Standardize `[tool.flet] org = "io.github.chouwzi"` and mobile `applicationId` / `CFBundleIdentifier` on **`io.github.chouwzi.uthelper`** across Android (`chplay` `.aab`, `apk_lts` `.apk`) and iOS (`ipa`), matching the verified open-source publisher namespace (`github.com/Chouwzi/UTHelper` / `chouwzi.github.io`) without colliding with UTH's official app (`vn.edu.ut.app`) or unowned `.com` domains. Windows MSI `UpgradeCode` GUIDs, `single_instance.py` local mutex naming (`com.uthelper.UTHelper`), Partner Center `MSSTORE_IDENTITY_NAME`, isolated QA/benchmark IDs (`com.uthelper.qa`, `com.uthelper.benchmark`), and the internal Android Kotlin plugin namespace (`com.uthelper.backgroundsync`; `flet_uth_quiz` is pure Dart without an Android Kotlin namespace) remain unchanged.
    - Introduce a pure, testable 5-channel `DistributionChannel` boundary:
      - `chplay`: Google Play Store Android `.aab` (`supports_github_self_update = False`,
        deep link `market://details?id=io.github.chouwzi.uthelper` with HTTPS fallback).
@@ -119,10 +119,24 @@ packages:
     keystore) and Windows installation models (MSIX container vs machine-scoped Program Files
     MSI). Users migrating between GitHub LTS and a Store release must reinstall rather than
     in-place upgrading across tracks.
-  - Existing `apk_lts` users on legacy `v2.2.8`–`v2.5.0` builds (which used the pre-unification
-    application ID) perform a one-time install of the `io.github.chouwzi.uthelper` APK from
-    GitHub Releases and uninstall the older app; all subsequent `apk_lts` releases upgrade in
-    place under `io.github.chouwzi.uthelper`.
+  - Existing Android `apk_lts` users on legacy `v2.2.8`–`v2.5.0` builds
+    (`com.uthelper.uthelper`) will see `"Android đã từ chối gói cập nhật"` if they
+    trigger the shipped `v2.2.8`–`v2.5.0` in-app updater against `v2.5.1`; the
+    `v2.5.1` Release Notes must direct them to perform a one-time manual install
+    of the `io.github.chouwzi.uthelper` APK from GitHub Releases, sign in again,
+    and uninstall the legacy `com.uthelper.uthelper` app. Starting in `v2.5.1`,
+    `select_candidate` and `android_updates.py` validate `package.signer_identity`
+    before download and fall back to manual GitHub Releases download on any future
+    package ID mismatch; all subsequent `apk_lts` releases upgrade in place under
+    `io.github.chouwzi.uthelper`.
+  - Existing iOS sideload users (`Sideloadly` / `AltStore`) migrating from
+    `v2.2.8`–`v2.5.0` (`com.uthelper.UTHelper`) to `v2.5.1`
+    (`io.github.chouwzi.uthelper`) must uninstall the old `com.uthelper.UTHelper`
+    app before installing the new `.ipa`: iOS implicitly scopes both the app
+    sandbox and Keychain (`com.uthelper.app_secrets`, with no explicit
+    `kSecAttrAccessGroup`) to `CFBundleIdentifier`, so installing side-by-side
+    creates a separate Keychain partition, a duplicate home-screen icon, and can
+    exhaust the 3-app free Apple ID active signing cap.
   - Maintainers must supply Partner Center identity values (`MSSTORE_IDENTITY_NAME`,
     `MSSTORE_PUBLISHER`, `MSSTORE_PRODUCT_ID`) and Play Console upload credentials via
     environment variables/workflow inputs rather than committing secrets to the repository.

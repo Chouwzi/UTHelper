@@ -10,6 +10,7 @@ import urllib.parse
 
 from packaging.version import InvalidVersion, Version
 
+from core.distribution import DEFAULT_ANDROID_PACKAGE_ID
 from core.update_models import (
     ReleaseManifest,
     ReleasePackage,
@@ -435,11 +436,78 @@ def parse_manifest(
     raise ManifestError("unsupported release manifest schema")
 
 
+def _expected_android_signer_identity(
+    manifest: ReleaseManifest,
+    package: ReleasePackage,
+    expected_signer_identity: str | None,
+) -> str | None:
+    if package.platform != "android":
+        return None
+    if expected_signer_identity is not None:
+        cleaned = expected_signer_identity.strip()
+        if cleaned:
+            return cleaned
+    if manifest.schema_version == 3 and package.signature_kind == "apk-pinned":
+        return DEFAULT_ANDROID_PACKAGE_ID
+    return None
+
+
+def _android_signer_identity_mismatch(
+    manifest: ReleaseManifest,
+    package: ReleasePackage,
+    expected_signer_identity: str | None,
+) -> tuple[str, str] | None:
+    expected = _expected_android_signer_identity(
+        manifest,
+        package,
+        expected_signer_identity,
+    )
+    actual = str(package.signer_identity or "").strip()
+    if expected and actual and actual != expected:
+        return expected, actual
+    return None
+
+
+def manual_install_reason(
+    candidate: UpdateCandidate,
+    *,
+    expected_signer_identity: str | None = None,
+) -> str | None:
+    """Return an explanation when a candidate requires manual GitHub download."""
+    android_mismatch = _android_signer_identity_mismatch(
+        candidate.manifest,
+        candidate.package,
+        expected_signer_identity,
+    )
+    if android_mismatch is not None:
+        expected_id, actual_id = android_mismatch
+        return (
+            f"Android package ID migration required: release targets {actual_id} "
+            f"instead of installed {expected_id}; download the APK manually from "
+            "GitHub Releases."
+        )
+    if candidate.automatic_install_allowed:
+        return None
+    if candidate.manifest.schema_version == 1:
+        return "Legacy schema 1 release requires manual download from GitHub Releases."
+    if (
+        candidate.manifest.schema_version == 3
+        and candidate.package.platform == "ios"
+        and candidate.package.signature_kind == "unsigned-resign-required"
+    ):
+        return (
+            "Unsigned iOS IPA requires manual download from GitHub Releases and "
+            "re-signing via Sideloadly or AltStore."
+        )
+    return "Manual download from GitHub Releases is required."
+
+
 def select_candidate(
     manifest: ReleaseManifest,
     *,
     current_version: str,
     target: RuntimeTarget,
+    expected_signer_identity: str | None = None,
 ) -> UpdateCandidate | None:
     current = _version(current_version, "current_version")
     if Version(manifest.release_version) <= Version(current):
@@ -470,10 +538,19 @@ def select_candidate(
     if not matches:
         return None
     package = matches[0]
-    in_app_install_allowed = manifest.schema_version in {2, 3} and not (
-        manifest.schema_version == 3
-        and package.platform == "ios"
-        and package.signature_kind == "unsigned-resign-required"
+    android_mismatch = _android_signer_identity_mismatch(
+        manifest,
+        package,
+        expected_signer_identity,
+    )
+    in_app_install_allowed = (
+        manifest.schema_version in {2, 3}
+        and not (
+            manifest.schema_version == 3
+            and package.platform == "ios"
+            and package.signature_kind == "unsigned-resign-required"
+        )
+        and android_mismatch is None
     )
     return UpdateCandidate(
         manifest=manifest,
@@ -485,6 +562,7 @@ def select_candidate(
 
 __all__ = [
     "ManifestError",
+    "manual_install_reason",
     "normalize_fingerprint",
     "parse_manifest",
     "select_candidate",
