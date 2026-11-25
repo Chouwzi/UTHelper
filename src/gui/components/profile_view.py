@@ -626,7 +626,10 @@ class ProfileView(ft.Container):
                 src="uth_campus_banner.jpg",
                 height=180,
                 expand=True,
-                fit=ft.BoxFit.COVER,
+                # The panorama asset already includes the campus from the dome
+                # down through the lower facade; fill the wide banner without
+                # cropping that lower portion away.
+                fit=ft.BoxFit.FILL,
                 border_radius=12,
                 anti_alias=True,
                 semantics_label="Trường Đại học Giao thông Vận tải TP. Hồ Chí Minh",
