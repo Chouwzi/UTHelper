@@ -10,10 +10,10 @@ import re
 import threading
 import urllib.parse
 from collections.abc import Callable, Iterable
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
+from core.demo_sandbox import is_demo_account
 from core.quiz_player import _is_quiz_session_leased, quiz_session_key
 from core.url_validation import validate_https_url
 
@@ -41,6 +41,9 @@ _CANONICAL_HOST_FOR_SITE: dict[_AuthSite, str] = {
     "thnn": _THNN_HOST,
     "portal": _PORTAL_HOST,
 }
+_ALLOWED_MOODLE_COOKIE_DOMAINS: frozenset[str] = frozenset(
+    {_COURSES_HOST, _THNN_HOST}
+)
 _DEFAULT_URL_FOR_SITE: dict[_AuthSite, str] = {
     "courses": f"https://{_COURSES_HOST}/my/",
     "thnn": f"https://{_THNN_HOST}/my/",
@@ -58,6 +61,12 @@ class WebViewAuthBootstrap:
     site: UthWebSite
     cookies: tuple[dict[str, Any], ...] = ()
     portal_init_script: str = ""
+    account_epoch: Optional[int] = None
+
+    @property
+    def init_script(self) -> str:
+        """Compatibility alias for ``portal_init_script``."""
+        return self.portal_init_script
 
 
 def _parse_uth_url(
@@ -229,6 +238,18 @@ def build_portal_local_storage_script(token: str, role: str = "sv") -> str:
     )
 
 
+def _canonical_moodle_cookie_domain(raw: object) -> str:
+    """Canonicalize a Moodle cookie domain to ``courses.ut.edu.vn`` or ``thnn.ut.edu.vn``."""
+    if not isinstance(raw, str):
+        return ""
+    cleaned = raw.strip().lstrip(".").casefold()
+    if not cleaned:
+        return ""
+    if cleaned == _ELEARNING_ALIAS_HOST:
+        return _COURSES_HOST
+    return cleaned if cleaned in _ALLOWED_MOODLE_COOKIE_DOMAINS else ""
+
+
 def _normalize_cookie_dicts(
     raw: Any,
     *,
@@ -261,6 +282,7 @@ def _normalize_cookie_dicts(
     else:
         return []
 
+    fallback_domain = _canonical_moodle_cookie_domain(default_domain)
     normalized: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -272,8 +294,16 @@ def _normalize_cookie_dicts(
         cookie_copy = dict(item)
         cookie_copy["name"] = name
         cookie_copy["value"] = str(value)
-        domain = str(cookie_copy.get("domain") or "").strip()
-        cookie_copy["domain"] = domain or default_domain
+        explicit_domain = str(cookie_copy.get("domain") or "").strip()
+        domain = (
+            _canonical_moodle_cookie_domain(explicit_domain)
+            if explicit_domain
+            else fallback_domain
+        )
+        if not domain:
+            continue
+        cookie_copy["domain"] = domain
+        cookie_copy["domain_specified"] = False
         path = str(cookie_copy.get("path") or "").strip()
         cookie_copy["path"] = path or "/"
         normalized.append(cookie_copy)
@@ -344,7 +374,13 @@ def _filter_supported_kwargs(
 
 
 def _client_last_login_error(client: Any) -> str:
-    """Read public ``last_login_error`` (falling back to ``_last_login_error`` for fakes)."""
+    """Read thread-local cookie-export error first, falling back to ``last_login_error`` for fakes."""
+    meta = getattr(client, "_open_session_meta_local", None)
+    tls_getter = getattr(client, "get_last_cookie_export_error", None)
+    if meta is not None and hasattr(meta, "last_cookie_export_error") and callable(tls_getter):
+        tls_val = tls_getter()
+        if isinstance(tls_val, str):
+            return tls_val
     value = getattr(client, "last_login_error", None)
     if not isinstance(value, str):
         value = getattr(client, "_last_login_error", "")
@@ -431,11 +467,55 @@ class UthWebViewAuthService:
         thnn_client: Any = None,
         portal_client: Any = None,
         credentials_provider: Optional[Callable[[], tuple[str, str]]] = None,
+        account_epoch_getter: Optional[Callable[[], int]] = None,
     ) -> None:
         self._courses_client = courses_client
         self._thnn_client = thnn_client
         self._portal_client = portal_client
         self._credentials_provider = credentials_provider
+        self._account_epoch_getter = account_epoch_getter
+
+    def _read_account_epoch(self) -> tuple[bool, Optional[int]]:
+        if self._account_epoch_getter is None:
+            return True, None
+        try:
+            return True, int(self._account_epoch_getter())
+        except Exception as exc:
+            logger.warning(
+                "WebView account_epoch_getter failed (%s)",
+                type(exc).__name__,
+            )
+            return False, None
+
+    def _resolve_and_check_start_epoch(
+        self, expected_epoch: Optional[int]
+    ) -> tuple[bool, Optional[int]]:
+        if self._account_epoch_getter is None:
+            return True, expected_epoch
+        ok, current_epoch = self._read_account_epoch()
+        start_epoch = expected_epoch if expected_epoch is not None else current_epoch
+        if not ok:
+            return False, start_epoch
+        if expected_epoch is not None and current_epoch != expected_epoch:
+            return False, start_epoch
+        return True, start_epoch
+
+    def _is_epoch_valid(self, start_epoch: Optional[int]) -> bool:
+        if self._account_epoch_getter is None:
+            return True
+        ok, current_epoch = self._read_account_epoch()
+        return bool(ok and start_epoch is not None and current_epoch == start_epoch)
+
+    @staticmethod
+    def _read_portal_clear_generation(portal_client: Any) -> Optional[int]:
+        gen_fn = getattr(portal_client, "_current_clear_generation", None)
+        if not callable(gen_fn):
+            return None
+        try:
+            raw = gen_fn()
+            return int(raw) if isinstance(raw, int) and not isinstance(raw, bool) else None
+        except Exception:
+            return None
 
     def client_for_site(self, site: str) -> Any:
         """Return the underlying session client registered for ``site``, or ``None``."""
@@ -473,15 +553,29 @@ class UthWebViewAuthService:
         return self._has_credentials(site)
 
     def _has_credentials(self, site: Optional[UthWebSite] = None) -> bool:
-        if self._credentials_provider is not None:
-            username, password = self._read_credentials()
-            return bool(username and password)
         if site in ("courses", "thnn"):
-            return self.client_for_site(site) is not None
+            client = self.client_for_site(site)
+            if client is None or bool(getattr(client, "is_demo_mode", False)):
+                return False
+            if self._credentials_provider is not None:
+                username, password = self._read_credentials()
+                if not (username and password) or is_demo_account(username):
+                    return False
+            can_auth_fn = getattr(client, "can_authenticate_html_session", None)
+            if callable(can_auth_fn):
+                return bool(can_auth_fn())
+            return True
         if site == "portal":
-            return False
+            if self._portal_client is None or self._credentials_provider is None:
+                return False
+            username, password = self._read_credentials()
+            return bool(username and password and not is_demo_account(username))
         if site is None:
-            return self._courses_client is not None or self._thnn_client is not None
+            return (
+                self._has_credentials("courses")
+                or self._has_credentials("thnn")
+                or self._has_credentials("portal")
+            )
         return False
 
     def _has_active_quiz_lease(self, site: _MoodleSite, client: Any) -> bool:
@@ -557,14 +651,20 @@ class UthWebViewAuthService:
         password: str,
         *,
         force: bool = False,
+        expected_clear_generation: Optional[int] = None,
     ) -> tuple[str, str]:
         """Invoke ``portal_client.ensure_web_session`` safely without logging secrets."""
         ensure_fn = getattr(portal_client, "ensure_web_session", None)
         if not callable(ensure_fn):
             return "", ""
+        requested_kwargs: dict[str, Any] = {}
+        if force:
+            requested_kwargs["force"] = True
+        if expected_clear_generation is not None:
+            requested_kwargs["expected_clear_generation"] = expected_clear_generation
         try:
-            if force:
-                supported, _ = _filter_supported_kwargs(ensure_fn, {"force": True})
+            if requested_kwargs:
+                supported, _ = _filter_supported_kwargs(ensure_fn, requested_kwargs)
                 result = ensure_fn(username, password, **supported)
             else:
                 result = ensure_fn(username, password)
@@ -583,8 +683,11 @@ class UthWebViewAuthService:
             return result.strip(), "sv"
         return "", ""
 
-    def prepare_initial_auth(self, url: str) -> WebViewAuthBootstrap:
+    def prepare_initial_auth(
+        self, url: str, *, expected_epoch: Optional[int] = None
+    ) -> WebViewAuthBootstrap:
         """Prepare target URL, Moodle cookies, or origin-gated Portal script before load."""
+        epoch_ok, start_epoch = self._resolve_and_check_start_epoch(expected_epoch)
         site = classify_uth_webview_url(url)
         if site == "external":
             return WebViewAuthBootstrap(
@@ -592,24 +695,62 @@ class UthWebViewAuthService:
                 site="external",
                 cookies=(),
                 portal_init_script="",
+                account_epoch=start_epoch,
+            )
+
+        if not epoch_ok:
+            return WebViewAuthBootstrap(
+                target_url=normalize_uth_webview_target_url(url, has_credentials=False),
+                site=site,
+                cookies=(),
+                portal_init_script="",
+                account_epoch=start_epoch,
             )
 
         if site in ("courses", "thnn"):
             primary = self.client_for_site(site)
             has_creds = self._has_credentials(site)
-
-            primary_cookies: list[dict[str, Any]] = []
-            sibling_cookies: list[dict[str, Any]] = []
-            if has_creds and primary is not None:
-                primary_cookies = self._invoke_cookies(
-                    primary,
-                    ensure_login=True,
-                    verify_live=True,
-                    force_relogin=False,
-                    default_domain=_CANONICAL_HOST_FOR_SITE[site],
+            if not has_creds or primary is None:
+                return WebViewAuthBootstrap(
+                    target_url=normalize_uth_webview_target_url(
+                        url, has_credentials=False
+                    ),
+                    site=site,
+                    cookies=(),
+                    portal_init_script="",
+                    account_epoch=start_epoch,
                 )
-            if has_creds:
-                sibling_cookies = self._warm_sibling_cookies(site)
+
+            primary_cookies = self._invoke_cookies(
+                primary,
+                ensure_login=True,
+                verify_live=True,
+                force_relogin=False,
+                default_domain=_CANONICAL_HOST_FOR_SITE[site],
+            )
+            if not self._is_epoch_valid(start_epoch):
+                return WebViewAuthBootstrap(
+                    target_url=normalize_uth_webview_target_url(
+                        url, has_credentials=False
+                    ),
+                    site=site,
+                    cookies=(),
+                    portal_init_script="",
+                    account_epoch=start_epoch,
+                )
+
+            sibling_cookies = self._warm_sibling_cookies(site)
+            if not self._is_epoch_valid(start_epoch):
+                return WebViewAuthBootstrap(
+                    target_url=normalize_uth_webview_target_url(
+                        url, has_credentials=False
+                    ),
+                    site=site,
+                    cookies=(),
+                    portal_init_script="",
+                    account_epoch=start_epoch,
+                )
+
             merged_cookies = _merge_cookies(primary_cookies, sibling_cookies)
             target_url = normalize_uth_webview_target_url(
                 url,
@@ -620,20 +761,36 @@ class UthWebViewAuthService:
                 site=site,
                 cookies=merged_cookies,
                 portal_init_script="",
+                account_epoch=start_epoch,
             )
 
         # site == "portal"
         portal_init_script = ""
-        username, password = self._read_credentials()
-        if self._portal_client is not None and username and password:
-            token, role = self._invoke_portal_session(
-                self._portal_client,
-                username,
-                password,
-                force=False,
-            )
-            if token:
-                portal_init_script = build_portal_local_storage_script(token, role)
+        if self._portal_client is not None and self._has_credentials("portal"):
+            username, password = self._read_credentials()
+            if username and password and not is_demo_account(username):
+                portal_clear_gen = self._read_portal_clear_generation(
+                    self._portal_client
+                )
+                token, role = self._invoke_portal_session(
+                    self._portal_client,
+                    username,
+                    password,
+                    force=False,
+                    expected_clear_generation=portal_clear_gen,
+                )
+                if not self._is_epoch_valid(start_epoch):
+                    return WebViewAuthBootstrap(
+                        target_url=normalize_uth_webview_target_url(
+                            url, has_credentials=False
+                        ),
+                        site="portal",
+                        cookies=(),
+                        portal_init_script="",
+                        account_epoch=start_epoch,
+                    )
+                if token:
+                    portal_init_script = build_portal_local_storage_script(token, role)
         target_url = normalize_uth_webview_target_url(
             url,
             has_credentials=bool(portal_init_script),
@@ -643,17 +800,23 @@ class UthWebViewAuthService:
             site="portal",
             cookies=(),
             portal_init_script=portal_init_script,
+            account_epoch=start_epoch,
         )
 
     def recover_from_login_redirect(
         self,
         login_url: str,
-        tracker: WebViewRecoveryTracker,
+        tracker: Optional[WebViewRecoveryTracker] = None,
+        *,
+        expected_epoch: Optional[int] = None,
     ) -> Optional[WebViewAuthBootstrap]:
         """Attempt one bounded forced re-authentication when WebView lands on a login URL."""
+        epoch_ok, start_epoch = self._resolve_and_check_start_epoch(expected_epoch)
         site = is_uth_login_url(login_url)
-        if site is None:
+        if site is None or not epoch_ok:
             return None
+
+        eff_tracker = tracker if tracker is not None else WebViewRecoveryTracker()
 
         if site in ("courses", "thnn"):
             client = self.client_for_site(site)
@@ -665,66 +828,75 @@ class UthWebViewAuthService:
                     site,
                 )
                 return None
-            if not tracker.consume_recovery_attempt(site):
+            if not self._is_epoch_valid(start_epoch):
+                return None
+            if not eff_tracker.consume_recovery_attempt(site):
                 return None
 
             _, parsed = _parse_uth_url(login_url)
             safe_wantsurl: Optional[str] = None
             if parsed is not None:
                 _, safe_wantsurl = _extract_safe_wantsurl(parsed, site)
-            target_url = safe_wantsurl or tracker.intended_url_for(site)
+            target_url = safe_wantsurl or eff_tracker.intended_url_for(site)
 
-            client_lock = getattr(client, "_session_lock", None)
-            lock_ctx = (
-                client_lock
-                if client_lock is not None
-                and hasattr(client_lock, "__enter__")
-                and hasattr(client_lock, "__exit__")
-                else nullcontext()
+            primary_cookies = self._invoke_cookies(
+                client,
+                ensure_login=True,
+                verify_live=False,
+                force_relogin=True,
+                default_domain=_CANONICAL_HOST_FOR_SITE[site],
             )
-            with lock_ctx:
-                primary_cookies = self._invoke_cookies(
-                    client,
-                    ensure_login=True,
-                    verify_live=False,
-                    force_relogin=True,
-                    default_domain=_CANONICAL_HOST_FOR_SITE[site],
-                )
-                login_error = _client_last_login_error(client)
-            if login_error == "quiz_session_active":
-                tracker._refund_recovery_attempt(site)
+            login_error = _client_last_login_error(client)
+            if login_error == "quiz_session_active" or self._has_active_quiz_lease(
+                site, client
+            ):
+                eff_tracker._refund_recovery_attempt(site)
                 logger.info(
                     "Skipping WebView login recovery for %s while quiz session is active",
                     site,
                 )
                 return None
+            if not self._is_epoch_valid(start_epoch):
+                eff_tracker._refund_recovery_attempt(site)
+                return None
             if not _has_moodle_session_cookie(primary_cookies):
                 return None
 
             sibling_cookies = self._warm_sibling_cookies(site)
+            if not self._is_epoch_valid(start_epoch):
+                eff_tracker._refund_recovery_attempt(site)
+                return None
             return WebViewAuthBootstrap(
                 target_url=target_url,
                 site=site,
                 cookies=_merge_cookies(primary_cookies, sibling_cookies),
                 portal_init_script="",
+                account_epoch=start_epoch,
             )
 
         # site == "portal"
-        if self._portal_client is None:
+        if self._portal_client is None or not self._has_credentials("portal"):
             return None
         username, password = self._read_credentials()
-        if not (username and password):
+        if not (username and password) or is_demo_account(username):
             return None
-        if not tracker.consume_recovery_attempt("portal"):
+        if not self._is_epoch_valid(start_epoch):
+            return None
+        if not eff_tracker.consume_recovery_attempt("portal"):
             return None
 
-        target_url = tracker.intended_url_for("portal")
+        target_url = eff_tracker.intended_url_for("portal")
+        portal_clear_gen = self._read_portal_clear_generation(self._portal_client)
         token, role = self._invoke_portal_session(
             self._portal_client,
             username,
             password,
             force=True,
+            expected_clear_generation=portal_clear_gen,
         )
+        if not self._is_epoch_valid(start_epoch):
+            eff_tracker._refund_recovery_attempt("portal")
+            return None
         if not token:
             return None
         portal_init_script = build_portal_local_storage_script(token, role)
@@ -735,4 +907,5 @@ class UthWebViewAuthService:
             site="portal",
             cookies=(),
             portal_init_script=portal_init_script,
+            account_epoch=start_epoch,
         )

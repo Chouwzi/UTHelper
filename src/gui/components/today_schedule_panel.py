@@ -496,13 +496,29 @@ class TodaySchedulePanel:
             return self._build_detail_surface()
         return self._build_list_surface()
 
+    def _viewport_dim(self, attr: str) -> float:
+        for owner in (self.page, getattr(self.page, "window", None)):
+            raw = getattr(owner, attr, None)
+            if not isinstance(raw, bool) and isinstance(raw, (int, float)):
+                val = float(raw)
+                if val > 0:
+                    return val
+        return 0.0
+
     def _surface_height(self) -> float:
-        viewport = getattr(self.page, "height", None)
-        maximum = min(620.0, float(viewport) * 0.78) if viewport else 560.0
+        viewport = self._viewport_dim("height")
+        maximum = min(620.0, viewport * 0.78) if viewport else 560.0
         snapshot = self.state.snapshot
         count = len(snapshot.sessions) if snapshot is not None else 0
         desired = 430.0 if self._surface_mode == "detail" else 92.0 + count * 112.0
         return min(maximum, max(260.0, desired))
+
+    def _desktop_surface_size(self) -> tuple[float, float]:
+        page_w = self._viewport_dim("width")
+        page_h = self._viewport_dim("height")
+        width = min(430.0, max(260.0, page_w - 40.0)) if page_w > 0 else 430.0
+        height = min(520.0, max(260.0, page_h - 80.0)) if page_h > 0 else 520.0
+        return width, height
 
     def _refresh_surface_content(self) -> None:
         if self._surface_content is None:
@@ -510,6 +526,10 @@ class TodaySchedulePanel:
         self._surface_content.content = self._current_surface_content()
         if self.mobile:
             self._surface_content.height = self._surface_height()
+        else:
+            desktop_w, desktop_h = self._desktop_surface_size()
+            self._surface_content.width = desktop_w
+            self._surface_content.height = desktop_h
         self._safe_update(self._surface_content)
 
     def _on_surface_dismissed(self, _event=None) -> None:
@@ -524,12 +544,13 @@ class TodaySchedulePanel:
     def _show_surface(self) -> bool:
         if self.page is None:
             return False
+        desktop_w, desktop_h = self._desktop_surface_size()
         self._surface_content = ft.Container(
             content=self._current_surface_content(),
             bgcolor=C.BG,
             padding=ft.Padding.only(left=14, right=14, bottom=14),
-            height=self._surface_height() if self.mobile else 520,
-            width=None if self.mobile else 430,
+            height=self._surface_height() if self.mobile else desktop_h,
+            width=None if self.mobile else desktop_w,
             border_radius=18,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )

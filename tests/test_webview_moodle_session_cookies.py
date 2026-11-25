@@ -267,8 +267,17 @@ def test_get_session_cookies_case_insensitive_rest_and_domain_rules():
             "MoodleSession",
             "val1",
             domain=".courses.ut.edu.vn",
-            domain_specified=False,
+            domain_specified=True,
             rest_override={"httponly": None, "samesite": "Strict"},
+        )
+    )
+    client._cookie_jar.set_cookie(
+        _make_cookie(
+            "PublicCourseCookie",
+            "val_pub",
+            domain="COURSES.UT.EDU.VN",
+            domain_specified=False,
+            rest_override={},
         )
     )
     client._cookie_jar.set_cookie(
@@ -291,18 +300,16 @@ def test_get_session_cookies_case_insensitive_rest_and_domain_rules():
     )
 
     exported = {c["name"]: c for c in client.get_session_cookies(ensure_login=False)}
+    assert set(exported.keys()) == {"MoodleSession", "PublicCourseCookie"}
     assert exported["MoodleSession"]["httpOnly"] is True
     assert exported["MoodleSession"]["sameSite"] == "Strict"
     assert exported["MoodleSession"]["domain"] == "courses.ut.edu.vn"
     assert exported["MoodleSession"]["domain_specified"] is False
 
-    assert exported["SharedCookie"]["httpOnly"] is False
-    assert exported["SharedCookie"]["sameSite"] is None
-    assert exported["SharedCookie"]["domain"] == ".ut.edu.vn"
-    assert exported["SharedCookie"]["domain_specified"] is True
-
-    assert exported["NoDomainCookie"]["domain"] == "courses.ut.edu.vn"
-    assert exported["NoDomainCookie"]["domain_specified"] is False
+    assert exported["PublicCourseCookie"]["httpOnly"] is False
+    assert exported["PublicCourseCookie"]["sameSite"] is None
+    assert exported["PublicCourseCookie"]["domain"] == "courses.ut.edu.vn"
+    assert exported["PublicCourseCookie"]["domain_specified"] is False
 
 
 def test_session_authenticated_at_lifecycle_and_quiz_warm(monkeypatch):
@@ -699,4 +706,3 @@ def test_clone_quiz_client_propagates_session_authenticated_at(monkeypatch):
     assert cloned_pair is not None
     cloned, _gen = cloned_pair
     assert cloned._session_authenticated_at == 8765.0
-

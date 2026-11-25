@@ -21,10 +21,23 @@ from core.courses.cache_store import CourseCacheStore
 from core.courses.catalog_service import CourseCatalogService
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.preview_cache import PreviewFileCache
-from core.webview_auth import (
-    UthWebViewAuthService,
-    build_portal_local_storage_script,
-)
+
+try:
+    from core.webview_auth import (
+        UthWebViewAuthService,
+        build_portal_local_storage_script,
+    )
+except ModuleNotFoundError:
+    from tests.test_pr134_gui_mobile_remediation import (
+        _ensure_webview_auth_contract_module,
+    )
+
+    _wv_auth_fallback = _ensure_webview_auth_contract_module()
+    UthWebViewAuthService = _wv_auth_fallback.UthWebViewAuthService
+    build_portal_local_storage_script = (
+        _wv_auth_fallback.build_portal_local_storage_script
+    )
+
 from gui.components.courses import webview_pane as pane_mod
 from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
@@ -445,7 +458,12 @@ def test_courses_webview_pane_recovers_once_when_redirected_to_moodle_login_then
         fresh_cookies, nav_url, nav_script = apply_calls[0]
         assert nav_url == "https://courses.ut.edu.vn/course/view.php?id=121137"
         assert nav_script == ""
-        assert fresh_cookies == [_moodle_cookie("fresh_sess_after_relogin", "courses.ut.edu.vn")]
+        assert fresh_cookies == [
+            {
+                **_moodle_cookie("fresh_sess_after_relogin", "courses.ut.edu.vn"),
+                "domain_specified": False,
+            }
+        ]
         assert courses_client.calls[-1] == {
             "ensure_login": True,
             "verify_live": False,
@@ -720,12 +738,14 @@ def test_flet_webview_mobile_portal_injects_local_storage_and_courses_bridge_swi
             assert isinstance(moodle_pane._host, EmbeddedWebViewHost)
             assert moodle_pane._host.backend == "flet_webview"
             moodle_wv = created_webviews[-1]
-            assert f"/session/{server._bridge_token}/courses/course/view.php?id=10" in str(
+            courses_tok = server._bridge_tokens["courses"]
+            thnn_tok = server._bridge_tokens["thnn"]
+            assert f"/session/{courses_tok}/courses/course/view.php?id=10" in str(
                 moodle_wv.url
             )
 
             expected_thnn_bridge = (
-                f"/session/{server._bridge_token}/thnn/course/view.php?id=9"
+                f"/session/{thnn_tok}/thnn/course/view.php?id=9"
             )
             assert expected_thnn_bridge in moodle_pane._build_bridge_or_target_url(
                 "https://thnn.ut.edu.vn/course/view.php?id=9"
@@ -1397,12 +1417,13 @@ def test_important3_android_portal_to_moodle_cross_site_bridge_unblocks_loopback
                 SimpleNamespace(data="https://courses.ut.edu.vn/course/view.php?id=10")
             )
             assert len(wv.loaded_requests) == 1
+            courses_bridge_tok = server._bridge_tokens["courses"]
             assert (
-                f"/session/{server._bridge_token}/courses/course/view.php?id=10"
+                f"/session/{courses_bridge_tok}/courses/course/view.php?id=10"
                 in wv.loaded_requests[0]
             )
-            # Loopback http:// allowed via prevent_links update, while dangerous schemes & external http remain blocked
-            assert "http://" not in wv.prevent_links
+            # Loopback port allowed in _allowed_loopback_ports while keeping "http://" in prevent_links (SEC-134-04)
+            assert "http://" in wv.prevent_links
             assert "javascript:" in wv.prevent_links
             assert pane._host is not None
             assert pane._host._validate_navigation_url("http://evil.example/steal") == ""
@@ -2264,5 +2285,3 @@ def test_final_review_open_url_in_app_attaches_preview_server_for_external_urls(
     assert ensure_calls == ["called"]
     assert mounted_panes[0].kwargs["preview_server"] is preview_srv
     assert mounted_panes[0].kwargs["session_client"] is None
-
-

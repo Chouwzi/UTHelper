@@ -13,32 +13,76 @@ import time
 from typing import Any, Optional
 import uuid
 
-try:
-    import pypdfium2 as _pdfium
-except Exception:  # pragma: no cover - optional on minimal runtimes
-    _pdfium = None  # type: ignore[assignment]
+_UNSET: Any = object()
+_BACKEND_LOCK = threading.Lock()
+_pdfium: Any = _UNSET
+_pymupdf: Any = _UNSET
+_pypdf: Any = _UNSET
+_PilImage: Any = _UNSET
 
-try:
-    import pymupdf as _pymupdf
-except Exception:  # pragma: no cover - optional runtime fallback
-    try:
-        import fitz as _pymupdf  # type: ignore[no-redef]
-    except Exception:  # pragma: no cover
-        _pymupdf = None  # type: ignore[assignment]
 
-try:
-    import pypdf as _pypdf
-except Exception:  # pragma: no cover
-    _pypdf = None  # type: ignore[assignment]
+def _get_pdfium() -> Any:
+    global _pdfium
+    if _pdfium is not _UNSET:
+        return _pdfium
+    with _BACKEND_LOCK:
+        if _pdfium is _UNSET:
+            try:
+                import pypdfium2 as mod
+            except Exception:  # pragma: no cover - optional on minimal runtimes
+                mod = None  # type: ignore[assignment]
+            _pdfium = mod
+        return _pdfium
 
-try:
-    from PIL import Image as _PilImage
-except Exception:  # pragma: no cover
-    _PilImage = None  # type: ignore[assignment]
+
+def _get_pymupdf() -> Any:
+    global _pymupdf
+    if _pymupdf is not _UNSET:
+        return _pymupdf
+    with _BACKEND_LOCK:
+        if _pymupdf is _UNSET:
+            try:
+                import pymupdf as mod
+            except Exception:  # pragma: no cover - optional runtime fallback
+                try:
+                    import fitz as mod  # type: ignore[no-redef]
+                except Exception:  # pragma: no cover
+                    mod = None  # type: ignore[assignment]
+            _pymupdf = mod
+        return _pymupdf
+
+
+def _get_pypdf() -> Any:
+    global _pypdf
+    if _pypdf is not _UNSET:
+        return _pypdf
+    with _BACKEND_LOCK:
+        if _pypdf is _UNSET:
+            try:
+                import pypdf as mod
+            except Exception:  # pragma: no cover
+                mod = None  # type: ignore[assignment]
+            _pypdf = mod
+        return _pypdf
+
+
+def _get_pil_image() -> Any:
+    global _PilImage
+    if _PilImage is not _UNSET:
+        return _PilImage
+    with _BACKEND_LOCK:
+        if _PilImage is _UNSET:
+            try:
+                from PIL import Image as mod
+            except Exception:  # pragma: no cover
+                mod = None  # type: ignore[assignment]
+            _PilImage = mod
+        return _PilImage
 
 
 _DEFAULT_RENDERED_PDF_MAX_BYTES = 96 * 1024 * 1024
 _DEFAULT_MEMORY_CACHE_PAGES = 28
+_DEFAULT_MEMORY_CACHE_BYTES = 32 * 1024 * 1024
 _MIN_SCALE = 0.5
 _MAX_SCALE = 3.5
 _DARK_LUMA_LUT: list[int] = [
@@ -97,10 +141,11 @@ def clear_rendered_pdf_cache(cache_dir: Optional[Path]) -> int:
 
 def _invert_image_luminance(image: Any) -> Any:
     """Invert luminance smoothly for dark reading using a C-speed lookup table."""
+    pil_image = _get_pil_image()
     rgb = image.convert("RGB")
     y_chan, cb_chan, cr_chan = rgb.convert("YCbCr").split()
     mapped_y = y_chan.point(_DARK_LUMA_LUT)
-    return _PilImage.merge("YCbCr", (mapped_y, cb_chan, cr_chan)).convert("RGB")
+    return pil_image.merge("YCbCr", (mapped_y, cb_chan, cr_chan)).convert("RGB")
 
 
 def _encode_pil_png(image: Any) -> bytes:
@@ -164,9 +209,11 @@ class PdfDocumentSession:
             self.error_message = "Tệp không phải định dạng PDF hợp lệ."
             return
 
-        if _pdfium is not None and _PilImage is not None:
+        pdfium_mod = _get_pdfium()
+        pil_image = _get_pil_image()
+        if pdfium_mod is not None and pil_image is not None:
             try:
-                doc = _pdfium.PdfDocument(self._data)
+                doc = pdfium_mod.PdfDocument(self._data)
                 count = int(len(doc))
                 if count <= 0:
                     doc.close()
@@ -186,9 +233,10 @@ class PdfDocumentSession:
                     self.error_message = f"Không thể mở PDF trực tiếp: {exc}"
                 return
 
-        if _pymupdf is not None and _PilImage is not None:
+        pymupdf_mod = _get_pymupdf()
+        if pymupdf_mod is not None and pil_image is not None:
             try:
-                mupdf_doc = _pymupdf.open(stream=self._data, filetype="pdf")
+                mupdf_doc = pymupdf_mod.open(stream=self._data, filetype="pdf")
                 if getattr(mupdf_doc, "needs_pass", False):
                     try:
                         mupdf_doc.close()
@@ -218,9 +266,10 @@ class PdfDocumentSession:
                     self.error_message = f"Không thể mở PDF trực tiếp: {exc}"
                 return
 
-        if _pypdf is not None:
+        pypdf_mod = _get_pypdf()
+        if pypdf_mod is not None:
             try:
-                reader = _pypdf.PdfReader(io.BytesIO(self._data))
+                reader = pypdf_mod.PdfReader(io.BytesIO(self._data))
                 if getattr(reader, "is_encrypted", False):
                     self.error_message = "Tệp PDF được bảo vệ bằng mật khẩu."
                     return
@@ -362,13 +411,14 @@ class PdfDocumentSession:
 
     def _read_disk_cache(self, key: tuple[int, int, bool], scale: float) -> Optional[RenderedPdfPage]:
         path = self._disk_path_for(key)
-        if path is None or not path.is_file() or _PilImage is None:
+        pil_image = _get_pil_image()
+        if path is None or not path.is_file() or pil_image is None:
             return None
         try:
             png_bytes = path.read_bytes()
             if not png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
                 return None
-            with _PilImage.open(io.BytesIO(png_bytes)) as img:
+            with pil_image.open(io.BytesIO(png_bytes)) as img:
                 width, height = img.size
             now = time.time()
             try:
@@ -431,8 +481,13 @@ class PdfDocumentSession:
     def _remember_in_memory(self, key: tuple[int, int, bool], rendered: RenderedPdfPage) -> None:
         self._memory_cache[key] = rendered
         self._memory_cache.move_to_end(key)
-        while len(self._memory_cache) > _DEFAULT_MEMORY_CACHE_PAGES:
-            self._memory_cache.popitem(last=False)
+        total_bytes = sum(len(item.png_bytes) for item in self._memory_cache.values())
+        while (
+            len(self._memory_cache) > _DEFAULT_MEMORY_CACHE_PAGES
+            or (total_bytes > _DEFAULT_MEMORY_CACHE_BYTES and len(self._memory_cache) > 1)
+        ):
+            _, evicted = self._memory_cache.popitem(last=False)
+            total_bytes -= len(evicted.png_bytes)
 
     def get_page_size(self, page_index: int) -> tuple[float, float]:
         """Return native page `(width, height)` in PDF points."""
@@ -483,6 +538,7 @@ class PdfDocumentSession:
     ) -> Optional[RenderedPdfPage]:
         """Render a page as PNG bytes using memory + disk LRU caches."""
         with self._lock:
+            pil_image = _get_pil_image()
             if (
                 not self.supported
                 or not self.can_render_images
@@ -490,7 +546,7 @@ class PdfDocumentSession:
                 or self._closed
                 or page_index < 0
                 or page_index >= self.page_count
-                or _PilImage is None
+                or pil_image is None
             ):
                 return None
 
@@ -514,10 +570,11 @@ class PdfDocumentSession:
                 finally:
                     page.close()
             else:
+                pymupdf_mod = _get_pymupdf()
                 page = self._mupdf_doc[page_index]
                 matrix = (
-                    _pymupdf.Matrix(clamped_scale, clamped_scale)
-                    if hasattr(_pymupdf, "Matrix")
+                    pymupdf_mod.Matrix(clamped_scale, clamped_scale)
+                    if pymupdf_mod is not None and hasattr(pymupdf_mod, "Matrix")
                     else None
                 )
                 pix = (
@@ -527,7 +584,7 @@ class PdfDocumentSession:
                 )
                 channels = int(getattr(pix, "n", 3) or 3)
                 mode = "RGBA" if channels == 4 else ("L" if channels == 1 else "RGB")
-                pil_img = _PilImage.frombytes(
+                pil_img = pil_image.frombytes(
                     mode,
                     (int(pix.width), int(pix.height)),
                     bytes(pix.samples),
@@ -591,16 +648,17 @@ class PdfDocumentSession:
 
             if (
                 not text.strip()
-                and _pypdf is not None
                 and (self._doc is not None or self._mupdf_doc is not None)
             ):
-                try:
-                    if self._pypdf_reader is None:
-                        self._pypdf_reader = _pypdf.PdfReader(io.BytesIO(self._data))
-                    if not getattr(self._pypdf_reader, "is_encrypted", False):
-                        text = str(self._pypdf_reader.pages[page_index].extract_text() or "")
-                except Exception:
-                    pass
+                pypdf_mod = _get_pypdf()
+                if pypdf_mod is not None:
+                    try:
+                        if self._pypdf_reader is None:
+                            self._pypdf_reader = pypdf_mod.PdfReader(io.BytesIO(self._data))
+                        if not getattr(self._pypdf_reader, "is_encrypted", False):
+                            text = str(self._pypdf_reader.pages[page_index].extract_text() or "")
+                    except Exception:
+                        pass
 
             self._text_cache[page_index] = text
             return text
@@ -632,6 +690,9 @@ class PdfDocumentSession:
         with self._lock:
             self._closed = True
             self._memory_cache.clear()
+            self._text_cache.clear()
+            self._pypdf_reader = None
+            self._data = b""
             if self._doc is not None:
                 try:
                     self._doc.close()

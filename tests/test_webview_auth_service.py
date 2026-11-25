@@ -721,6 +721,7 @@ def _make_jwt(exp: int, role: str = "sv") -> str:
 def test_integration_with_real_moodle_client_quiz_lease_and_real_portal_client(monkeypatch):
     monkeypatch.setattr(settings, "UTH_USERNAME", "2251120001")
     monkeypatch.setattr(settings, "UTH_PASSWORD", "test-pass")
+    monkeypatch.setattr(settings, "UTH_CREDENTIALS_ORIGIN", "https://courses.ut.edu.vn")
 
     courses_client = MoodleClient("https://courses.ut.edu.vn")
     courses_client._sesskey = "sk_active"
@@ -874,9 +875,9 @@ def test_auth_flow_subpaths_never_reset_budget_or_become_recovery_targets():
     assert tracker.can_attempt_recovery("portal") is False
 
 
-def test_quiz_session_active_uses_public_last_login_error_holds_lock_and_preserves_budget():
+def test_quiz_session_active_uses_public_last_login_error_without_external_lock_and_preserves_budget():
     lock = threading.RLock()
-    lock_held_during_read: list[bool] = []
+    lock_free_during_call: list[bool] = []
 
     class _LockedQuizClient:
         def __init__(self) -> None:
@@ -885,14 +886,6 @@ def test_quiz_session_active_uses_public_last_login_error_holds_lock_and_preserv
 
         @property
         def last_login_error(self) -> str:
-            # Verify lock is held by current thread (another thread cannot acquire non-blocking)
-            other_acquired: list[bool] = []
-            t = threading.Thread(
-                target=lambda: other_acquired.append(lock.acquire(blocking=False))
-            )
-            t.start()
-            t.join()
-            lock_held_during_read.append(other_acquired == [False])
             return self._err
 
         def get_session_cookies(
@@ -902,6 +895,19 @@ def test_quiz_session_active_uses_public_last_login_error_holds_lock_and_preserv
             verify_live: bool = False,
             force_relogin: bool = False,
         ) -> list[dict[str, Any]]:
+            # Verify external caller does NOT hold _session_lock across get_session_cookies (BUG-134-02)
+            other_acquired: list[bool] = []
+
+            def _probe_lock() -> None:
+                got = lock.acquire(blocking=False)
+                other_acquired.append(got)
+                if got:
+                    lock.release()
+
+            t = threading.Thread(target=_probe_lock)
+            t.start()
+            t.join()
+            lock_free_during_call.append(other_acquired == [True])
             self._err = "quiz_session_active"
             return [_moodle_cookie("quiz_cookie", "courses.ut.edu.vn")]
 
@@ -914,7 +920,7 @@ def test_quiz_session_active_uses_public_last_login_error_holds_lock_and_preserv
         )
         is None
     )
-    assert lock_held_during_read == [True]
+    assert lock_free_during_call == [True]
     # Budget must NOT be burned when recovery was skipped solely due to quiz_session_active
     assert tracker.can_attempt_recovery("courses") is True
 
@@ -1017,4 +1023,3 @@ def test_wantsurl_hpp_mixed_case_cookie_dedupe_sibling_zero_arg_and_script_html_
     assert "</script>" not in script
     assert "\\u003c/script\\u003e\\u0026x" in script
     assert "\\u003c1\\u003e" in script
-

@@ -6,11 +6,14 @@ import asyncio
 import inspect
 import json
 import logging
+import posixpath
+import re
+import sys
 import threading
 from typing import Any, Callable, Optional
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 import flet as ft
 from bs4 import BeautifulSoup
@@ -18,27 +21,43 @@ from bs4 import BeautifulSoup
 from core.courses.models import CourseSource
 from core.html_compat import BS4_PARSER
 from core.security import HTMLSanitizer
-from core.webview_auth import (
-    UthWebViewAuthService,
-    WebViewAuthBootstrap,
-    WebViewRecoveryTracker,
-    classify_uth_webview_url,
-    is_uth_login_url,
-    normalize_uth_webview_target_url,
-)
+from core.url_validation import validate_https_url
 from gui.components.courses._shared import (
     build_viewer_header,
+    marshal_to_ui,
     refresh_viewer_header,
     safe_control_update,
 )
 from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     WindowsWebView2Dock,
+    _is_demo_lms_blocked,
+    _is_demo_mode_active,
     _is_flet_webview_platform,
+    _is_inappwebview_mobile_platform,
     _safe_control_page,
     _webview2_runtime_available,
     build_embedded_webview_host,
+    is_embedded_webview_supported,
+    set_global_webview_occlusion,
 )
+
+try:
+    from core.webview_auth import (
+        UthWebViewAuthService as _CoreUthWebViewAuthService,
+        WebViewAuthBootstrap as _CoreWebViewAuthBootstrap,
+        WebViewRecoveryTracker as _CoreWebViewRecoveryTracker,
+        classify_uth_webview_url as _core_classify_uth_webview_url,
+        is_uth_login_url as _core_is_uth_login_url,
+        normalize_uth_webview_target_url as _core_normalize_uth_webview_target_url,
+    )
+except ImportError:
+    _CoreUthWebViewAuthService = None
+    _CoreWebViewAuthBootstrap = None
+    _CoreWebViewRecoveryTracker = None
+    _core_classify_uth_webview_url = None
+    _core_is_uth_login_url = None
+    _core_normalize_uth_webview_target_url = None
 from gui.core.theme import C
 from gui.view_models.courses_state import safe_http_url
 from platform_utils import UI_IS_MOBILE
@@ -62,6 +81,31 @@ _EXTERNAL_MEETING_HOSTS = (
 )
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_EXTERNAL_APP_LAUNCHED_PREFIX = "__UTH_EXTERNAL_APP_LAUNCHED__:"
+_EXTERNAL_APP_MISSING_PREFIX = "__UTH_EXTERNAL_APP_MISSING__:"
+_INITIAL_COMMIT_WATCHDOG_SECONDS = 18.0
+
+_SCHEME_DISPLAY_LABELS: dict[str, str] = {
+    "zalo": "Zalo",
+    "zoom": "Zoom",
+    "zoomus": "Zoom",
+    "zoomphonecall": "Zoom",
+    "msteams": "Microsoft Teams",
+    "googlemeet": "Google Meet",
+    "googlesheets": "Google Sheets",
+    "googledocs": "Google Docs",
+    "googleslides": "Google Slides",
+    "googledrive": "Google Drive",
+    "googleclassroom": "Google Classroom",
+    "ms-excel": "Microsoft Excel",
+    "ms-word": "Microsoft Word",
+    "ms-powerpoint": "Microsoft PowerPoint",
+    "onedrive": "OneDrive",
+    "mailto": "Email",
+    "tel": "Điện thoại",
+    "sms": "Tin nhắn",
+    "tg": "Telegram",
+}
 
 _NON_READABLE_HTML_TAGS = (
     "script",
@@ -95,6 +139,173 @@ def _is_loopback_url(url: str) -> bool:
     except ValueError:
         return False
     return host in _LOOPBACK_HOSTS
+
+
+class _FallbackRecoveryTracker:
+    """Standalone recovery tracker used only when core.webview_auth is absent."""
+
+    _DEFAULTS = {
+        "courses": "https://courses.ut.edu.vn/my/",
+        "thnn": "https://thnn.ut.edu.vn/my/",
+        "portal": "https://portal.ut.edu.vn/dashboard",
+    }
+
+    def __init__(self, *, max_attempts_per_site: int = 1) -> None:
+        self._lock = threading.RLock()
+        self._max = max(0, int(max_attempts_per_site))
+        self._attempts: dict[str, int] = {}
+        self._intended: dict[str, str] = {}
+
+    def record_navigation(self, url: str) -> None:
+        site = classify_uth_webview_url(url)
+        if site in self._DEFAULTS and is_uth_login_url(url) is None:
+            canon = normalize_uth_webview_target_url(url, has_credentials=False)
+            with self._lock:
+                self._intended[site] = canon
+
+    def note_authenticated_landing(self, url: str) -> None:
+        site = classify_uth_webview_url(url)
+        if site in self._DEFAULTS and is_uth_login_url(url) is None:
+            canon = normalize_uth_webview_target_url(url, has_credentials=False)
+            with self._lock:
+                self._attempts[site] = 0
+                self._intended[site] = canon
+
+    def can_attempt_recovery(self, site: str) -> bool:
+        with self._lock:
+            return self._attempts.get(site, 0) < self._max
+
+    def consume_recovery_attempt(self, site: str) -> bool:
+        with self._lock:
+            used = self._attempts.get(site, 0)
+            if used >= self._max:
+                return False
+            self._attempts[site] = used + 1
+            return True
+
+    def intended_url_for(self, site: str) -> str:
+        with self._lock:
+            return self._intended.get(site) or self._DEFAULTS.get(site, "")
+
+
+def _make_recovery_tracker() -> Any:
+    cls = _CoreWebViewRecoveryTracker
+    if cls is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        cls = getattr(wv_mod, "WebViewRecoveryTracker", None)
+    if cls is not None:
+        return cls()
+    return _FallbackRecoveryTracker()
+
+
+def _resolve_auth_service_cls() -> Any:
+    if _CoreUthWebViewAuthService is not None:
+        return _CoreUthWebViewAuthService
+    wv_mod = sys.modules.get("core.webview_auth")
+    return getattr(wv_mod, "UthWebViewAuthService", None)
+
+
+def classify_uth_webview_url(url: str) -> str:
+    fn = _core_classify_uth_webview_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "classify_uth_webview_url", None)
+    if callable(fn):
+        return str(fn(url))
+    validated = validate_https_url(url)
+    if validated is None:
+        return "external"
+    parsed = urlsplit(validated)
+    if parsed.port is not None:
+        return "external"
+    host = (parsed.hostname or "").casefold()
+    if host in ("courses.ut.edu.vn", "elearning.ut.edu.vn"):
+        return "courses"
+    if host == "thnn.ut.edu.vn":
+        return "thnn"
+    if host == "portal.ut.edu.vn":
+        return "portal"
+    return "external"
+
+
+def is_uth_login_url(url: str) -> Optional[str]:
+    fn = _core_is_uth_login_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "is_uth_login_url", None)
+    if callable(fn):
+        return fn(url)
+    site = classify_uth_webview_url(url)
+    if site == "external":
+        return None
+    validated = validate_https_url(url)
+    if validated is None:
+        return None
+    unq = unquote(urlsplit(validated).path or "")
+    collapsed = re.sub(r"/+", "/", unq) if unq else ""
+    if collapsed and not collapsed.startswith("/"):
+        collapsed = f"/{collapsed}"
+    norm = posixpath.normpath(collapsed).lower() if collapsed else ""
+    if norm.startswith("//"):
+        norm = "/" + norm.lstrip("/")
+    if site in ("courses", "thnn"):
+        return site if norm in {"/login/index.php", "/login"} else None
+    return "portal" if norm in {"", "/", "/login"} else None
+
+
+def normalize_uth_webview_target_url(url: str, *, has_credentials: bool = True) -> str:
+    fn = _core_normalize_uth_webview_target_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "normalize_uth_webview_target_url", None)
+    if callable(fn):
+        return str(fn(url, has_credentials=has_credentials))
+    if not isinstance(url, str) or not url:
+        return ""
+    site = classify_uth_webview_url(url)
+    if site == "external":
+        return url
+    validated = validate_https_url(url)
+    if validated is None:
+        return url
+    parsed = urlsplit(validated)
+    canonical_hosts = {
+        "courses": "courses.ut.edu.vn",
+        "thnn": "thnn.ut.edu.vn",
+        "portal": "portal.ut.edu.vn",
+    }
+    defaults = {
+        "courses": "https://courses.ut.edu.vn/my/",
+        "thnn": "https://thnn.ut.edu.vn/my/",
+        "portal": "https://portal.ut.edu.vn/dashboard",
+    }
+    canonical = urlunsplit(
+        ("https", canonical_hosts[site], parsed.path, parsed.query, parsed.fragment)
+    )
+    login_site = is_uth_login_url(canonical)
+    if login_site is None:
+        return canonical
+    if login_site in ("courses", "thnn"):
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        wants = params.get("wantsurl") or params.get("WANTSURL") or []
+        if len(wants) == 1:
+            w_site = classify_uth_webview_url(wants[0])
+            if w_site == login_site and is_uth_login_url(wants[0]) is None:
+                return normalize_uth_webview_target_url(
+                    wants[0], has_credentials=has_credentials
+                )
+            return defaults[login_site]
+        return defaults[login_site] if has_credentials else canonical
+    return defaults["portal"] if has_credentials else canonical
+
+
+def _bootstrap_init_script(bootstrap: Any) -> str:
+    if bootstrap is None:
+        return ""
+    val = getattr(bootstrap, "portal_init_script", None)
+    if not val:
+        val = getattr(bootstrap, "init_script", "")
+    return str(val or "")
 
 
 def _extract_bridged_uth_url(url: str) -> str:
@@ -136,6 +347,28 @@ def _call_with_supported_kwargs(fn: Callable[..., Any], *args: Any, **kwargs: An
         )
     }
     return fn(*args, **filtered)
+
+
+def _invoke_recover_from_login_redirect(
+    auth_service: Any,
+    login_url: str,
+    tracker: Any,
+    expected_epoch: Optional[int] = None,
+) -> Any:
+    fn = auth_service.recover_from_login_redirect
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return fn(login_url, tracker)
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    extra_kw: dict[str, Any] = {}
+    if expected_epoch is not None and ("expected_epoch" in params or has_var_kw):
+        extra_kw["expected_epoch"] = expected_epoch
+    if "tracker" in params:
+        if params["tracker"].kind == inspect.Parameter.KEYWORD_ONLY:
+            return fn(login_url, tracker=tracker, **extra_kw)
+        return fn(login_url, tracker, **extra_kw)
+    return fn(login_url, tracker, **extra_kw)
 
 
 def _build_flet_portal_eval_script(portal_init_script: str, target_url: str) -> str:
@@ -212,6 +445,7 @@ class CoursesWebViewPane(ft.Container):
         preview_server: Any = None,
         session_client: Any = None,
         webview_auth_service: Any = None,
+        account_epoch_getter: Optional[Callable[[], int]] = None,
         on_back: Callable[[], None],
         on_open_external: Callable[[str], None],
         is_expanded: bool = False,
@@ -228,7 +462,9 @@ class CoursesWebViewPane(ft.Container):
         self._preview_server = preview_server
         self._session_client = session_client
         self._webview_auth_service = webview_auth_service
-        self._recovery_tracker = WebViewRecoveryTracker()
+        self._account_epoch_getter = account_epoch_getter
+        self._mount_account_epoch: Optional[int] = self._current_account_epoch()
+        self._recovery_tracker = _make_recovery_tracker()
         self._recovery_lock = threading.Lock()
         self._recovery_in_flight = False
         self._recovery_awaiting_commit: set[str] = set()
@@ -247,7 +483,7 @@ class CoursesWebViewPane(ft.Container):
 
         raw_url = str(url or "")
         initial_site = classify_uth_webview_url(raw_url)
-        if initial_site in {"courses", "thnn", "portal"}:
+        if initial_site in {"courses", "thnn", "portal"} and not _is_demo_mode_active():
             self._url = normalize_uth_webview_target_url(
                 raw_url,
                 has_credentials=self._has_auth_credentials(initial_site),
@@ -279,6 +515,10 @@ class CoursesWebViewPane(ft.Container):
         self._host: Optional[EmbeddedWebViewHost] = None
         self._dock: Optional[WindowsWebView2Dock] = None
         self._fallback_html_loaded = False
+        self._initial_page_committed = False
+        self._blocked_navigation = False
+        self._host_load_error = ""
+        self._commit_watchdog: Optional[threading.Timer] = None
         self._disposed = False
 
         touch_constraints = ft.BoxConstraints(min_width=44, min_height=44)
@@ -288,6 +528,7 @@ class CoursesWebViewPane(ft.Container):
             tooltip="Trang trước",
             icon_color=C.TEXT_PRIMARY,
             disabled_color=C.TEXT_SECONDARY,
+            disabled=True,
             size_constraints=touch_constraints,
             on_click=self._on_webview_back,
         )
@@ -297,6 +538,7 @@ class CoursesWebViewPane(ft.Container):
             tooltip="Trang kế",
             icon_color=C.TEXT_PRIMARY,
             disabled_color=C.TEXT_SECONDARY,
+            disabled=True,
             size_constraints=touch_constraints,
             on_click=self._on_webview_forward,
         )
@@ -334,12 +576,18 @@ class CoursesWebViewPane(ft.Container):
         self._more_menu_item_reload = ft.PopupMenuItem(
             content="Tải lại trang",
             icon=ft.Icons.REFRESH_ROUNDED,
-            on_click=self._on_webview_reload,
+            on_click=lambda e: (
+                set_global_webview_occlusion("webview_menu", False),
+                self._on_webview_reload(e),
+            ),
         )
         self._more_menu_item_ext = ft.PopupMenuItem(
             content="Mở bằng trình duyệt ngoài",
             icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-            on_click=lambda _e: self._on_open_external(self._url),
+            on_click=lambda _e: (
+                set_global_webview_occlusion("webview_menu", False),
+                self._on_open_external(self._url),
+            ),
         )
         self._more_menu_btn = ft.PopupMenuButton(
             icon=ft.Icons.MORE_VERT_ROUNDED,
@@ -348,6 +596,9 @@ class CoursesWebViewPane(ft.Container):
             tooltip="Tùy chọn",
             size_constraints=touch_constraints,
             items=[self._more_menu_item_reload, self._more_menu_item_ext],
+            on_open=lambda _e: set_global_webview_occlusion("webview_menu", True),
+            on_cancel=lambda _e: set_global_webview_occlusion("webview_menu", False),
+            on_select=lambda _e: set_global_webview_occlusion("webview_menu", False),
         )
 
         self._header_container, self._back_btn, self._title_text, self._subtitle_text = (
@@ -388,14 +639,31 @@ class CoursesWebViewPane(ft.Container):
             bgcolor=C.BORDER,
             visible=True,
         )
+        self._nav_progress_host = ft.Container(
+            left=0,
+            top=0,
+            right=0,
+            height=2,
+            opacity=1.0,
+            ignore_interactions=True,
+            content=self._nav_progress,
+        )
         self._body_host = ft.Container(expand=True, bgcolor=C.BG)
+        self._body_stack = ft.Stack(
+            expand=True,
+            fit=ft.StackFit.EXPAND,
+            controls=[
+                self._body_host,
+                self._nav_progress_host,
+            ],
+        )
         self.content = ft.Column(
             expand=True,
             spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[
                 self._header_container,
-                self._nav_progress,
-                self._body_host,
+                self._body_stack,
                 self._mobile_nav_bar,
             ],
         )
@@ -450,7 +718,50 @@ class CoursesWebViewPane(ft.Container):
         parsed = urlsplit(url or "")
         return f"{parsed.netloc}{parsed.path}" if parsed.netloc else (url or "")
 
+    def _current_account_epoch(self) -> Optional[int]:
+        if callable(self._account_epoch_getter):
+            try:
+                val = self._account_epoch_getter()
+                return int(val) if val is not None else None
+            except Exception:
+                return None
+        svc_getter = getattr(self._webview_auth_service, "_account_epoch_getter", None)
+        if callable(svc_getter):
+            try:
+                val = svc_getter()
+                return int(val) if val is not None else None
+            except Exception:
+                return None
+        return None
+
+    def _is_epoch_current(
+        self,
+        expected_epoch: Optional[int],
+        bootstrap: Any = None,
+    ) -> bool:
+        now_epoch = self._current_account_epoch()
+        if (
+            expected_epoch is not None
+            and now_epoch is not None
+            and now_epoch != expected_epoch
+        ):
+            return False
+        if (
+            self._mount_account_epoch is not None
+            and now_epoch is not None
+            and now_epoch != self._mount_account_epoch
+        ):
+            return False
+        boot_epoch = (
+            getattr(bootstrap, "account_epoch", None) if bootstrap is not None else None
+        )
+        if boot_epoch is not None and now_epoch is not None and int(boot_epoch) != now_epoch:
+            return False
+        return True
+
     def _has_auth_credentials(self, site: str) -> bool:
+        if _is_demo_mode_active():
+            return False
         svc = self._webview_auth_service
         if svc is not None:
             public_has_fn = getattr(svc, "has_credentials", None)
@@ -480,13 +791,18 @@ class CoursesWebViewPane(ft.Container):
         return None
 
     def _resolve_auth_service(self) -> Optional[Any]:
+        if _is_demo_mode_active():
+            return None
         if self._webview_auth_service is not None:
             return self._webview_auth_service
         if self._session_client is None:
             return None
+        svc_cls = _resolve_auth_service_cls()
+        if svc_cls is None:
+            return None
         if self._source == "thnn":
-            return UthWebViewAuthService(thnn_client=self._session_client)
-        return UthWebViewAuthService(courses_client=self._session_client)
+            return svc_cls(thnn_client=self._session_client)
+        return svc_cls(courses_client=self._session_client)
 
     def _allow_preview_port_on_host(self, url: str) -> None:
         host = self._host
@@ -534,7 +850,14 @@ class CoursesWebViewPane(ft.Container):
         return target
 
     def _mount_engine(self) -> None:
-        use_bridge = _is_flet_webview_platform(self._page)
+        if _is_demo_lms_blocked(self._url):
+            self._blocked_navigation = True
+            self._set_nav_loading(False)
+            self._show_blocked_url_card()
+            return
+        use_bridge = _is_flet_webview_platform(
+            self._page
+        ) and not _is_inappwebview_mobile_platform(self._page)
         load_url = self._build_bridge_or_target_url() if use_bridge else self._url
 
         if self._embedded_factory is not None:
@@ -544,11 +867,13 @@ class CoursesWebViewPane(ft.Container):
                     self._host = custom
                     self._dock = custom.dock
                     self._nav_progress.visible = False
+                    self._nav_progress_host.opacity = 0.0
                     self._body_host.content = ft.Container(
                         expand=True, content=custom.control()
                     )
                     return
                 self._nav_progress.visible = False
+                self._nav_progress_host.opacity = 0.0
                 self._body_host.content = ft.Container(expand=True, content=custom)
                 return
 
@@ -558,31 +883,51 @@ class CoursesWebViewPane(ft.Container):
         cookie_provider: Optional[Callable[[], list[dict[str, Any]]]] = None
         init_script_provider: Optional[Callable[[], str]] = None
 
-        if not use_bridge:
+        if not use_bridge and not _is_demo_mode_active():
             if (
                 site_kind in {"courses", "thnn", "portal"}
                 and self._webview_auth_service is not None
             ):
                 auth_svc = self._webview_auth_service
                 initial_target = self._url
+                mount_epoch = self._current_account_epoch()
                 bootstrap_lock = threading.Lock()
-                bootstrap_cache: dict[str, Optional[WebViewAuthBootstrap]] = {
-                    "value": None
-                }
+                bootstrap_cache: dict[str, Any] = {"value": None}
 
-                def _load_initial_bootstrap() -> WebViewAuthBootstrap:
+                def _load_initial_bootstrap() -> Any:
                     with bootstrap_lock:
                         cached = bootstrap_cache["value"]
                         if cached is None:
-                            cached = auth_svc.prepare_initial_auth(initial_target)
+                            if self._disposed or not self._is_epoch_current(mount_epoch):
+                                return None
+                            extra = (
+                                {"expected_epoch": mount_epoch}
+                                if mount_epoch is not None
+                                else {}
+                            )
+                            cached = _call_with_supported_kwargs(
+                                auth_svc.prepare_initial_auth,
+                                initial_target,
+                                **extra,
+                            )
+                            if self._disposed or not self._is_epoch_current(
+                                mount_epoch, cached
+                            ):
+                                return None
                             bootstrap_cache["value"] = cached
                         return cached
 
                 def _provide_cookies() -> list[dict[str, Any]]:
-                    return list(_load_initial_bootstrap().cookies)
+                    boot = _load_initial_bootstrap()
+                    if boot is None or not getattr(boot, "target_url", ""):
+                        return []
+                    return list(getattr(boot, "cookies", ()) or ())
 
                 def _provide_init_script() -> str:
-                    return str(_load_initial_bootstrap().portal_init_script or "")
+                    boot = _load_initial_bootstrap()
+                    if boot is None or not getattr(boot, "target_url", ""):
+                        return ""
+                    return _bootstrap_init_script(boot)
 
                 cookie_provider = _provide_cookies
                 init_script_provider = _provide_init_script
@@ -645,10 +990,13 @@ class CoursesWebViewPane(ft.Container):
                 self._show_html_fallback_or_card()
                 return
             self._nav_progress.visible = True
+            self._nav_progress_host.opacity = 1.0
             self._body_host.content = host.control()
+            self._arm_initial_commit_watchdog()
             if (
                 host.backend == "flet_webview"
                 and site_kind == "portal"
+                and not _is_demo_mode_active()
                 and self._webview_auth_service is not None
             ):
                 self._start_flet_portal_bootstrap()
@@ -674,27 +1022,30 @@ class CoursesWebViewPane(ft.Container):
             except Exception as exc:
                 logger.debug("WebView eval_js skipped: %s", exc)
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is not None:
-            loop.create_task(_run())
-            return
         page = _safe_control_page(self) or self._page
-        run_task = getattr(page, "run_task", None) if page is not None else None
-        if callable(run_task):
-            try:
-                res = run_task(_run)
-                if inspect.isawaitable(res):
-                    asyncio.run(res)  # type: ignore[arg-type]
+
+        def _dispatch() -> None:
+            if self._disposed:
                 return
-            except Exception:
+            run_task = getattr(page, "run_task", None) if page is not None else None
+            if callable(run_task):
+                try:
+                    res = run_task(_run)
+                    if inspect.isawaitable(res) and not isinstance(res, asyncio.Task):
+                        try:
+                            asyncio.get_running_loop().create_task(res)  # type: ignore[arg-type]
+                        except RuntimeError:
+                            pass
+                    return
+                except Exception:
+                    pass
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_run())
+            except RuntimeError:
                 pass
-        try:
-            asyncio.run(_run())
-        except Exception:
-            pass
+
+        marshal_to_ui(self, _dispatch, page=page)
 
     def _is_bridge_session_url(self, url: str) -> bool:
         if "/session/" not in url or not _is_loopback_url(url):
@@ -766,6 +1117,7 @@ class CoursesWebViewPane(ft.Container):
             self._flet_portal_bootstrap_in_flight = True
         auth_svc = self._webview_auth_service
         target_url = self._url
+        start_epoch = self._current_account_epoch()
         if auth_svc is None:
             with self._portal_mobile_lock:
                 self._flet_portal_bootstrap_in_flight = False
@@ -774,11 +1126,27 @@ class CoursesWebViewPane(ft.Container):
         def _worker() -> None:
             mobile_script = ""
             try:
-                bootstrap = auth_svc.prepare_initial_auth(target_url)
-                if not self._disposed and bootstrap.portal_init_script:
-                    mobile_script = _build_flet_portal_eval_script(
-                        bootstrap.portal_init_script, bootstrap.target_url
+                if not self._disposed and self._is_epoch_current(start_epoch):
+                    extra = (
+                        {"expected_epoch": start_epoch}
+                        if start_epoch is not None
+                        else {}
                     )
+                    bootstrap = _call_with_supported_kwargs(
+                        auth_svc.prepare_initial_auth,
+                        target_url,
+                        **extra,
+                    )
+                    raw_init = _bootstrap_init_script(bootstrap)
+                    if (
+                        not self._disposed
+                        and self._is_epoch_current(start_epoch, bootstrap)
+                        and getattr(bootstrap, "target_url", "")
+                        and raw_init
+                    ):
+                        mobile_script = _build_flet_portal_eval_script(
+                            raw_init, bootstrap.target_url
+                        )
             except Exception as exc:
                 logger.debug("Mobile Portal bootstrap failed: %s", type(exc).__name__)
 
@@ -788,7 +1156,7 @@ class CoursesWebViewPane(ft.Container):
                 self._flet_portal_bootstrap_in_flight = False
                 current_url = self._resolved_current_url()
                 current_is_portal = classify_uth_webview_url(current_url) == "portal"
-                if mobile_script and not self._disposed:
+                if mobile_script and not self._disposed and self._is_epoch_current(start_epoch):
                     self._deferred_portal_login_url = ""
                     if current_is_portal and not self._portal_mobile_script_applied:
                         if self._flet_page_loaded:
@@ -806,6 +1174,7 @@ class CoursesWebViewPane(ft.Container):
                     cur = self._resolved_current_url()
                     if (
                         not self._disposed
+                        and self._is_epoch_current(start_epoch)
                         and classify_uth_webview_url(cur) == "portal"
                         and WindowsWebView2Dock._url_origin(cur)
                         == "https://portal.ut.edu.vn"
@@ -816,6 +1185,7 @@ class CoursesWebViewPane(ft.Container):
             elif (
                 deferred_login_url
                 and not self._disposed
+                and self._is_epoch_current(start_epoch)
                 and is_uth_login_url(self._resolved_current_url()) == "portal"
             ):
                 self._trigger_login_recovery(deferred_login_url)
@@ -844,7 +1214,44 @@ class CoursesWebViewPane(ft.Container):
         if site in {"courses", "thnn", "portal"} and is_uth_login_url(url) is None:
             self._recovery_tracker.record_navigation(url)
 
+    def _cancel_commit_watchdog(self) -> None:
+        timer = self._commit_watchdog
+        self._commit_watchdog = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _arm_initial_commit_watchdog(self) -> None:
+        self._cancel_commit_watchdog()
+        if (
+            self._disposed
+            or self._initial_page_committed
+            or not isinstance(self._page, ft.Page)
+        ):
+            return
+
+        def _on_timeout() -> None:
+            if (
+                self._disposed
+                or self._initial_page_committed
+                or self._host is None
+            ):
+                return
+            self._on_host_error("Initial WebView load timed out")
+
+        timer = threading.Timer(_INITIAL_COMMIT_WATCHDOG_SECONDS, _on_timeout)
+        timer.daemon = True
+        self._commit_watchdog = timer
+        timer.start()
+
+    def _mark_initial_page_committed(self) -> None:
+        self._initial_page_committed = True
+        self._cancel_commit_watchdog()
+
     def _on_host_ready(self) -> None:
+        self._mark_initial_page_committed()
         if self._disposed:
             return
         current = self._resolved_current_url()
@@ -902,36 +1309,24 @@ class CoursesWebViewPane(ft.Container):
     def _marshal_ui(self, fn: Callable[[], None]) -> None:
         if self._disposed:
             return
-        page = _safe_control_page(self) or self._page
-        if page is None or not callable(getattr(page, "run_task", None)):
-            fn()
-            return
-        try:
-            asyncio.get_running_loop()
-            fn()
-            return
-        except RuntimeError:
-            pass
 
-        async def _apply() -> None:
+        def _guarded() -> None:
             if not self._disposed:
                 fn()
 
-        try:
-            page.run_task(_apply)
-        except Exception:
-            fn()
+        marshal_to_ui(self, _guarded, page=_safe_control_page(self) or self._page)
 
     def _set_nav_loading(self, loading: bool) -> None:
         if self._disposed:
             return
-        self._nav_progress.visible = bool(loading)
-        safe_control_update(self._nav_progress)
+        is_loading = bool(loading)
+        self._nav_progress.visible = is_loading
+        self._nav_progress_host.opacity = 1.0 if is_loading else 0.0
+        safe_control_update(self._nav_progress_host)
 
     def _on_host_loading_changed(self, loading: bool) -> None:
         def _apply() -> None:
-            self._nav_progress.visible = bool(loading)
-            safe_control_update(self._nav_progress)
+            self._set_nav_loading(loading)
 
         self._marshal_ui(_apply)
 
@@ -947,6 +1342,7 @@ class CoursesWebViewPane(ft.Container):
     def _on_native_title(self, title: str) -> None:
         if not title:
             return
+        self._mark_initial_page_committed()
 
         def _apply() -> None:
             self._title_text.value = title
@@ -955,7 +1351,7 @@ class CoursesWebViewPane(ft.Container):
         self._marshal_ui(_apply)
 
     def _on_native_url_or_bridge(self, url: str) -> None:
-        if not url:
+        if not url or self._disposed:
             return
         if self._is_bridge_session_url(url):
             self._last_rewritten_bridge_target = ""
@@ -966,6 +1362,9 @@ class CoursesWebViewPane(ft.Container):
                     bridged_site = classify_uth_webview_url(bridged_uth)
                     with self._recovery_lock:
                         self._recovery_awaiting_commit.discard(bridged_site)
+            return
+        if _is_demo_lms_blocked(url):
+            self._on_host_error(f"Blocked disallowed WebView URL: {url}")
             return
 
         self._current_url = url
@@ -1006,7 +1405,10 @@ class CoursesWebViewPane(ft.Container):
         self._marshal_ui(_apply)
 
     def _trigger_login_recovery(self, login_url: str) -> None:
-        if self._disposed or self._host is None:
+        if self._disposed or self._host is None or _is_demo_mode_active():
+            return
+        start_epoch = self._current_account_epoch()
+        if not self._is_epoch_current(start_epoch):
             return
         if is_uth_login_url(login_url) == "portal":
             with self._portal_mobile_lock:
@@ -1020,7 +1422,7 @@ class CoursesWebViewPane(ft.Container):
         try:
             threading.Thread(
                 target=self._attempt_login_recovery,
-                args=(login_url,),
+                args=(login_url, start_epoch),
                 name="CoursesWebViewLoginRecovery",
                 daemon=True,
             ).start()
@@ -1028,50 +1430,90 @@ class CoursesWebViewPane(ft.Container):
             with self._recovery_lock:
                 self._recovery_in_flight = False
 
-    def _attempt_login_recovery(self, login_url: str) -> None:
+    def _clear_loading_if_host_idle(self) -> None:
+        if self._disposed:
+            return
+        host = self._host
+        if host is not None and bool(getattr(host, "_flet_loading", False)):
+            return
+        self._set_nav_loading(False)
+
+    def _attempt_login_recovery(
+        self, login_url: str, start_epoch: Optional[int] = None
+    ) -> None:
         try:
-            if self._disposed:
+            if self._disposed or not self._is_epoch_current(start_epoch):
                 return
             auth_service = self._resolve_auth_service()
             if auth_service is None:
+                self._marshal_ui(self._clear_loading_if_host_idle)
                 return
-            bootstrap = auth_service.recover_from_login_redirect(
-                login_url, self._recovery_tracker
+            bootstrap = _invoke_recover_from_login_redirect(
+                auth_service,
+                login_url,
+                self._recovery_tracker,
+                expected_epoch=start_epoch,
             )
-            if bootstrap is None or self._disposed:
+            if (
+                bootstrap is None
+                or self._disposed
+                or not self._is_epoch_current(start_epoch, bootstrap)
+                or not getattr(bootstrap, "target_url", "")
+            ):
+                if not self._disposed:
+                    self._marshal_ui(self._clear_loading_if_host_idle)
                 return
-            self._marshal_ui(lambda b=bootstrap: self._apply_recovery_bootstrap(b))
+            self._marshal_ui(
+                lambda b=bootstrap, ep=start_epoch: self._apply_recovery_bootstrap(
+                    b, expected_epoch=ep
+                )
+            )
         except Exception as exc:
             logger.debug("WebView login recovery failed: %s", type(exc).__name__)
+            if not self._disposed:
+                self._marshal_ui(self._clear_loading_if_host_idle)
         finally:
             with self._recovery_lock:
                 self._recovery_in_flight = False
 
-    def _apply_recovery_bootstrap(self, bootstrap: WebViewAuthBootstrap) -> None:
-        if self._disposed or self._host is None:
+    def _apply_recovery_bootstrap(
+        self,
+        bootstrap: Any,
+        *,
+        expected_epoch: Optional[int] = None,
+    ) -> None:
+        if (
+            self._disposed
+            or self._host is None
+            or not self._is_epoch_current(expected_epoch, bootstrap)
+        ):
             return
         host = self._host
-        target_url = bootstrap.target_url
+        target_url = str(getattr(bootstrap, "target_url", "") or "")
         if not target_url:
+            self._clear_loading_if_host_idle()
             return
+        site = str(getattr(bootstrap, "site", "") or "")
         with self._recovery_lock:
-            self._recovery_awaiting_commit.add(bootstrap.site)
-            if bootstrap.site == "portal":
+            self._recovery_awaiting_commit.add(site)
+            if site == "portal":
                 self._cancel_portal_rearm_timer_locked()
                 self._portal_recovery_pending_rearm = True
         nav_url = target_url
-        init_script = bootstrap.portal_init_script
+        init_script = _bootstrap_init_script(bootstrap)
         if host.backend == "flet_webview":
-            if bootstrap.site in ("courses", "thnn") and self._preview_server is not None:
-                self._source = bootstrap.site
+            if site in ("courses", "thnn") and self._preview_server is not None:
+                self._source = site  # type: ignore[assignment]
                 nav_url = self._build_bridge_or_target_url(target_url)
                 self._allow_preview_port_on_host(nav_url)
-            elif bootstrap.site == "portal" and init_script:
+            elif site == "portal" and init_script:
                 with self._portal_mobile_lock:
                     self._portal_mobile_script_applied = True
                     self._pending_flet_portal_script = ""
                     self._deferred_portal_login_url = ""
                 init_script = _build_flet_portal_eval_script(init_script, target_url)
+        elif site in ("courses", "thnn"):
+            self._source = site  # type: ignore[assignment]
 
         self._url = target_url
         self._subtitle_text.value = self._short_subtitle(target_url)
@@ -1079,9 +1521,12 @@ class CoursesWebViewPane(ft.Container):
         safe_control_update(self._subtitle_text)
         safe_control_update(self._ext_btn)
         self._set_nav_loading(True)
+        cookies_list = list(getattr(bootstrap, "cookies", ()) or ())
         apply_fn = getattr(host, "apply_auth_and_navigate", None)
         if callable(apply_fn):
-            apply_fn(list(bootstrap.cookies), nav_url, init_script=init_script)
+            applied = apply_fn(cookies_list, nav_url, init_script=init_script)
+            if applied is False:
+                self._set_nav_loading(False)
         else:
             host.navigate(nav_url)
 
@@ -1094,6 +1539,8 @@ class CoursesWebViewPane(ft.Container):
         return bool(safe_http_url(url, allow_loopback=True)) and bool(checker(url))
 
     def _is_allowed_navigation_url(self, url: str) -> bool:
+        if _is_demo_lms_blocked(url):
+            return False
         if bool(safe_http_url(url)):
             return True
         return self._is_allowed_preview_url(url)
@@ -1132,6 +1579,78 @@ class CoursesWebViewPane(ft.Container):
         )
         safe_control_update(self._body_host)
 
+    def _show_external_app_card(self, *, launched: bool, scheme: str = "") -> None:
+        norm_scheme = (scheme or "").strip().lower()
+        app_label = _SCHEME_DISPLAY_LABELS.get(norm_scheme, "")
+        if launched:
+            icon_ctrl = ft.Icon(ft.Icons.OPEN_IN_NEW_ROUNDED, size=44, color=C.ACCENT)
+            detail_msg = (
+                f"Đã mở liên kết trong ứng dụng {app_label} trên thiết bị."
+                if app_label
+                else "Đã mở liên kết trong ứng dụng ngoài trên thiết bị."
+            )
+        else:
+            icon_ctrl = ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT)
+            detail_msg = (
+                f"Thiết bị chưa cài đặt ứng dụng {app_label} để mở trực tiếp liên kết này. "
+                "Bạn có thể mở bằng trình duyệt ngoài."
+                if app_label
+                else "Liên kết này yêu cầu ứng dụng ngoài chưa được cài đặt trên thiết bị. "
+                "Bạn có thể mở bằng trình duyệt ngoài."
+            )
+
+        action_controls: list[ft.Control] = []
+        if safe_http_url(self._url) and not _is_loopback_url(self._url):
+            action_controls.append(
+                ft.FilledButton(
+                    "Mở bằng trình duyệt ngoài",
+                    icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                    on_click=lambda _e: self._on_open_external(self._url),
+                )
+            )
+        action_controls.append(
+            ft.OutlinedButton(
+                "Quay lại",
+                icon=ft.Icons.ARROW_BACK_ROUNDED,
+                on_click=lambda _e: self._handle_back(),
+            )
+        )
+
+        self._body_host.content = ft.Container(
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+            padding=24,
+            content=ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=12,
+                controls=[
+                    icon_ctrl,
+                    ft.Text(
+                        self._title,
+                        size=16,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        detail_msg,
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        wrap=True,
+                        spacing=10,
+                        run_spacing=8,
+                        controls=action_controls,
+                    ),
+                ],
+            ),
+        )
+        safe_control_update(self._body_host)
+
     def _on_host_error(self, reason: str) -> None:
         self._cancel_portal_rearm_timer()
 
@@ -1140,6 +1659,8 @@ class CoursesWebViewPane(ft.Container):
             host = self._host
             reason_str = str(reason or "")
             if reason_str.startswith("Blocked disallowed WebView URL:"):
+                self._blocked_navigation = True
+                self._cancel_commit_watchdog()
                 if host is not None:
                     self._host = None
                     self._dock = None
@@ -1152,17 +1673,53 @@ class CoursesWebViewPane(ft.Container):
                     reason_str,
                 )
                 return
-            if host is not None and host.backend == "webview2":
-                dock = host.dock
-                if dock is None or not getattr(dock, "_ready", False):
+            if reason_str.startswith(_EXTERNAL_APP_LAUNCHED_PREFIX):
+                self._cancel_commit_watchdog()
+                scheme = reason_str[len(_EXTERNAL_APP_LAUNCHED_PREFIX) :]
+                if host is not None:
+                    self._host = None
+                    self._dock = None
+                    host.dispose()
+                if not self._disposed:
+                    self._show_external_app_card(launched=True, scheme=scheme)
+                    safe_control_update(self)
+                return
+            if reason_str.startswith(_EXTERNAL_APP_MISSING_PREFIX):
+                self._cancel_commit_watchdog()
+                scheme = reason_str[len(_EXTERNAL_APP_MISSING_PREFIX) :]
+                if host is not None:
+                    self._host = None
+                    self._dock = None
+                    host.dispose()
+                if not self._disposed:
+                    self._show_external_app_card(launched=False, scheme=scheme)
+                    safe_control_update(self)
+                return
+            if host is not None:
+                pre_commit_failure = (
+                    host.backend == "webview2"
+                    and (host.dock is None or not getattr(host.dock, "_ready", False))
+                ) or (
+                    host.backend in ("inappwebview", "flet_webview")
+                    and not self._initial_page_committed
+                )
+                if pre_commit_failure:
+                    self._cancel_commit_watchdog()
                     self._host = None
                     self._dock = None
                     host.dispose()
                     if not self._disposed:
+                        self._host_load_error = reason_str or "WebView load error"
+                        self._fallback_html_loaded = False
                         self._show_html_fallback_or_card()
                         safe_control_update(self)
+                    logger.warning(
+                        "EmbeddedWebViewHost initial load failed (%s): %s",
+                        host.backend,
+                        reason,
+                    )
                     return
-            logger.debug("EmbeddedWebViewHost error: %s", reason)
+            logger.warning("EmbeddedWebViewHost error: %s", reason)
 
         self._marshal_ui(_apply)
 
@@ -1211,6 +1768,7 @@ class CoursesWebViewPane(ft.Container):
                 error_text = "Liên kết không hợp lệ hoặc không được phép mở."
             elif (
                 is_uth_site
+                and not _is_demo_mode_active()
                 and fallback_client is not None
                 and hasattr(fallback_client, "open_session_url")
             ):
@@ -1235,11 +1793,19 @@ class CoursesWebViewPane(ft.Container):
                     raw_bytes = resp.read(512 * 1024)
                     html_text = raw_bytes.decode("utf-8", errors="replace")
             elif not is_uth_site:
-                error_text = (
-                    "Liên kết ngoài hệ thống yêu cầu trình duyệt tương tác trực tiếp (WebView2 / trình duyệt)."
-                )
+                if self._host_load_error:
+                    error_text = (
+                        "Không thể tải trang web lúc này. Vui lòng kiểm tra kết nối mạng "
+                        "rồi tải lại hoặc mở bằng trình duyệt ngoài."
+                    )
+                else:
+                    error_text = (
+                        "Liên kết ngoài hệ thống yêu cầu trình duyệt tương tác trực tiếp trên thiết bị."
+                    )
 
             if html_text and not error_text:
+                from core.courses.activity_service import _html_to_readable_markdown
+
                 raw_soup = BeautifulSoup(html_text, BS4_PARSER)
                 for junk_tag in list(raw_soup.find_all(_NON_READABLE_HTML_TAGS)):
                     if not getattr(junk_tag, "decomposed", False):
@@ -1251,17 +1817,7 @@ class CoursesWebViewPane(ft.Container):
                     or raw_soup.body
                     or raw_soup
                 )
-                lines: list[str] = []
-                for el in main.find_all(["h1", "h2", "h3", "p", "li"]):
-                    txt = " ".join(el.get_text(" ", strip=True).split())
-                    if txt:
-                        prefix = (
-                            "## "
-                            if el.name in ("h1", "h2", "h3")
-                            else ("- " if el.name == "li" else "")
-                        )
-                        lines.append(f"{prefix}{txt}")
-                markdown_text = "\n\n".join(lines[:140])
+                markdown_text = _html_to_readable_markdown(str(main))
                 for anchor in main.select("a[href]"):
                     href = str(anchor.get("href") or "").strip()
                     label = " ".join(anchor.get_text(" ", strip=True).split())
@@ -1277,106 +1833,127 @@ class CoursesWebViewPane(ft.Container):
         if self._disposed:
             return
 
-        self._nav_progress.visible = False
-        safe_control_update(self._nav_progress)
+        def _apply_fallback() -> None:
+            if self._disposed:
+                return
+            self._set_nav_loading(False)
 
-        if error_text or not markdown_text:
-            card_controls: list[ft.Control] = [
-                ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
-                ft.Text(
-                    self._title,
-                    size=16,
-                    weight=ft.FontWeight.W_600,
-                    color=C.TEXT_PRIMARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Text(
-                    error_text
-                    or "Hoạt động này yêu cầu trình duyệt tương tác trực tiếp trên thiết bị.",
-                    size=13,
-                    color=C.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
+            if error_text or not markdown_text:
+                action_controls: list[ft.Control] = []
+                if safe_http_url(self._url) and not _is_loopback_url(self._url):
+                    action_controls.append(
+                        ft.FilledButton(
+                            "Mở bằng trình duyệt ngoài",
+                            icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                            on_click=lambda _e: self._on_open_external(self._url),
+                        )
+                    )
+                action_controls.append(
+                    ft.OutlinedButton(
+                        "Quay lại",
+                        icon=ft.Icons.ARROW_BACK_ROUNDED,
+                        on_click=lambda _e: self._handle_back(),
+                    )
+                )
+                card_controls: list[ft.Control] = [
+                    ft.Icon(ft.Icons.LANGUAGE_ROUNDED, size=44, color=C.ACCENT),
+                    ft.Text(
+                        self._title,
+                        size=16,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_PRIMARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        error_text
+                        or "Hoạt động này yêu cầu trình duyệt tương tác trực tiếp trên thiết bị.",
+                        size=13,
+                        color=C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        wrap=True,
+                        spacing=10,
+                        run_spacing=8,
+                        controls=action_controls,
+                    ),
+                ]
+                self._body_host.content = ft.Container(
+                    expand=True,
+                    alignment=ft.Alignment.CENTER,
+                    padding=24,
+                    content=ft.Column(
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=12,
+                        controls=card_controls,
+                    ),
+                )
+                safe_control_update(self._body_host)
+                return
+
+            controls: list[ft.Control] = [
+                ft.Markdown(
+                    value=markdown_text,
+                    selectable=True,
+                    extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                    on_tap_link=lambda e: self._navigate_link(
+                        str(getattr(e, "data", "") or "")
+                    ),
+                )
             ]
-            if safe_http_url(self._url) and not _is_loopback_url(self._url):
-                card_controls.append(
-                    ft.FilledButton(
-                        "Mở bằng trình duyệt ngoài",
-                        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
-                        on_click=lambda _e: self._on_open_external(self._url),
+            if extracted_links:
+                controls.append(ft.Divider(height=16, color=C.BORDER))
+                controls.append(
+                    ft.Text(
+                        "Liên kết nhanh trong trang",
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=C.TEXT_SECONDARY,
+                    )
+                )
+                controls.append(
+                    ft.Row(
+                        wrap=True,
+                        spacing=8,
+                        run_spacing=8,
+                        controls=[
+                            ft.OutlinedButton(
+                                label[:40],
+                                on_click=lambda _e, target=href: self._navigate_link(target),
+                            )
+                            for label, href in extracted_links
+                        ],
                     )
                 )
             self._body_host.content = ft.Container(
                 expand=True,
-                alignment=ft.Alignment.CENTER,
-                padding=24,
-                content=ft.Column(
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=12,
-                    controls=card_controls,
-                ),
+                padding=ft.Padding.symmetric(horizontal=20, vertical=16),
+                content=ft.ListView(expand=True, spacing=8, controls=controls),
             )
             safe_control_update(self._body_host)
-            return
 
-        controls: list[ft.Control] = [
-            ft.Markdown(
-                value=markdown_text,
-                selectable=True,
-                extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                on_tap_link=lambda e: self._navigate_link(
-                    str(getattr(e, "data", "") or "")
-                ),
-            )
-        ]
-        if extracted_links:
-            controls.append(ft.Divider(height=16, color=C.BORDER))
-            controls.append(
-                ft.Text(
-                    "Liên kết nhanh trong trang",
-                    size=11,
-                    weight=ft.FontWeight.W_600,
-                    color=C.TEXT_SECONDARY,
-                )
-            )
-            controls.append(
-                ft.Row(
-                    wrap=True,
-                    spacing=8,
-                    run_spacing=8,
-                    controls=[
-                        ft.OutlinedButton(
-                            label[:40],
-                            on_click=lambda _e, target=href: self._navigate_link(target),
-                        )
-                        for label, href in extracted_links
-                    ],
-                )
-            )
-        self._body_host.content = ft.Container(
-            expand=True,
-            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
-            content=ft.ListView(expand=True, spacing=8, controls=controls),
-        )
-        safe_control_update(self._body_host)
+        self._marshal_ui(_apply_fallback)
 
     def _navigate_link(self, target_url: str) -> None:
         clean = str(target_url or "").strip()
         if not clean or not self._is_allowed_navigation_url(clean):
             logger.warning("Blocked disallowed navigation link in CoursesWebViewPane")
             return
+        self._blocked_navigation = False
+        self._host_load_error = ""
         site = classify_uth_webview_url(clean)
         if site != "portal":
             self._clear_pending_flet_portal_script()
             self._cancel_portal_rearm_timer()
-        if site in {"courses", "thnn", "portal"}:
+        if site in {"courses", "thnn", "portal"} and not _is_demo_mode_active():
             clean = normalize_uth_webview_target_url(
                 clean, has_credentials=self._has_auth_credentials(site)
             )
             self._recovery_tracker.record_navigation(clean)
             if site in {"courses", "thnn"}:
-                self._source = site
+                self._source = site  # type: ignore[assignment]
         self._url = clean
         self._current_url = clean
         self._subtitle_text.value = self._short_subtitle(clean)
@@ -1395,6 +1972,13 @@ class CoursesWebViewPane(ft.Container):
         elif self._dock is not None:
             self._set_nav_loading(True)
             self._dock.navigate(clean)
+        elif self._embedded_factory is None and is_embedded_webview_supported(self._page):
+            self._initial_page_committed = False
+            self._fallback_html_loaded = False
+            self._wv_back_btn.disabled = True
+            self._wv_fwd_btn.disabled = True
+            self._mount_engine()
+            safe_control_update(self)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
@@ -1413,11 +1997,23 @@ class CoursesWebViewPane(ft.Container):
             self._dock.go_forward()
 
     def _on_webview_reload(self, _e: Any) -> None:
+        if self._blocked_navigation:
+            self._show_blocked_url_card()
+            safe_control_update(self._body_host)
+            return
         if self._host is not None:
             self._set_nav_loading(True)
             self._host.reload()
         elif self._dock is not None:
             self._dock.reload()
+        elif self._embedded_factory is None and is_embedded_webview_supported(self._page):
+            self._initial_page_committed = False
+            self._fallback_html_loaded = False
+            self._host_load_error = ""
+            self._wv_back_btn.disabled = True
+            self._wv_fwd_btn.disabled = True
+            self._mount_engine()
+            safe_control_update(self)
         else:
             self._fallback_html_loaded = False
             self._show_html_fallback_or_card()
@@ -1489,6 +2085,7 @@ class CoursesWebViewPane(ft.Container):
             )
 
     def suspend(self) -> None:
+        set_global_webview_occlusion("webview_menu", False)
         if self._host is not None:
             self._host.suspend()
         elif self._dock is not None:
@@ -1502,15 +2099,20 @@ class CoursesWebViewPane(ft.Container):
         elif self._dock is not None:
             self._dock.set_visible(True)
 
-    def dispose(self) -> None:
+    def dispose(self, *, clear_browser_storage: bool = False) -> None:
         self._disposed = True
+        self._cancel_commit_watchdog()
         self._cancel_portal_rearm_timer()
         with self._portal_mobile_lock:
             self._pending_flet_portal_script = ""
             self._deferred_portal_login_url = ""
             self._flet_portal_bootstrap_in_flight = False
+        set_global_webview_occlusion("webview_menu", False)
         if self._host is not None:
-            self._host.dispose()
+            _call_with_supported_kwargs(
+                self._host.dispose,
+                clear_browser_storage=clear_browser_storage,
+            )
             self._host = None
             self._dock = None
         elif self._dock is not None:

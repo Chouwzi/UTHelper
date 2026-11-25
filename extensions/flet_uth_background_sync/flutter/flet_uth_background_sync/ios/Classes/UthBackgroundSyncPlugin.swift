@@ -1,5 +1,6 @@
 import CryptoKit
 import Flutter
+import Security
 import UIKit
 import UserNotifications
 
@@ -10,6 +11,13 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private static let classSchedulePrefix = "uth.class."
     private static let settingsKey = "uth.notification.settings"
     private static let receiptsKey = "uth.notification.receipts"
+    private static let keychainService = "com.uthelper.app_secrets"
+    private static let keychainAccount = "app_secrets_v1"
+    private static let keychainLock = NSLock()
+    private static let keychainQueue = DispatchQueue(
+        label: "com.uthelper.app_secrets.keychain",
+        qos: .userInitiated
+    )
 
     private let center = UNUserNotificationCenter.current()
     private let defaults = UserDefaults.standard
@@ -29,10 +37,22 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "configure":
             let arguments = call.arguments as? [String: Any]
             let settings = arguments?["settings"] as? [String: Any] ?? [:]
+            let enabled = bool(settings["enabled"], default: true)
             defaults.set(settings, forKey: Self.settingsKey)
+            guard enabled else {
+                clearDeadlineNotifications()
+                finish(result, [
+                    "enabled": false,
+                    "permission_granted": false,
+                    "scheduled": 0,
+                    "cancelled": 0,
+                    "error": "",
+                ])
+                return
+            }
             center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
                 self.finish(result, [
-                    "enabled": self.bool(settings["enabled"], default: true),
+                    "enabled": true,
                     "permission_granted": granted,
                     "scheduled": 0,
                     "cancelled": 0,
@@ -43,6 +63,45 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "set_credentials":
             // iOS schedules from the foreground snapshot and never persists Moodle tokens.
             result(nil)
+
+        case "read_app_secrets":
+            Self.keychainQueue.async {
+                switch self.readKeychainSecrets() {
+                case .success(let secrets):
+                    self.finish(result, secrets)
+                case .failure(let error):
+                    self.finish(
+                        result,
+                        FlutterError(
+                            code: "keychain_read_failed",
+                            message: error.localizedDescription,
+                            details: nil
+                        )
+                    )
+                }
+            }
+
+        case "write_app_secrets":
+            let arguments = call.arguments as? [String: Any]
+            let raw = arguments?["secrets"] as? [String: Any] ?? [:]
+            var sanitized: [String: String] = [:]
+            for (key, value) in raw {
+                let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanValue = text(value)
+                if !cleanKey.isEmpty && !cleanValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    sanitized[cleanKey] = cleanValue
+                }
+            }
+            Self.keychainQueue.async {
+                let ok = self.writeKeychainSecrets(sanitized)
+                self.finish(result, ok)
+            }
+
+        case "clear_app_secrets":
+            Self.keychainQueue.async {
+                let ok = self.clearKeychainSecrets()
+                self.finish(result, ok)
+            }
 
         case "import_activities":
             let arguments = call.arguments as? [String: Any]
@@ -93,6 +152,32 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "request_exact_alarm_access":
             // Calendar notifications do not have Android's exact-alarm permission.
             result(true)
+
+        case "launch_external_intent":
+            let arguments = call.arguments as? [String: Any]
+            let rawUri = text(arguments?["uri"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let allowedSchemes: Set<String> = [
+                "zalo", "zoomus", "zoomphonecall", "zoom", "msteams",
+                "mailto", "tel", "sms", "tg", "fb-messenger", "whatsapp",
+                "viber", "skype", "slack", "discord", "googledocs",
+                "googlesheets", "googleslides", "googlemeet", "googleclassroom",
+                "googledrive", "vnd.youtube", "ms-word", "ms-excel",
+                "ms-powerpoint", "ms-onenote", "ms-outlook", "onedrive"
+            ]
+            guard !rawUri.isEmpty,
+                  !rawUri.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7F }),
+                  let url = URL(string: rawUri),
+                  let scheme = url.scheme?.lowercased(),
+                  allowedSchemes.contains(scheme)
+            else {
+                result(false)
+                return
+            }
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { ok in
+                    self.finish(result, ok)
+                }
+            }
 
         case "schedule_periodic":
             result(["scheduled": false, "reason": "ios_foreground_snapshot_only"])
@@ -599,6 +684,95 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             DispatchQueue.main.async { UIApplication.shared.open(url) }
         }
         completionHandler()
+    }
+
+    private func baseKeychainQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.keychainService,
+            kSecAttrAccount as String: Self.keychainAccount,
+        ]
+    }
+
+    private func readKeychainSecrets() -> Result<[String: String], NSError> {
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
+
+        var query = baseKeychainQuery()
+        query[kSecReturnData as String] = kCFBooleanTrue
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound {
+            return .success([:])
+        }
+        guard status == errSecSuccess else {
+            return .failure(
+                NSError(
+                    domain: NSOSStatusErrorDomain,
+                    code: Int(status),
+                    userInfo: [NSLocalizedDescriptionKey: "Keychain read failed (OSStatus \(status))"]
+                )
+            )
+        }
+        guard let data = item as? Data,
+              let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // Item exists and Keychain unlocked (errSecSuccess), but payload is corrupt/unreadable.
+            // Self-heal by deleting the corrupt entry directly while holding keychainLock so the
+            // user is never permanently locked out across app reinstalls.
+            SecItemDelete(baseKeychainQuery() as CFDictionary)
+            return .success([:])
+        }
+        var secrets: [String: String] = [:]
+        for (key, value) in decoded {
+            let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let strValue = value as? String,
+               !cleanKey.isEmpty,
+               !strValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                secrets[cleanKey] = strValue
+            }
+        }
+        return .success(secrets)
+    }
+
+    private func writeKeychainSecrets(_ secrets: [String: String]) -> Bool {
+        if secrets.isEmpty {
+            return clearKeychainSecrets()
+        }
+        guard let payload = try? JSONSerialization.data(withJSONObject: secrets, options: []) else {
+            return false
+        }
+
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
+
+        let query = baseKeychainQuery()
+        let updateAttributes: [String: Any] = [
+            kSecValueData as String: payload,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        if updateStatus != errSecItemNotFound {
+            return false
+        }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = payload
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        return addStatus == errSecSuccess
+    }
+
+    private func clearKeychainSecrets() -> Bool {
+        Self.keychainLock.lock()
+        defer { Self.keychainLock.unlock() }
+
+        let status = SecItemDelete(baseKeychainQuery() as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 
     private func finish(_ result: @escaping FlutterResult, _ value: Any?) {

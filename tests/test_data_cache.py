@@ -170,3 +170,57 @@ def test_account_namespaces_are_isolated(tmp_path):
 
     assert first.load_snapshot().activities == [{"id": "a"}]
     assert second.load_snapshot().activities == [{"id": "b"}]
+
+
+def test_logged_out_and_allow_legacy_migration_false_never_touch_legacy_cache(tmp_path):
+    legacy_file = tmp_path / "activities_cache.json"
+    legacy_payload = {
+        "version": 2,
+        "activity_catalog_version": DataCache.ACTIVITY_CATALOG_VERSION,
+        "generation": 1,
+        "updated_at": "2026-10-01T00:00:00+00:00",
+        "last_successful_sync_at": "2026-10-01T00:00:00+00:00",
+        "count": 1,
+        "activities": [{"id": "user-a-secret"}],
+    }
+    legacy_file.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    # 1. Logged-out cache must neither read/migrate legacy cache nor write to disk
+    logged_out = DataCache(
+        cache_dir=tmp_path, namespace="__logged_out__", allow_legacy_migration=False
+    )
+    assert logged_out.load_snapshot().activities == []
+    assert logged_out.save_server_snapshot([{"id": "should-not-persist"}]) is False
+    assert logged_out.record_failed_attempt("err") is False
+    assert legacy_file.exists()
+
+    none_no_migrate = DataCache(
+        cache_dir=tmp_path, namespace=None, allow_legacy_migration=False
+    )
+    assert none_no_migrate.load_snapshot().activities == []
+    assert none_no_migrate.save_local_activities([{"id": "nope"}]) is False
+
+    # 2. Explicit account with allow_legacy_migration=False ignores legacy file but persists own data
+    user_b = DataCache(
+        cache_dir=tmp_path, namespace="student-b", allow_legacy_migration=False
+    )
+    assert user_b.load_snapshot().activities == []
+    assert legacy_file.exists()
+    assert user_b.save_server_snapshot([{"id": "user-b-own"}]) is True
+    assert user_b.load_snapshot().activities == [{"id": "user-b-own"}]
+    assert json.loads(legacy_file.read_text(encoding="utf-8"))["activities"] == [
+        {"id": "user-a-secret"}
+    ]
+
+
+def test_clear_preserves_lock_file(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "filelock", None)
+    cache = DataCache(cache_dir=tmp_path, namespace="student-lock")
+    cache.save_server_snapshot([{"id": "x"}])
+    lock_path = cache._cache_path.with_suffix(".lock")
+    lock_path.write_text("", encoding="utf-8")
+
+    cache.clear()
+
+    assert not cache._cache_path.exists()
+    assert lock_path.exists()

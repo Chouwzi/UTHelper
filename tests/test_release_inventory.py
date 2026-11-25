@@ -26,7 +26,7 @@ MAGIC = {
     ".msi": bytes.fromhex("D0CF11E0A1B11AE1") + b"msi",
 }
 PLATFORM = {".ipa": "ios", ".apk": "android", ".exe": "windows", ".msi": "windows"}
-PRODUCT = {".ipa": "com.uthelper.UTHelper", ".apk": "com.uthelper.uthelper", ".exe": "UTHelper", ".msi": "UTHelper"}
+PRODUCT = {".ipa": "io.github.chouwzi.uthelper", ".apk": "io.github.chouwzi.uthelper", ".exe": "UTHelper", ".msi": "UTHelper"}
 ARCH = {".ipa": "arm64", ".apk": "universal", ".exe": "x64", ".msi": "x64"}
 CHECKS = {
     ".ipa": [
@@ -329,7 +329,7 @@ def test_verify_android_release_require_office_viewer_schema_passes_inventory(
     manifest_xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
-        f'package="com.uthelper.uthelper" android:versionCode="2002000" '
+        f'package="io.github.chouwzi.uthelper" android:versionCode="2002000" '
         f'android:versionName="{VERSION}"><application>'
         + "".join(f'<receiver android:name="{r}" />' for r in android_verifier._RECEIVERS)
         + "</application></manifest>"
@@ -349,7 +349,7 @@ def test_verify_android_release_require_office_viewer_schema_passes_inventory(
             return f"Signer #1 certificate SHA-256 digest: {colon_fp}"
         sub = tuple(cmd[1:3])
         if sub == ("manifest", "application-id"):
-            return "com.uthelper.uthelper"
+            return "io.github.chouwzi.uthelper"
         if sub == ("manifest", "version-name"):
             return VERSION
         if sub == ("manifest", "version-code"):
@@ -376,7 +376,7 @@ def test_verify_android_release_require_office_viewer_schema_passes_inventory(
             channel="apk_lts",
             version=VERSION,
             build_number=2002000,
-            package_id="com.uthelper.uthelper",
+            package_id="io.github.chouwzi.uthelper",
             certificate_sha256=fingerprint,
             commit_sha="1" * 40,
             workflow_run_id="12345",
@@ -409,6 +409,7 @@ def test_canonical_release_clis_bootstrap_in_isolated_python(script):
         text=True,
         timeout=10,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert completed.returncode == 0, completed.stderr

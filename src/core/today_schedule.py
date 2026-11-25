@@ -473,12 +473,39 @@ class TodayScheduleCoordinator:
         self._now_provider = now_provider
         self._guard = asyncio.Lock()
         self._wake_event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
         # Bumped by replace_cache(): an in-flight refresh started under a
         # previous account must discard its result instead of publishing a
         # stale READY into the new account's view.
         self._generation = 0
         self.state = TodayScheduleViewState(ScheduleLoadStatus.IDLE)
+
+    def _capture_loop(self) -> None:
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+    def _signal_wake(self) -> None:
+        loop = self._loop
+        if loop is not None:
+            if loop.is_closed():
+                return
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not loop:
+                try:
+                    loop.call_soon_threadsafe(self._wake_event.set)
+                except RuntimeError:
+                    pass
+                return
+        try:
+            self._wake_event.set()
+        except RuntimeError:
+            pass
 
     def _publish(self, state: TodayScheduleViewState) -> None:
         self.state = state
@@ -495,16 +522,22 @@ class TodayScheduleCoordinator:
         )
 
     async def ensure_today(self) -> TodayScheduleViewState:
+        self._capture_loop()
         # The cache is only a valid stand-in for a live fetch while the same
         # account can still authenticate. With missing/blank credentials the
         # cached snapshot belongs to nobody, so fall through to refresh(),
         # which reports AUTH_REQUIRED instead of publishing a stale READY.
+        generation = self._generation
+        cache = self._cache
+        target_date = self._now_provider().date()
         username, password = self._credentials_provider()
         cached = (
-            self._cache.load_for(self._now_provider().date())
+            await asyncio.to_thread(cache.load_for, target_date)
             if username and password
             else None
         )
+        if self._generation != generation:
+            return self.state
         if cached is not None:
             state = TodayScheduleViewState(
                 ScheduleLoadStatus.READY,
@@ -516,10 +549,14 @@ class TodayScheduleCoordinator:
         return await self.refresh("startup")
 
     async def refresh(self, trigger: str = "manual") -> TodayScheduleViewState:
+        self._capture_loop()
         async with self._guard:
             generation = self._generation
+            cache = self._cache
             target_date = self._now_provider().date()
-            existing = self._cache.load_for(target_date)
+            existing = await asyncio.to_thread(cache.load_for, target_date)
+            if self._generation != generation:
+                return self.state
             # Credentials are validated BEFORE the startup cache shortcut: with
             # an absent/expired identity a cached snapshot can never be
             # refreshed, so serving it as READY would mask the login prompt.
@@ -571,7 +608,9 @@ class TodayScheduleCoordinator:
                     tuple(sessions),
                     self._now_provider(),
                 )
-                self._cache.save(snapshot)
+                await asyncio.to_thread(cache.save, snapshot)
+                if self._generation != generation:
+                    return self.state
                 state = TodayScheduleViewState(
                     ScheduleLoadStatus.READY,
                     snapshot=snapshot,
@@ -600,13 +639,14 @@ class TodayScheduleCoordinator:
     def replace_cache(self, cache: TodayScheduleCache) -> None:
         self._cache = cache
         self._generation += 1
-        self._wake_event.set()
+        self._signal_wake()
 
     def close(self) -> None:
         self._closed = True
-        self._wake_event.set()
+        self._signal_wake()
 
     async def run(self) -> None:
+        self._capture_loop()
         try:
             await self.ensure_today()
             while not self._closed:

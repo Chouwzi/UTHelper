@@ -18,6 +18,8 @@ from typing import Callable, Optional
 
 import flet as ft
 
+from config import settings
+from core.demo_sandbox import is_demo_account
 from core.today_schedule import (
     ClassSession,
     ScheduleAuthenticationError,
@@ -27,6 +29,7 @@ from core.today_schedule import (
 from core.url_validation import is_trusted_uth_lms_url, validate_https_url
 from gui.components.in_app_webview import InAppWebViewDialog
 from gui.core.theme import C
+from gui.core.utils import DEMO_LMS_WEBVIEW_GUARD_MESSAGE, is_uth_lms_url
 import platform_utils
 
 logger = logging.getLogger(__name__)
@@ -1461,6 +1464,44 @@ class ScheduleWeekView(ft.Container):
             return url if is_trusted_uth_lms_url(url) else None
         return validate_https_url(url)
 
+    def _show_demo_lms_guard_snackbar(self) -> None:
+        sb = ft.SnackBar(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=C.WARNING, size=16),
+                    ft.Text(
+                        DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+                        size=13,
+                        color=C.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+            ),
+            bgcolor=C.SURFACE,
+            duration=3000,
+        )
+        overlay = getattr(self._page_ref, "overlay", None)
+        if overlay is not None:
+            overlay[:] = [
+                item for item in overlay if not isinstance(item, ft.SnackBar)
+            ]
+            overlay.append(sb)
+            sb.open = True
+            update_fn = getattr(self._page_ref, "update", None)
+            if callable(update_fn):
+                try:
+                    update_fn()
+                except Exception:
+                    pass
+            return
+        show_dlg = getattr(self._page_ref, "show_dialog", None)
+        if callable(show_dlg):
+            try:
+                show_dlg(sb)
+            except (AttributeError, TypeError):
+                pass
+
     def _open_url(
         self, url: str, title: str = "", *, require_uth_lms: bool = False
     ) -> None:
@@ -1470,6 +1511,11 @@ class ScheduleWeekView(ft.Container):
             return
         if callable(self._on_open_url):
             self._on_open_url(validated, title)
+            return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
             return
         InAppWebViewDialog(
             self._page_ref,
@@ -1489,6 +1535,11 @@ class ScheduleWeekView(ft.Container):
             return
         if callable(self._on_open_external):
             self._on_open_external(validated)
+            return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
             return
 
         async def _launch() -> None:

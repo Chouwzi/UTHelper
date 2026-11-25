@@ -298,6 +298,7 @@ def _mark_new_modules(
 class _InflightDownload:
     event: threading.Event
     data: Optional[bytes] = None
+    path: Optional[Path] = None
     error: Optional[BaseException] = None
 
 
@@ -327,10 +328,21 @@ class CourseCatalogService:
         self._catalog_lock = threading.Lock()
         self._error_lock = threading.Lock()
         self._inflight_lock = threading.Lock()
-        self._inflight_downloads: dict[tuple[str, str], _InflightDownload] = {}
+        self._inflight_downloads: dict[tuple[Any, ...], _InflightDownload] = {}
         self._last_delta_check: dict[str, int] = {}
+        self._last_delta_gen: int = self._cache_generation()
         self._last_thnn_error: str = ""
         self._last_courses_error: str = ""
+
+    def _cache_generation(self) -> int:
+        return int(getattr(self._cache, "generation", 0) or 0)
+
+    def _sync_delta_generation_locked(self) -> int:
+        gen = self._cache_generation()
+        if gen != self._last_delta_gen:
+            self._last_delta_check.clear()
+            self._last_delta_gen = gen
+        return gen
 
     @property
     def last_thnn_error(self) -> str:
@@ -434,6 +446,7 @@ class CourseCatalogService:
 
     def refresh_catalog(self, include_thnn: bool = False) -> list[CourseSummary]:
         """Fetch course summaries in parallel across providers and merge with cache safely."""
+        start_gen = self._cache_generation()
         fresh_courses: Optional[list[CourseSummary]] = None
         fresh_thnn: Optional[list[CourseSummary]] = None
 
@@ -505,6 +518,8 @@ class CourseCatalogService:
             portal_result = _fetch_portal_part()
 
         with self._catalog_lock:
+            if self._cache_generation() != start_gen:
+                return []
             snap = self._cache.load_catalog()
             existing_map = {course.course_key: course for course in snap.courses}
             merged: list[CourseSummary] = []
@@ -534,12 +549,15 @@ class CourseCatalogService:
                 synced_at = (
                     self._now_seconds() if should_advance else snap.catalog_synced_at
                 )
-                self._cache.save_catalog(
+                saved = self._cache.save_catalog(
                     merged,
                     synced_at=synced_at,
                     current_term_label=eff_term if portal_result is not None else None,
                     portal_course_specs=eff_specs if portal_result is not None else None,
+                    expected_generation=start_gen,
                 )
+                if saved is False:
+                    return []
             return _apply_course_flags(
                 merged,
                 snap.pinned_keys,
@@ -562,6 +580,7 @@ class CourseCatalogService:
         now: int,
     ) -> bool:
         with self._catalog_lock:
+            self._sync_delta_generation_locked()
             last_probe = self._last_delta_check.get(course_key)
         if (
             last_probe is not None
@@ -582,7 +601,10 @@ class CourseCatalogService:
         updater: Callable[[CourseSummary], CourseSummary],
         *,
         synced_at_fallback: int = 0,
+        expected_generation: Optional[int] = None,
     ) -> None:
+        if expected_generation is not None and self._cache_generation() != expected_generation:
+            return
         snap = self._cache.load_catalog()
         updated_catalog: list[CourseSummary] = []
         matched = False
@@ -594,7 +616,9 @@ class CourseCatalogService:
                 updated_catalog.append(course)
         if matched:
             self._cache.save_catalog(
-                updated_catalog, synced_at=snap.catalog_synced_at or synced_at_fallback
+                updated_catalog,
+                synced_at=snap.catalog_synced_at or synced_at_fallback,
+                expected_generation=expected_generation,
             )
 
     def sync_course_delta(
@@ -607,11 +631,21 @@ class CourseCatalogService:
         valid_source = _validate_source(source)
         valid_id = _validate_course_id(course_id)
         course_key = f"{valid_source}:{valid_id}"
+        start_gen = self._cache_generation()
         cached = self._cache.load_course_detail(valid_source, valid_id)
         now = self._now_seconds()
         provider = self._provider_for(valid_source)
 
         def _cached_result(error: str = "") -> CourseSyncResult:
+            if self._cache_generation() != start_gen:
+                return CourseSyncResult(
+                    sections=[],
+                    grades=[],
+                    changed=False,
+                    new_cmids=set(),
+                    last_synced_at=0,
+                    error="",
+                )
             return CourseSyncResult(
                 sections=cached.sections,
                 grades=cached.grades,
@@ -641,7 +675,8 @@ class CourseCatalogService:
                         return _cached_result(error=_format_error(exc))
                     if changed_ids is not None:
                         with self._catalog_lock:
-                            self._last_delta_check[course_key] = now
+                            if self._sync_delta_generation_locked() == start_gen:
+                                self._last_delta_check[course_key] = now
                         if not changed_ids:
                             return _cached_result()
 
@@ -657,6 +692,14 @@ class CourseCatalogService:
             return _cached_result(error=_format_error(exc))
 
         with self._catalog_lock:
+            if self._sync_delta_generation_locked() != start_gen:
+                return CourseSyncResult(
+                    sections=[],
+                    grades=[],
+                    changed=False,
+                    new_cmids=set(),
+                    last_synced_at=0,
+                )
             latest_detail = self._cache.load_course_detail(valid_source, valid_id)
             if not fresh_sections and latest_detail.sections:
                 logger.warning(
@@ -681,14 +724,23 @@ class CourseCatalogService:
             new_cmids = (set(fresh_cmids) - old_cmids) if has_prior_sync else set()
             marked_sections = _mark_new_modules(fresh_sections, new_cmids)
 
-            self._cache.save_course_detail(
+            saved = self._cache.save_course_detail(
                 valid_source,
                 valid_id,
                 marked_sections,
                 latest_detail.grades,
                 synced_at=now,
                 known_cmids=fresh_cmids,
+                expected_generation=start_gen,
             )
+            if saved is False:
+                return CourseSyncResult(
+                    sections=[],
+                    grades=[],
+                    changed=False,
+                    new_cmids=set(),
+                    last_synced_at=0,
+                )
             self._update_catalog_course_locked(
                 course_key,
                 lambda course: replace(
@@ -696,6 +748,7 @@ class CourseCatalogService:
                     last_synced_at=now,
                 ),
                 synced_at_fallback=now,
+                expected_generation=start_gen,
             )
 
         return CourseSyncResult(
@@ -712,6 +765,7 @@ class CourseCatalogService:
         """Return cached course grades or fetch fresh grade items when forced or empty."""
         valid_source = _validate_source(source)
         valid_id = _validate_course_id(course_id)
+        start_gen = self._cache_generation()
         cached = self._cache.load_course_detail(valid_source, valid_id)
         if cached.grades and not force:
             return cached.grades
@@ -729,9 +783,13 @@ class CourseCatalogService:
                 )
             )
         except CourseProviderError:
+            if self._cache_generation() != start_gen:
+                return []
             return cached.grades
 
         with self._catalog_lock:
+            if self._cache_generation() != start_gen:
+                return []
             latest = self._cache.load_course_detail(valid_source, valid_id)
             if not grades and latest.grades:
                 logger.warning(
@@ -740,14 +798,17 @@ class CourseCatalogService:
                     valid_id,
                 )
                 return latest.grades
-            self._cache.save_course_detail(
+            saved = self._cache.save_course_detail(
                 valid_source,
                 valid_id,
                 latest.sections,
                 grades,
                 synced_at=latest.last_synced_at,
                 known_cmids=latest.known_cmids,
+                expected_generation=start_gen,
             )
+            if saved is False:
+                return []
         return grades
 
     def toggle_pin(self, course_key: str) -> list[CourseSummary]:
@@ -881,7 +942,8 @@ class CourseCatalogService:
                 )
             return None
 
-        inflight_key = (valid_source, safe_url)
+        start_gen = self._cache_generation()
+        inflight_key = (start_gen, valid_source, safe_url)
         with self._inflight_lock:
             existing_flight = self._inflight_downloads.get(inflight_key)
             if existing_flight is None:
@@ -893,7 +955,14 @@ class CourseCatalogService:
                 is_leader = False
 
         if not is_leader:
-            flight.event.wait(timeout=65.0)
+            completed = flight.event.wait(timeout=65.0)
+            if not completed:
+                if raise_on_empty:
+                    self._raise_download_error(
+                        valid_source,
+                        f"Timed out waiting for inflight download from {valid_source}",
+                    )
+                return None
             if flight.error is not None:
                 if raise_on_empty or isinstance(flight.error, CourseProviderError):
                     raise flight.error
@@ -943,9 +1012,10 @@ class CourseCatalogService:
             flight.error = exc
             raise
         finally:
-            flight.event.set()
             with self._inflight_lock:
-                self._inflight_downloads.pop(inflight_key, None)
+                if self._inflight_downloads.get(inflight_key) is flight:
+                    self._inflight_downloads.pop(inflight_key, None)
+            flight.event.set()
 
     def fetch_attachment_bytes(
         self,
@@ -977,76 +1047,151 @@ class CourseCatalogService:
         *,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Optional[Path]:
-        """Return a cached preview file path or stream/persist it on miss."""
+        """Return a cached preview file path or stream/persist it under SingleFlight."""
         valid_source = _validate_source(source)
         safe_url = _safe_http_url(file_url)
         if not safe_url or not isinstance(file_name, str) or not file_name.strip():
             return None
+        start_gen = self._cache_generation()
         cached_path = self._preview_cache.get_cached_path(
             safe_url, time_modified, file_name
         )
         if cached_path is not None:
             return cached_path
 
-        provider = self._provider_for(valid_source)
-        stream_fn = (
-            getattr(provider, "download_file_to_path", None)
-            if provider is not None
-            else None
+        safe_mtime = _safe_finite_int(time_modified, fallback=0)
+        inflight_key = (
+            "preview_file",
+            start_gen,
+            valid_source,
+            safe_url,
+            safe_mtime,
+            file_name.strip(),
         )
-        if callable(stream_fn):
-            def _stream_into_cache() -> Optional[Path]:
-                def _write(handle: Any) -> bool:
-                    if progress_callback is not None:
-                        try:
-                            return bool(
-                                stream_fn(
-                                    safe_url,
-                                    handle,
-                                    progress_callback=progress_callback,
-                                )
-                            )
-                        except TypeError:
-                            pass
-                    return bool(stream_fn(safe_url, handle))
+        with self._inflight_lock:
+            existing_flight = self._inflight_downloads.get(inflight_key)
+            if existing_flight is None:
+                flight = _InflightDownload(event=threading.Event())
+                self._inflight_downloads[inflight_key] = flight
+                is_leader = True
+            else:
+                flight = existing_flight
+                is_leader = False
 
-                return self._preview_cache.stage_and_commit(
-                    safe_url, time_modified, file_name, _write
-                )
+        if not is_leader:
+            completed = flight.event.wait(timeout=65.0)
+            if not completed or flight.error is not None:
+                return None
+            if self._cache_generation() != start_gen:
+                return None
+            if flight.path is not None and flight.path.is_file():
+                if callable(progress_callback):
+                    try:
+                        sz = int(flight.path.stat().st_size)
+                        progress_callback(sz, sz)
+                    except Exception:
+                        pass
+                return flight.path
+            return self._preview_cache.get_cached_path(
+                safe_url, time_modified, file_name
+            )
+
+        try:
+            if self._cache_generation() != start_gen:
+                return None
+            cached_again = self._preview_cache.get_cached_path(
+                safe_url, time_modified, file_name
+            )
+            if cached_again is not None:
+                flight.path = cached_again
+                return cached_again
+
+            provider = self._provider_for(valid_source)
+            stream_fn = (
+                getattr(provider, "download_file_to_path", None)
+                if provider is not None
+                else None
+            )
+            if callable(stream_fn):
+                def _stream_into_cache() -> Optional[Path]:
+                    def _write(handle: Any) -> bool:
+                        if progress_callback is not None:
+                            try:
+                                return bool(
+                                    stream_fn(
+                                        safe_url,
+                                        handle,
+                                        progress_callback=progress_callback,
+                                    )
+                                )
+                            except TypeError:
+                                pass
+                        return bool(stream_fn(safe_url, handle))
+
+                    return self._preview_cache.stage_and_commit(
+                        safe_url,
+                        time_modified,
+                        file_name,
+                        _write,
+                        should_commit=lambda: self._cache_generation() == start_gen,
+                    )
+
+                try:
+                    out_path = self._call_provider(
+                        valid_source, _stream_into_cache, context="download_file"
+                    )
+                    if out_path is None or self._cache_generation() != start_gen:
+                        return None
+                    flight.path = out_path
+                    return out_path
+                except (CourseProviderError, OSError) as exc:
+                    flight.error = exc
+                    logger.warning(
+                        "Failed to stream preview file %r for %s: %s",
+                        file_name,
+                        valid_source,
+                        _format_error(exc),
+                    )
+                    return None
 
             try:
-                return self._call_provider(
-                    valid_source, _stream_into_cache, context="download_file"
+                raw = self._download_bytes(
+                    valid_source, safe_url, progress_callback=progress_callback
                 )
-            except (CourseProviderError, OSError) as exc:
+            except CourseProviderError as exc:
+                flight.error = exc
+                return None
+            if not raw or self._cache_generation() != start_gen:
+                return None
+            try:
+                out_path = self._preview_cache.put_bytes(
+                    safe_url,
+                    time_modified,
+                    file_name,
+                    raw,
+                    should_commit=lambda: self._cache_generation() == start_gen,
+                )
+                if out_path is None or self._cache_generation() != start_gen:
+                    return None
+                flight.path = out_path
+                return out_path
+            except OSError as exc:
+                flight.error = exc
                 logger.warning(
-                    "Failed to stream preview file %r for %s: %s",
+                    "Failed to cache preview file %r for %s: %s",
                     file_name,
                     valid_source,
                     _format_error(exc),
                 )
                 return None
-
-        try:
-            raw = self._download_bytes(
-                valid_source, safe_url, progress_callback=progress_callback
-            )
-        except CourseProviderError:
-            return None
-        if not raw:
-            return None
-        try:
-            return self._preview_cache.put_bytes(
-                safe_url, time_modified, file_name, raw
-            )
-        except OSError as exc:
-            logger.warning(
-                "Failed to cache preview file %r for %s: %s",
-                file_name,
-                valid_source,
-                _format_error(exc),
-            )
-            return None
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._inflight_lock:
+                if self._inflight_downloads.get(inflight_key) is flight:
+                    self._inflight_downloads.pop(inflight_key, None)
+            flight.event.set()
 
     def resolve_module_url(self, source: CourseSource, module: CourseModuleItem) -> str:
         """Resolve an external target URL for a module, using THNN lazy resolution when needed."""

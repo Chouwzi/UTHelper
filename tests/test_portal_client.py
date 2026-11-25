@@ -663,7 +663,6 @@ def test_ensure_web_session_rejects_whitespace_only_token():
 def test_decode_jwt_payload_handles_valid_and_malformed_tokens():
     from core.portal_client import _decode_jwt_payload
 
-    # Valid unpadded payloads spanning base64url length mod 4 in {0, 2, 3}
     for sub in ("a", "ab", "abc", "2251120001"):
         tok = _build_raw_jwt({"sub": sub, "exp": 2000000000})
         assert _decode_jwt_payload(tok) == {"sub": sub, "exp": 2000000000}
@@ -694,7 +693,6 @@ def test_is_jwt_expired_respects_opaque_tokens_and_skew_window():
 
     now = int(time.time())
 
-    # Opaque tokens and JWTs without numeric exp are treated as NOT expired
     assert _is_jwt_expired("tok") is False
     assert _is_jwt_expired("header.payload") is False
     assert _is_jwt_expired(_build_raw_jwt({"sub": "student"})) is False
@@ -707,16 +705,11 @@ def test_is_jwt_expired_respects_opaque_tokens_and_skew_window():
     assert _is_jwt_expired(f"hdr.{nan_payload}.sig") is False
     assert _is_jwt_expired(f"hdr.{inf_payload}.sig") is False
 
-    # Numeric exp=0 is expired (must not be treated as missing/falsy)
     assert _is_jwt_expired(_build_raw_jwt({"exp": 0})) is True
-
-    # Default skew_seconds=300
     assert _is_jwt_expired(_build_fake_jwt(exp=now - 10)) is True
     assert _is_jwt_expired(_build_fake_jwt(exp=now + 299)) is True
     assert _is_jwt_expired(_build_fake_jwt(exp=now + 300)) is True
     assert _is_jwt_expired(_build_fake_jwt(exp=now + 310)) is False
-
-    # Custom skew_seconds
     assert _is_jwt_expired(_build_fake_jwt(exp=now + 50), skew_seconds=60) is True
     assert _is_jwt_expired(_build_fake_jwt(exp=now + 75), skew_seconds=60) is False
 
@@ -734,19 +727,16 @@ def test_ensure_web_session_reuses_opaque_token_and_replaces_within_skew():
 
     client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
 
-    # Opaque cached token is treated as NOT expired and reused without login
     client._store_token("tok", "2251120001", role="sv")
     assert client.ensure_web_session("2251120001", "pass123") == ("tok", "sv")
     assert login_calls == 0
 
-    # Cached valid JWT stored without explicit role derives role from JWT without login
     client.clear_token()
     cached_gv_jwt = _build_fake_jwt(exp=now + 86400, role="gv")
     client._store_token(cached_gv_jwt, "2251120001")
     assert client.ensure_web_session("2251120001", "pass123") == (cached_gv_jwt, "gv")
     assert login_calls == 0
 
-    # JWT expiring within 300s skew window forces re-login
     near_expiry_jwt = _build_fake_jwt(exp=now + 120, role="sv")
     client._store_token(near_expiry_jwt, "2251120001", role="sv")
     assert client.ensure_web_session("2251120001", "pass123") == (fresh_jwt, "sv")
@@ -784,7 +774,8 @@ def test_discard_token_clears_token_role_and_respects_generation():
     )
 
     gen0 = client._current_generation()
-    client._store_token("tok-1", "student", gen0, role="gv")
+    stored1 = client._store_token("tok-1", "student", gen0, role="gv")
+    assert stored1 is not None
     assert client._token_role == "gv"
 
     client.clear_token()
@@ -793,7 +784,8 @@ def test_discard_token_clears_token_role_and_respects_generation():
 
     # Newer token stored after clear must survive a stale _discard_token(gen0)
     gen1 = client._current_generation()
-    client._store_token("tok-2", "student", gen1, role="sv")
+    gen2 = client._store_token("tok-2", "student", gen1, role="sv")
+    assert gen2 is not None and gen2 > gen1
     client._discard_token(gen0)
     assert client._cached_token("student") == "tok-2"
     assert client._token_role == "sv"
@@ -806,7 +798,7 @@ def test_discard_token_clears_token_role_and_respects_generation():
 
     # Rejected login with current generation clears both token and role
     with pytest.raises(PortalAuthenticationError):
-        client._login("student", "wrong", gen1)
+        client._login("student", "wrong", gen2)
     assert client._cached_token("student") == ""
     assert client._token_role == ""
 
@@ -834,18 +826,15 @@ def test_ensure_web_session_forces_relogin_for_different_username_and_isolates_r
     assert client.ensure_web_session("student2", "pass2") == (jwt_u2, "sv")
     assert login_users == ["student1", "student2"]
 
-    # Token refresh for the same user without explicit role preserves stored role
     client._store_token(jwt_u2_refreshed, "student2", client._current_generation())
     assert client._token_role == "sv"
 
-    # Storing a token for a different user without explicit role never leaks prior user's role
     client._store_token("tok-u3", "student3", client._current_generation())
     assert client._token_role == ""
 
 
 def test_ensure_web_session_and_store_token_respect_stale_generation():
     now = int(time.time())
-    # Deliberately give JWT data.role="sv" while login body reports authoritative "gv"
     late_jwt = _build_fake_jwt(exp=now + 86400, role="sv")
     responses = iter(
         [
@@ -861,21 +850,17 @@ def test_ensure_web_session_and_store_token_respect_stale_generation():
 
     client = PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener)
 
-    # Stale _store_token does not resurrect token or role
     stale_gen = client._current_generation()
     client.clear_token()
-    client._store_token(late_jwt, "student", stale_gen, role="gv")
+    assert client._store_token(late_jwt, "student", stale_gen, role="gv") is None
     assert client._cached_token("student") == ""
     assert client._token_role == ""
 
-    # Mid-flight clear_token() during ensure_web_session preserves authoritative body role
-    # even when JWT data.role differs ("sv") and cache write is skipped
     tok, role = client.ensure_web_session("student", "pass123")
     assert (tok, role) == (late_jwt, "gv")
     assert client._cached_token("student") == ""
     assert client._token_role == ""
 
-    # Same guarantee for an opaque token with no JWT claims at all
     tok_opaque, role_opaque = client.ensure_web_session("student", "pass123")
     assert (tok_opaque, role_opaque) == ("late-opaque-tok", "gv")
     assert client._cached_token("student") == ""
@@ -897,10 +882,10 @@ def test_ensure_web_session_preserves_body_role_under_concurrent_store_token():
     original_store = client._store_token
 
     def racing_store_token(token, username, generation=None, *, role=""):
-        original_store(token, username, generation, role=role)
-        # Simulate another thread completing login for a different account right after store
+        res = original_store(token, username, generation, role=role)
         if username == "student1":
             original_store(jwt_u2, "student2", role="sv")
+        return res
 
     client._store_token = racing_store_token  # type: ignore[method-assign]
 

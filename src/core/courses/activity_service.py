@@ -264,7 +264,7 @@ _NON_READABLE_TAGS = (
     "embed",
 )
 _GIFT_PREFIX_RE = re.compile(
-    r"^\s*::([^:\r\n]{1,120})::(?:\s*\[(?:html|markdown|moodle|plain)\])?\s*",
+    r"^\s*(#{1,6}\s+)?::((?:(?!::)[^\r\n]){1,120})::(?:\s*\[(?:html|markdown|moodle|plain)\])?\s*",
     re.IGNORECASE,
 )
 _FORMAT_TAG_PREFIX_RE = re.compile(
@@ -282,6 +282,14 @@ _RIGHT_ANSWER_PREFIX_RE = re.compile(
     r")\s*[:：\-]?\s*",
     re.IGNORECASE,
 )
+_BLOCK_HTML_TAGS = frozenset(
+    {
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "p", "ul", "ol", "li", "pre", "blockquote", "table", "hr",
+        "div", "section", "article", "main", "header", "footer", "aside",
+        "dl", "dt", "dd", "figure", "figcaption", "form", "fieldset",
+    }
+)
 
 
 def clean_moodle_question_text(raw_text: str) -> tuple[str, str]:
@@ -292,44 +300,156 @@ def clean_moodle_question_text(raw_text: str) -> tuple[str, str]:
     code = ""
     match = _GIFT_PREFIX_RE.match(text)
     if match:
-        code = " ".join(match.group(1).split())
-        text = text[match.end() :].lstrip()
-    text = _FORMAT_TAG_PREFIX_RE.sub("", text).strip()
+        heading_prefix = (match.group(1) or "").strip()
+        code = " ".join(match.group(2).split())
+        rest = text[match.end() :].lstrip()
+        rest = _FORMAT_TAG_PREFIX_RE.sub("", rest).strip()
+        text = f"{heading_prefix} {rest}".strip() if (heading_prefix and rest) else rest
+    else:
+        text = _FORMAT_TAG_PREFIX_RE.sub("", text).strip()
     text = _LONG_UNDERSCORE_RE.sub(" ______ ", text)
     lines = [" ".join(line.split()) for line in text.splitlines()]
     cleaned = "\n".join(line for line in lines if line).strip()
     return cleaned, code
 
 
+def _render_md_table(table_el: Any) -> str:
+    rows: list[list[str]] = []
+    for tr in table_el.find_all("tr"):
+        cells = [
+            _clean_text(cell).replace("|", "\\|")
+            for cell in tr.find_all(["th", "td"], recursive=False)
+        ]
+        if any(cells):
+            rows.append(cells)
+    if not rows:
+        return ""
+    col_count = min(24, max(len(r) for r in rows))
+    if col_count <= 0:
+        return ""
+    norm_rows = [
+        [r[i] if i < len(r) else "" for i in range(col_count)]
+        for r in rows[:80]
+    ]
+    header = "| " + " | ".join(norm_rows[0]) + " |"
+    sep = "| " + " | ".join("---" for _ in range(col_count)) + " |"
+    body = ["| " + " | ".join(r) + " |" for r in norm_rows[1:]]
+    return "\n".join([header, sep, *body])
+
+
 def _html_to_readable_markdown(raw_html: str) -> str:
+    from bs4.element import NavigableString, Tag
+
     raw_soup = BeautifulSoup(raw_html or "", BS4_PARSER)
     for junk in list(raw_soup.find_all(_NON_READABLE_TAGS)):
         if not getattr(junk, "decomposed", False):
             junk.decompose()
     HTMLSanitizer.sanitize_soup(raw_soup)
-    soup = raw_soup
-    lines: list[str] = []
-    for el in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "pre", "blockquote"]):
-        txt = _clean_text(el)
-        if not txt:
-            continue
-        tag = el.name.lower()
-        if tag in {"h1", "h2"}:
-            lines.append(f"## {txt}")
-        elif tag in {"h3", "h4"}:
-            lines.append(f"### {txt}")
-        elif tag == "li":
-            lines.append(f"- {txt}")
-        elif tag == "pre":
-            lines.append(f"```\n{el.get_text()}\n```")
-        elif tag == "blockquote":
-            lines.append(f"> {txt}")
-        else:
-            lines.append(txt)
-    if not lines:
-        fallback = " ".join(soup.get_text("\n", strip=True).split())
-        return fallback
-    return "\n\n".join(lines)
+    root = raw_soup.body if raw_soup.body is not None else raw_soup
+    blocks: list[str] = []
+    inline_buf: list[str] = []
+
+    def _flush_inline() -> None:
+        if not inline_buf:
+            return
+        merged = " ".join("".join(inline_buf).split())
+        inline_buf.clear()
+        if merged:
+            blocks.append(merged)
+
+    def _li_own_text(li_el: Tag) -> str:
+        parts: list[str] = []
+        for ch in li_el.children:
+            if isinstance(ch, Tag) and ch.name and ch.name.lower() in {"ul", "ol"}:
+                continue
+            if isinstance(ch, NavigableString):
+                parts.append(str(ch))
+            elif isinstance(ch, Tag):
+                if ch.name.lower() == "br":
+                    parts.append(" ")
+                else:
+                    parts.append(ch.get_text(" ", strip=False))
+        return " ".join("".join(parts).split())
+
+    def _walk_list(list_el: Tag, depth: int = 0) -> list[str]:
+        ordered = list_el.name.lower() == "ol"
+        out: list[str] = []
+        indent = "  " * min(depth, 4)
+        idx = 0
+        for child in list_el.children:
+            if not isinstance(child, Tag) or (child.name or "").lower() != "li":
+                continue
+            idx += 1
+            txt = _li_own_text(child)
+            marker = f"{idx}." if ordered else "-"
+            if txt:
+                out.append(f"{indent}{marker} {txt}")
+            for sub in child.children:
+                if isinstance(sub, Tag) and (sub.name or "").lower() in {"ul", "ol"}:
+                    out.extend(_walk_list(sub, depth + 1))
+        return out
+
+    def _walk(node: Any) -> None:
+        for child in getattr(node, "children", ()):
+            if isinstance(child, NavigableString):
+                inline_buf.append(str(child))
+                continue
+            if not isinstance(child, Tag):
+                continue
+            tag = (child.name or "").lower()
+            if tag == "br":
+                inline_buf.append(" ")
+                continue
+            if tag not in _BLOCK_HTML_TAGS:
+                inline_buf.append(child.get_text(" ", strip=False))
+                continue
+
+            _flush_inline()
+            if tag in {"h1", "h2"}:
+                txt = _clean_text(child)
+                if txt:
+                    blocks.append(f"## {txt}")
+            elif tag in {"h3", "h4", "h5", "h6"}:
+                txt = _clean_text(child)
+                if txt:
+                    blocks.append(f"### {txt}")
+            elif tag == "pre":
+                code_txt = child.get_text().strip("\r\n")
+                if code_txt:
+                    blocks.append(f"```\n{code_txt}\n```")
+            elif tag == "blockquote":
+                txt = _clean_text(child)
+                if txt:
+                    blocks.append(f"> {txt}")
+            elif tag in {"ul", "ol"}:
+                list_lines = _walk_list(child, 0)
+                if list_lines:
+                    blocks.append("\n".join(list_lines))
+            elif tag == "li":
+                txt = _li_own_text(child)
+                if txt:
+                    blocks.append(f"- {txt}")
+            elif tag == "table":
+                tbl = _render_md_table(child)
+                if tbl:
+                    blocks.append(tbl)
+            elif tag == "hr":
+                blocks.append("---")
+            elif tag == "p":
+                if child.find(["table", "ul", "ol", "pre", "blockquote"]):
+                    _walk(child)
+                else:
+                    txt = _clean_text(child)
+                    if txt:
+                        blocks.append(txt)
+            else:
+                _walk(child)
+        _flush_inline()
+
+    _walk(root)
+    if not blocks:
+        return " ".join(raw_soup.get_text("\n", strip=True).split())
+    return "\n\n".join(blocks)
 
 
 def _normalize_match_key(text: str) -> str:
@@ -519,15 +639,21 @@ def _parse_single_quiz_question_dom(
     spec_fb_el = que_root.select_one(".outcome > .specificfeedback, .outcome .feedback > .specificfeedback")
     specific_fb, _ = clean_moodle_question_text(_clean_text(spec_fb_el)) if spec_fb_el is not None else ("", "")
 
-    # Extract question stem (.qtext)
+    # Extract question stem (.qtext), stripping any leading GIFT code before Markdown heading formatting
     qtext_el = que_root.select_one(".qtext")
     raw_stem = ""
+    pre_code = ""
     if qtext_el is not None:
+        _, pre_code = clean_moodle_question_text(_clean_text(qtext_el))
         raw_stem = _html_to_readable_markdown(str(qtext_el)) or _clean_text(qtext_el)
     else:
         formulation = que_root.select_one(".formulation")
         raw_stem = _clean_text(formulation or que_root)[:600]
     stem_text, q_code = clean_moodle_question_text(raw_stem)
+    if not q_code and pre_code:
+        q_code = pre_code
+    if stem_text.startswith(("## ", "### ")) and "\n" not in stem_text:
+        stem_text = stem_text.lstrip("#").strip()
 
     # Parse answer choices / student response inside .ablock / .answer
     choices: list[QuizReviewChoice] = []
