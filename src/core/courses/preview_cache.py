@@ -102,10 +102,18 @@ class PreviewFileCache:
             return path
 
     def put_bytes(
-        self, key_url: str, time_modified: int, file_name: str, data: bytes
-    ) -> Path:
+        self,
+        key_url: str,
+        time_modified: int,
+        file_name: str,
+        data: bytes,
+        *,
+        should_commit: Optional[Callable[[], bool]] = None,
+    ) -> Optional[Path]:
         """Atomically persist preview bytes and enforce LRU/age bounds."""
         with self._lock:
+            if should_commit is not None and not should_commit():
+                return None
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             path = self._entry_path(key_url, time_modified, file_name)
             tmp = (
@@ -116,6 +124,12 @@ class PreviewFileCache:
                 with open(tmp, "wb") as handle:
                     handle.write(data)
                     handle.flush()
+                if should_commit is not None and not should_commit():
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return None
                 os.replace(tmp, path)
             except Exception:
                 try:
@@ -132,6 +146,8 @@ class PreviewFileCache:
         time_modified: int,
         file_name: str,
         writer_fn: Callable[[BinaryIO], bool],
+        *,
+        should_commit: Optional[Callable[[], bool]] = None,
     ) -> Optional[Path]:
         """Stream bytes via ``writer_fn`` outside the cache lock, then commit atomically."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +165,8 @@ class PreviewFileCache:
             if not ok:
                 return None
             with self._lock:
+                if should_commit is not None and not should_commit():
+                    return None
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
                 os.replace(tmp, path)
                 committed = True

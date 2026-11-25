@@ -404,7 +404,7 @@ def test_pair04_android_coordinator_pptx_tier_a_and_safe_filepicker_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pair 4 (F3, F5, F7, F8): Android PPTX Tier A + FilePicker save without file:// URI leak."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
     from core.courses.office_viewer_service import prepare_office_viewer
     from gui.components.courses import embedded_webview_host as ewh_mod
     from gui.controllers import courses_coordinator as coord_mod

@@ -100,6 +100,7 @@ def test_release_metadata_cli_writes_distribution_channel(tmp_path):
         text=True,
         timeout=30,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads(output.read_text(encoding="utf-8"))["channel"] == "chplay"
@@ -110,5 +111,6 @@ def test_release_metadata_cli_writes_distribution_channel(tmp_path):
         text=True,
         timeout=30,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert rejected.returncode != 0

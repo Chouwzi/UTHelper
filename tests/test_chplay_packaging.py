@@ -269,6 +269,7 @@ def test_distribution_channel_asset_is_never_tracked():
         capture_output=True,
         text=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert tracked.stdout.strip() == ""
 
@@ -391,6 +392,7 @@ def test_runtime_config_cli_writes_channel_and_requires_pair(tmp_path):
             "--distribution-output", str(channel),
         ],
         capture_output=True, text=True, timeout=30, cwd=ROOT,
+        stdin=subprocess.DEVNULL,
     )
     assert ok.returncode == 0, ok.stderr
     assert json.loads(channel.read_text(encoding="utf-8"))["channel"] == "chplay"
@@ -401,6 +403,7 @@ def test_runtime_config_cli_writes_channel_and_requires_pair(tmp_path):
             str(tmp_path / "diag2.json"), "--distribution-channel", "chplay",
         ],
         capture_output=True, text=True, timeout=30, cwd=ROOT,
+        stdin=subprocess.DEVNULL,
     )
     assert missing_output.returncode != 0
 
@@ -763,7 +766,8 @@ def test_unsigned_diagnostics_are_chplay_only(tmp_path):
 def test_verifier_cli_exposes_aab_channel_and_diagnostic_flags(tmp_path):
     script = ROOT / "scripts" / "verify_android_release.py"
     help_text = subprocess.run(
-        [sys.executable, str(script), "--help"], capture_output=True, text=True, timeout=30, cwd=ROOT
+        [sys.executable, str(script), "--help"], capture_output=True, text=True, timeout=30, cwd=ROOT,
+        stdin=subprocess.DEVNULL
     ).stdout
     for flag in ("--aab", "--apk", "--channel", "--allow-unsigned", "--certificate-sha256"):
         assert flag in help_text
@@ -777,6 +781,7 @@ def test_verifier_cli_exposes_aab_channel_and_diagnostic_flags(tmp_path):
             "--output", str(tmp_path / "cli.json"),
         ],
         capture_output=True, text=True, timeout=30, cwd=ROOT, env=env,
+        stdin=subprocess.DEVNULL,
     )
     assert done.returncode == 0, done.stderr
     assert json.loads((tmp_path / "cli.json").read_text(encoding="utf-8"))["channel"] == "chplay"
@@ -913,3 +918,70 @@ def test_verifier_requires_office_viewer_assets_when_app_zip_present(tmp_path):
             android_home=sdk_dir,
             require_office_viewer=True,
         )
+
+
+def test_background_sync_gradle_and_android_workflow_guard_against_maven_central_429():
+    mirror_url = "https://maven-central.storage-download.googleapis.com/maven2/"
+    settings_gradle = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/settings.gradle"
+    )
+    build_gradle = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/build.gradle"
+    )
+    workflow = _read(".github/workflows/build-android.yml")
+
+    assert settings_gradle.count(mirror_url) >= 2
+    assert settings_gradle.index(mirror_url) < settings_gradle.index("mavenCentral()")
+    assert mirror_url in build_gradle
+    assert build_gradle.index(mirror_url) < build_gradle.index("mavenCentral()")
+    assert "-Dorg.gradle.internal.http.retry.max.attempts=" in workflow
+    assert workflow.count("run_gradle_with_retry") >= 2
+    assert "~/.gradle/init.d" not in workflow
+
+
+def test_verifier_enforces_quiz_and_webview_packages_when_required(tmp_path):
+    # 1. Missing flutter_inappwebview in DEX -> rejected
+    no_dex_plugin = _aab(tmp_path / "no-inappwebview.aab")
+    with pytest.raises(AndroidVerificationError, match="flutter_inappwebview"):
+        _verify(
+            no_dex_plugin,
+            tmp_path,
+            output=tmp_path / "out-no-dex.json",
+            require_quiz_webview=True,
+        )
+
+    # 2. DEX present, missing flet_webview in sitepackages.zip -> rejected
+    sp_missing_wv = io.BytesIO()
+    with zipfile.ZipFile(sp_missing_wv, "w") as inner:
+        inner.writestr("flet_uth_quiz/__init__.pyc", b"pyc")
+    partial_aab = _aab(
+        tmp_path / "missing-flet-webview.aab",
+        dex_strings=(
+            "Lcom/uthelper/MainActivity;",
+            "Lcom/pichillilorenzo/flutter_inappwebview_android/InAppWebViewFlutterPlugin;",
+        ),
+        extra={"base/assets/flutter_assets/app/sitepackages.zip": sp_missing_wv.getvalue()},
+    )
+    with pytest.raises(AndroidVerificationError, match="flet_webview"):
+        _verify(partial_aab, tmp_path, output=tmp_path / "out-no-wv.json")
+
+    # 3. Complete DEX + sitepackages.zip -> accepted and recorded in chplay checks
+    sp_complete = io.BytesIO()
+    with zipfile.ZipFile(sp_complete, "w") as inner:
+        inner.writestr("flet_uth_quiz/__pycache__/__init__.cpython-312.pyc", b"pyc")
+        inner.writestr("flet_webview/__init__.pyc", b"pyc")
+    valid_aab = _aab(
+        tmp_path / "complete-quiz-webview.aab",
+        dex_strings=(
+            "Lcom/uthelper/MainActivity;",
+            "Lcom/pichillilorenzo/flutter_inappwebview_android/InAppWebViewFlutterPlugin;",
+        ),
+        extra={"base/assets/flutter_assets/app/sitepackages.zip": sp_complete.getvalue()},
+    )
+    evidence = _verify(
+        valid_aab,
+        tmp_path,
+        output=tmp_path / "out-complete.json",
+        require_quiz_webview=True,
+    )
+    assert "quiz_webview_packages" in evidence["checks"]

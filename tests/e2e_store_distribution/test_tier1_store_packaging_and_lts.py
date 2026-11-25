@@ -168,6 +168,7 @@ def _run_verify_android_chplay(
         encoding="utf-8",
         errors="replace",
         timeout=15,
+        stdin=subprocess.DEVNULL,
     )
     assert help_proc.returncode == 0, help_proc.stderr
     help_text = help_proc.stdout
@@ -218,6 +219,7 @@ def _run_verify_android_chplay(
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -251,6 +253,7 @@ def _get_ps_parameters(script_path: Path) -> dict[str, str]:
         encoding="utf-8",
         errors="replace",
         timeout=20,
+        stdin=subprocess.DEVNULL,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
@@ -336,6 +339,7 @@ def _run_package_msix_store(
         encoding="utf-8",
         errors="replace",
         timeout=60,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -929,6 +933,7 @@ def _run_verify_msix_release(
         encoding="utf-8",
         errors="replace",
         timeout=60,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -974,6 +979,7 @@ def test_t1_f12_package_msix_builds_store_msix_with_parameterized_identity_and_u
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr
 
@@ -1032,6 +1038,7 @@ def test_t1_f12_msix_assets_are_scaled_to_exact_store_tile_dimensions(
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr
 
@@ -1081,6 +1088,7 @@ def test_t1_f12_msix_embeds_msstore_distribution_channel_asset(
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr
 
@@ -1132,6 +1140,7 @@ def test_t1_f12_msix_publisher_xml_escaping_preserves_special_characters(
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr
         root = ET.fromstring((unpacked / "AppxManifest.xml").read_text(encoding="utf-8"))
@@ -1289,6 +1298,7 @@ def test_t1_f13_release_inventory_and_manifest_generator_pass_on_7_asset_lts_dir
         capture_output=True,
         text=True,
         timeout=30,
+        stdin=subprocess.DEVNULL,
     )
     assert gen_proc.returncode == 0, gen_proc.stderr
 
@@ -1313,6 +1323,7 @@ def test_t1_f13_release_inventory_and_manifest_generator_pass_on_7_asset_lts_dir
         capture_output=True,
         text=True,
         timeout=30,
+        stdin=subprocess.DEVNULL,
     )
     assert inv_proc.returncode == 0, inv_proc.stderr
 

@@ -300,3 +300,74 @@ def test_view_manager_with_tab_and_detail_switchers():
     asyncio.run(manager.close_grades())
     assert tab_switcher.content is dashboard
 
+
+def test_view_manager_toggles_detail_view_global_webview_occlusion():
+    from gui.components.courses.embedded_webview_host import (
+        clear_global_webview_occlusion,
+        is_globally_occluded,
+    )
+
+    clear_global_webview_occlusion()
+    page = _FakePage()
+    dashboard = SimpleNamespace(visible=True, opacity=1.0)
+    detail = SimpleNamespace(
+        visible=False,
+        offset=None,
+        opacity=1.0,
+        show_loading=lambda _data: None,
+        update_detail=lambda _data: None,
+    )
+    calendar = SimpleNamespace(
+        visible=False,
+        show=lambda _data: None,
+        hide=lambda: None,
+        offset=None,
+        opacity=1.0,
+    )
+    settings = SimpleNamespace(
+        visible=False,
+        offset=None,
+        opacity=1.0,
+        load_current_settings=lambda: asyncio.sleep(0),
+        cancel_pending_load=lambda: None,
+    )
+    grades = SimpleNamespace(
+        visible=False,
+        show_loading=lambda: None,
+        hide=lambda: None,
+        update_theme=Mock(),
+    )
+    controller = SimpleNamespace(
+        calendar_btn=SimpleNamespace(icon_color=None),
+        grades_btn=SimpleNamespace(icon_color=None),
+        courses_btn=SimpleNamespace(icon_color=None),
+        _dismiss_desktop_filter_menu=lambda: None,
+    )
+    empty_detail = ft.Container(expand=True, ignore_interactions=True)
+    tab_switcher = ft.AnimatedSwitcher(content=dashboard)
+    detail_switcher = ft.AnimatedSwitcher(content=empty_detail)
+    main_stack = ft.Stack(controls=[tab_switcher, detail_switcher])
+
+    manager = ViewManager(
+        page=page,
+        dashboard=dashboard,
+        detail_view=detail,
+        settings_view=settings,
+        calendar_view=calendar,
+        grade_overview_view=grades,
+        controller=controller,
+        view_host=main_stack,
+        tab_switcher=tab_switcher,
+        detail_switcher=detail_switcher,
+        empty_detail=empty_detail,
+    )
+    try:
+        assert is_globally_occluded() is False
+        manager.show_detail_loading({"id": "item-occlude"})
+        assert is_globally_occluded() is True
+        asyncio.run(manager.close_detail(detail_from_calendar=False))
+        assert is_globally_occluded() is False
+    finally:
+        clear_global_webview_occlusion()
+
+

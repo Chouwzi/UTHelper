@@ -58,6 +58,12 @@ def test_preset_text_and_semantic_colors_meet_wcag_aa(theme_name):
                 role,
                 surface,
             )
+    for role in ("text_primary", "text_secondary"):
+        assert contrast_ratio(preset[role], preset["surface_hover"]) >= 4.5, (
+            theme_name,
+            role,
+            "surface_hover",
+        )
 
 
 @pytest.mark.parametrize("theme_name", THEME_ORDER)

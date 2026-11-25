@@ -140,11 +140,11 @@ def test_both_login_flows_share_post_login_work_and_only_quiz_reauth_is_cancelab
     ("old_identity", "player_visible", "expect_clear"),
     [
         (("old-user", "old-pass"), False, True),
-        (("old-user", "old-pass"), True, False),
+        (("old-user", "old-pass"), True, True),
         (("new-user", "new-pass"), False, False),
     ],
 )
-def test_login_dialog_account_switch_purges_quiz_sessions_when_player_hidden(
+def test_login_dialog_account_switch_purges_quiz_sessions_on_identity_change(
     monkeypatch, old_identity, player_visible, expect_clear
 ):
     from config import settings

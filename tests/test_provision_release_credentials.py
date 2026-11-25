@@ -24,6 +24,7 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=15,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
 

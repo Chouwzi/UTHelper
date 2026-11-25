@@ -93,7 +93,7 @@ jobs:
           test "$("$ANALYZER" manifest version-code "$APK")" = "$BUILD"
           test "$("$ANALYZER" manifest application-id "$APK")" = "$APP_ID"
           "$ANALYZER" manifest print "$APK" > measurements/android-manifest.xml
-          for receiver in ScheduledNotificationReceiver ScheduledNotificationBootReceiver ActionBroadcastReceiver DeadlineAlarmReceiver RescheduleReceiver; do
+          for receiver in ScheduledNotificationReceiver ScheduledNotificationBootReceiver ActionBroadcastReceiver DeadlineAlarmReceiver RescheduleReceiver ClassScheduleAlarmReceiver; do
             grep -q "$receiver" measurements/android-manifest.xml
           done
           TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)

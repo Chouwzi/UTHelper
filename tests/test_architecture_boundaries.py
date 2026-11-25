@@ -91,4 +91,4 @@ def test_low_level_moodle_ws_is_hidden_behind_moodle_service():
 def test_models_config_dependency_is_explicit_debt_only():
     imports = _imports_for(SRC_ROOT / "models.py")
 
-    assert {"config"} & imports == {"config"}
+    assert {"config"} & imports == set()

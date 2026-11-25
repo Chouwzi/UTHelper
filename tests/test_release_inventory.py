@@ -409,6 +409,7 @@ def test_canonical_release_clis_bootstrap_in_isolated_python(script):
         text=True,
         timeout=10,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert completed.returncode == 0, completed.stderr

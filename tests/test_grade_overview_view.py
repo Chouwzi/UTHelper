@@ -975,3 +975,25 @@ def test_grade_overview_modal_scroll_guard_races_and_pop_dialog_fallback():
     assert len(gv3._open_dialog_tokens) == 1
     real_page3.shown[-1].actions[0].on_click(None)
     assert gv3._open_dialog_tokens == {}
+
+
+def test_grade_overview_notify_uses_page_overlay_without_popping_dialogs():
+    dialog_calls: list[object] = []
+    closed_snack = ft.SnackBar(content=ft.Text("old"), open=False)
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        overlay=[closed_snack],
+        show_dialog=lambda d: dialog_calls.append(d),
+        update=lambda: None,
+    )
+    gv = GradeOverviewView(page=page)
+    gv._notify(page, "Đã sao chép bảng điểm")
+
+    assert dialog_calls == []
+    assert closed_snack not in page.overlay
+    snacks = [c for c in page.overlay if isinstance(c, ft.SnackBar)]
+    assert len(snacks) == 1
+    assert snacks[0].open is True
+    assert snacks[0].content.value == "Đã sao chép bảng điểm"
+

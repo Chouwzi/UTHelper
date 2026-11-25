@@ -1674,3 +1674,168 @@ def test_portal_current_semester_enrichment_retake_guard_and_cache_persistence(t
     assert reloaded_by_key["courses:101"].credits == 2
     assert reloaded_by_key["courses:102"].is_current_term is False
 
+
+def test_refresh_catalog_discards_result_after_namespace_switch(tmp_path):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|alice")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    started = threading.Event()
+    release = threading.Event()
+
+    class _BlockingProvider(_FakeCoursesProvider):
+        def fetch_courses(self):
+            started.set()
+            assert release.wait(2.0)
+            return [
+                CourseSummary(
+                    id=901,
+                    source="courses",
+                    fullname="Alice Secret Course",
+                    shortname="ALICE901",
+                    display_name="Alice Secret Course",
+                )
+            ]
+
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=_BlockingProvider(),
+        time_fn=lambda: 5000,
+    )
+
+    out: list = []
+    worker = threading.Thread(target=lambda: out.append(svc.refresh_catalog(include_thnn=False)))
+    worker.start()
+    assert started.wait(1.0)
+
+    cache.set_namespace("https://courses.ut.edu.vn|bob")
+    release.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+
+    assert out == [[]]
+    bob_snap = cache.load_catalog()
+    assert bob_snap.courses == []
+
+
+def test_sync_course_delta_and_grades_discard_stale_data_after_namespace_switch(tmp_path):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|alice")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    sec_started = threading.Event()
+    sec_release = threading.Event()
+    grade_started = threading.Event()
+    grade_release = threading.Event()
+
+    class _BlockingDetailProvider(_FakeCoursesProvider):
+        def fetch_course_sections(self, course_id: int):
+            sec_started.set()
+            assert sec_release.wait(2.0)
+            return [
+                CourseSection(
+                    id=1,
+                    course_id=course_id,
+                    source="courses",
+                    section_num=1,
+                    name="Alice Secret Section",
+                    modules=(
+                        CourseModuleItem(
+                            cmid=777,
+                            instance_id=1,
+                            modname="resource",
+                            name="Alice PDF",
+                            section_id=1,
+                        ),
+                    ),
+                )
+            ]
+
+        def fetch_course_grades(self, course_id: int):
+            grade_started.set()
+            assert grade_release.wait(2.0)
+            return [CourseGradeItem(id=1, item_name="Alice Midterm", grade_formatted="10.0")]
+
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=_BlockingDetailProvider(),
+        time_fn=lambda: 6000,
+    )
+
+    sec_out: list = []
+    t1 = threading.Thread(target=lambda: sec_out.append(svc.sync_course_delta("courses", 10, force=True)))
+    t1.start()
+    assert sec_started.wait(1.0)
+    cache.set_namespace("https://courses.ut.edu.vn|bob")
+    sec_release.set()
+    t1.join(timeout=2.0)
+
+    assert sec_out[0].changed is False
+    assert sec_out[0].sections == []
+    assert cache.load_course_detail("courses", 10).sections == []
+
+    grade_out: list = []
+    t2 = threading.Thread(target=lambda: grade_out.append(svc.load_course_grades("courses", 10, force=True)))
+    t2.start()
+    assert grade_started.wait(1.0)
+    cache.set_namespace("https://courses.ut.edu.vn|charlie")
+    grade_release.set()
+    t2.join(timeout=2.0)
+
+    assert grade_out == [[]]
+    assert cache.load_course_detail("courses", 10).grades == []
+
+
+def test_fetch_or_cache_preview_file_isolates_inflight_and_discards_commit_after_namespace_switch(tmp_path):
+    cache = CourseCacheStore(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|alice")
+    preview = PreviewFileCache(cache_dir=tmp_path / "preview")
+    alice_started = threading.Event()
+    alice_release = threading.Event()
+    call_counter = {"n": 0}
+
+    class _StreamingProvider(_FakeCoursesProvider):
+        def download_file_to_path(self, url: str, handle, progress_callback=None):
+            call_counter["n"] += 1
+            idx = call_counter["n"]
+            if idx == 1:
+                alice_started.set()
+                assert alice_release.wait(2.0)
+                handle.write(b"ALICE-SECRET-PDF")
+                return True
+            handle.write(b"BOB-FRESH-PDF")
+            return True
+
+    svc = CourseCatalogService(
+        cache_store=cache,
+        preview_cache=preview,
+        courses_provider=_StreamingProvider(),
+        time_fn=lambda: 7000,
+    )
+    url = "https://courses.ut.edu.vn/pluginfile.php/1/shared.pdf"
+
+    alice_out: list = []
+    t_alice = threading.Thread(
+        target=lambda: alice_out.append(
+            svc.fetch_or_cache_preview_file("courses", url, 100, "shared.pdf")
+        )
+    )
+    t_alice.start()
+    assert alice_started.wait(1.0)
+
+    # Switch to Bob and wipe preview cache while Alice's download is still in flight
+    cache.set_namespace("https://courses.ut.edu.vn|bob")
+    preview.clear()
+
+    # Bob requests the same URL -> must NOT coalesce onto Alice's in-flight download
+    bob_path = svc.fetch_or_cache_preview_file("courses", url, 100, "shared.pdf")
+    assert bob_path is not None
+    assert bob_path.read_bytes() == b"BOB-FRESH-PDF"
+
+    # Now release Alice's stale download -> must NOT overwrite Bob's file or return Alice's bytes
+    alice_release.set()
+    t_alice.join(timeout=2.0)
+    assert not t_alice.is_alive()
+
+    assert alice_out == [None]
+    assert bob_path.read_bytes() == b"BOB-FRESH-PDF"
+    assert call_counter["n"] == 2
+
+

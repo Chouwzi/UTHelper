@@ -159,6 +159,7 @@ def _run_verify_android(
         encoding="utf-8",
         errors="replace",
         timeout=15,
+        stdin=subprocess.DEVNULL,
     )
     assert help_proc.returncode == 0, help_proc.stderr
     help_text = help_proc.stdout
@@ -213,6 +214,7 @@ def _run_verify_android(
         encoding="utf-8",
         errors="replace",
         timeout=30,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -319,6 +321,7 @@ def _run_msix_verifier_on_dir(unpacked_dir: Path, msix_path: Path) -> subprocess
             encoding="utf-8",
             errors="replace",
             timeout=20,
+            stdin=subprocess.DEVNULL,
         )
         assert probe.returncode == 0, probe.stderr
         params = json.loads(probe.stdout)
@@ -364,6 +367,7 @@ def _run_msix_verifier_on_dir(unpacked_dir: Path, msix_path: Path) -> subprocess
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
     if verifier_py is not None:
         return subprocess.run(
@@ -374,6 +378,7 @@ def _run_msix_verifier_on_dir(unpacked_dir: Path, msix_path: Path) -> subprocess
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
     raise AssertionError(
         "No MSIX verifier script found in scripts/ (expected verify_msix_release.ps1 or *verify*msix*.py)"
@@ -436,6 +441,7 @@ def _pack_custom_msix_for_verifier_test(
         capture_output=True,
         text=True,
         timeout=30,
+        stdin=subprocess.DEVNULL,
     )
     assert proc.returncode == 0, proc.stderr
     return out_msix
@@ -2339,6 +2345,7 @@ def test_t2_f12_package_msix_rejects_non_4_part_version() -> None:
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert proc.returncode != 0
     finally:
@@ -2378,6 +2385,7 @@ def test_t2_f12_package_msix_rejects_empty_publisher_and_outside_workspace_path(
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert empty_pub.returncode != 0
 
@@ -2405,6 +2413,7 @@ def test_t2_f12_package_msix_rejects_empty_publisher_and_outside_workspace_path(
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert outside_proc.returncode != 0
     finally:
@@ -2719,3 +2728,167 @@ def test_t2_f13_schema3_rejects_unknown_store_target_injection_and_docs_present(
     assert "What a report may contain" in privacy
     assert "What is forbidden from remote reports" in privacy
     assert "chplay" in adrs.lower() and "msstore" in adrs.lower()
+
+
+def test_t2_f08_windows_verifier_passes_devnull_stdin_and_preserves_cache_on_spawn_oserror(
+    local_release_server,
+    windows_shim_env,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VUR-09 / VCS-17: _powershell_json uses stdin=DEVNULL and spawn OSError is transient."""
+    win_mod = load_module("platform_utils.windows_update")
+    checker_mod = load_module("core.update_checker")
+    coord_mod = load_module("core.update_coordinator")
+    models_mod = load_module("core.update_models")
+
+    msi_path = windows_shim_env.make_msi_file(tmp_path / "UTHelper-2.6.0.msi")
+    msi_bytes = msi_path.read_bytes()
+    candidate = _build_windows_candidate(
+        local_release_server, filename="UTHelper-2.6.0.msi", data=msi_bytes
+    )
+
+    seen_run_kwargs: list[dict[str, object]] = []
+
+    def fake_run(argv, **kwargs):
+        seen_run_kwargs.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr(win_mod.subprocess, "run", fake_run)
+    assert win_mod._powershell_json("probe", msi_path, 5.0) == {"ok": True}
+    assert seen_run_kwargs[0]["stdin"] == subprocess.DEVNULL
+
+    def spawn_error_probe(_path: Path, _timeout: float):
+        raise OSError(6, "The handle is invalid")
+
+    verifier = win_mod.WindowsPackageVerifier(signature_probe=spawn_error_probe)
+    transient_res = verifier.verify(msi_path, candidate)
+    assert transient_res.verified is False
+    assert getattr(transient_res, "retryable", False) is True
+    assert getattr(transient_res, "is_transient", False) is True
+
+    cache_dir = tmp_path / "cache"
+    events: list[object] = []
+    coordinator = coord_mod.UpdateCoordinator(
+        checker_mod.GitHubReleaseClient(),
+        checker_mod.VerifiedDownloader(cache_dir=cache_dir),
+        verifier,
+        win_mod.WindowsPackageLauncher(
+            process_factory=windows_shim_env.process_factory,
+            acknowledgement_seconds=0.5,
+        ),
+        models_mod.RuntimeTarget("windows", "x64", "msi"),
+        "2.5.1",
+        events.append,
+        automatic_enabled=False,
+    )
+    try:
+        coordinator.request_download(candidate)
+        deadline = time.monotonic() + 8.0
+        while not any(e.kind is coord_mod.UpdateEventKind.FAILED for e in events):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        cached_msi = cache_dir / "UTHelper-2.6.0.msi"
+        assert cached_msi.is_file(), (
+            "Spawn OSError during probe must preserve verified downloaded installer in cache"
+        )
+    finally:
+        coordinator.shutdown(timeout_seconds=2.0)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DACL check requires win32")
+def test_t2_f08_windows_elevated_handoff_seals_user_write_and_stages_in_admin_dir(
+    windows_shim_env,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VCS-15: Elevated handoff strips GENERIC_ALL/write from user_sid and stages in Admin dir."""
+    import ntsecuritycon
+    import win32api
+    import win32con
+    import win32security
+
+    win_mod = load_module("platform_utils.windows_update")
+
+    msi_path = windows_shim_env.make_msi_file(tmp_path / "UTHelper-2.6.0.msi")
+    candidate = _build_windows_candidate(
+        type(
+            "_StubServer",
+            (),
+            {
+                "register_package": lambda self, **kw: None,
+                "configure_latest_release": lambda self, **kw: None,
+            },
+        )(),
+        filename="UTHelper-2.6.0.msi",
+        data=msi_path.read_bytes(),
+    ) if False else None
+
+    models_mod = load_module("core.update_models")
+    pkg_bytes = msi_path.read_bytes()
+    pkg = models_mod.ReleasePackage(
+        platform="windows",
+        architecture="x64",
+        package_type="msi",
+        install_channel="msi",
+        url="https://github.com/Chouwzi/UTHelper/releases/download/v2.6.0/UTHelper-2.6.0.msi",
+        sha256=sha256_hex(pkg_bytes),
+        size=len(pkg_bytes),
+        signer_identity=DEFAULT_SIGNER_SUBJECT,
+        certificate_fingerprint=DEFAULT_TRUSTED_SIGNER_SHA256,
+        install_strategy={"kind": "launch_msi"},
+    )
+    assert candidate is None
+
+    local_app_data = tmp_path / "LocalAppData"
+    relaunch_exe = tmp_path / "UTHelper.exe"
+    relaunch_exe.write_bytes(b"MZ")
+    captured_runas: dict[str, str] = {}
+
+    def fake_runas(file_path: str, params: str, cwd: str) -> int:
+        captured_runas["file"] = file_path
+        captured_runas["params"] = params
+        captured_runas["cwd"] = cwd
+        return 0
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(win_mod, "_is_user_admin", lambda: False)
+    monkeypatch.setattr(win_mod, "_shell_execute_runas", fake_runas)
+    monkeypatch.setattr(win_mod.subprocess, "Popen", lambda *_a, **_k: object())
+
+    launcher = win_mod.WindowsPackageLauncher(relaunch_executable=relaunch_exe)
+    res = launcher.launch(msi_path, pkg)
+    assert res.acknowledged is True
+
+    handoff_dir = next((local_app_data / "UTHelper" / "update_handoff").glob("handoff-*"))
+    assert "-ExpectedSha256" in captured_runas["params"]
+    assert pkg.sha256.lower() in captured_runas["params"]
+    assert "-ExpectedConfigSha256" in captured_runas["params"]
+
+    install_script = (handoff_dir / "install_helper.ps1").read_text(encoding="utf-8")
+    assert "S-1-5-32-544" in install_script and "S-1-5-18" in install_script
+    assert "update_stage" in install_script
+    assert "FileShare]::Read" in install_script
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+    )
+    try:
+        user_sid_str = win32security.ConvertSidToStringSid(
+            win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        )
+    finally:
+        win32api.CloseHandle(token)
+
+    sd = win32security.GetNamedSecurityInfo(
+        str(handoff_dir),
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION,
+    )
+    dacl = sd.GetSecurityDescriptorDacl()
+    for idx in range(dacl.GetAceCount()):
+        _ace_info, mask, sid = dacl.GetAce(idx)
+        if win32security.ConvertSidToStringSid(sid) == user_sid_str:
+            assert (mask & win32con.GENERIC_ALL) != win32con.GENERIC_ALL
+            assert (mask & ntsecuritycon.FILE_WRITE_DATA) == 0
+            assert (mask & ntsecuritycon.FILE_ADD_FILE) == 0

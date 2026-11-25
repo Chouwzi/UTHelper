@@ -7,7 +7,9 @@ Nếu trường áp dụng thang khác, chỉ cần sửa ``GRADE_SCALE``.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from typing import Any
 
 from core.academic_radar.models import CourseGradeItem, SemesterGradeData
 
@@ -76,16 +78,33 @@ class GpaTargetResult:
     message: str = ""
 
 
+def _finite_float(val: Any) -> float | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped or stripped == "-":
+            return None
+        val = stripped.replace(",", ".")
+    try:
+        numeric = float(val)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
 def course_point4(c: CourseGradeItem) -> float | None:
     """Điểm hệ 4 của môn đã có điểm; None nếu chưa có điểm."""
-    if c.credit_grade is not None:
-        return float(c.credit_grade)
+    cg = _finite_float(c.credit_grade)
+    if cg is not None:
+        return cg
     if c.letter_grade:
         p = letter_to_point4(c.letter_grade)
         if p is not None:
             return p
-    if c.final_grade is not None:
-        return score10_to_point4(float(c.final_grade))
+    fg = _finite_float(c.final_grade)
+    if fg is not None:
+        return score10_to_point4(fg)
     return None
 
 
@@ -94,18 +113,21 @@ _course_point4 = course_point4
 
 def _is_gpa_course(c: CourseGradeItem) -> bool:
     return (
-        c.credits > 0
+        math.isfinite(c.credits)
+        and c.credits > 0
         and not c.is_transferred
         and c.eligibility.status in ("academic", "unknown")
     )
 
 
 def calculate_gpa_target(semester: SemesterGradeData | None, target: float) -> GpaTargetResult:
-    if target is None or not (0.0 <= target <= 4.0):
+    valid_target = _finite_float(target)
+    if valid_target is None or not (0.0 <= valid_target <= 4.0):
         return GpaTargetResult(
-            status="invalid", target=target or 0.0,
+            status="invalid", target=valid_target if valid_target is not None else 0.0,
             message="Nhập GPA mục tiêu trong khoảng 0.0 – 4.0.",
         )
+    target = valid_target
 
     courses = [c for c in (semester.courses if semester else []) if _is_gpa_course(c)]
     if not courses:
@@ -183,10 +205,9 @@ def parse_credit_progress(body: object) -> CreditProgress | None:
     """Phân tích ``body`` của API tiendo; None nếu dữ liệu không hợp lệ."""
     if not isinstance(body, dict):
         return None
-    try:
-        required = float(body.get("canDat"))
-        earned = float(body.get("hienTai"))
-    except (TypeError, ValueError):
+    required = _finite_float(body.get("canDat"))
+    earned = _finite_float(body.get("hienTai"))
+    if required is None or earned is None:
         return None
     if required <= 0 or earned < 0:
         return None
@@ -201,9 +222,9 @@ def cumulative_gpa4(semesters: list[SemesterGradeData]) -> tuple[float | None, s
     tính lần có điểm hệ 4 cao nhất).
     """
     for sem in semesters:
-        val = sem.summary.get("diemTBTinChiTichLuy") if sem.summary else None
+        val = _finite_float(sem.summary.get("diemTBTinChiTichLuy")) if sem.summary else None
         if val is not None:
-            return float(val), "portal"
+            return val, "portal"
 
     best_by_code: dict[str, tuple[float, float]] = {}
     anonymous: list[tuple[float, float]] = []
@@ -252,12 +273,20 @@ def calculate_graduation_target(
     target: float | None,
 ) -> GraduationGpaResult:
     """Điểm hệ 4 tối thiểu cần đạt ở số tín chỉ còn lại để GPA ra trường = ``target``."""
-    if target is None or not (0.0 <= target <= 4.0):
+    valid_target = _finite_float(target)
+    if valid_target is None or not (0.0 <= valid_target <= 4.0):
         return GraduationGpaResult(
-            status="invalid", target=target or 0.0,
+            status="invalid", target=valid_target if valid_target is not None else 0.0,
             message="Nhập GPA ra trường mục tiêu trong khoảng 0.0 – 4.0.",
         )
-    if progress is None:
+    target = valid_target
+    if (
+        progress is None
+        or not math.isfinite(progress.required_credits)
+        or not math.isfinite(progress.earned_credits)
+        or progress.required_credits <= 0
+        or progress.earned_credits < 0
+    ):
         return GraduationGpaResult(
             status="no_progress", target=target,
             message="Chưa lấy được số tín chỉ ra trường từ Portal. Hãy làm mới bảng điểm.",

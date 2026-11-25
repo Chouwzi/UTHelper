@@ -223,14 +223,16 @@ class PortalClient:
 
     def _store_token(
         self, token: str, username: str, generation: int | None = None
-    ) -> None:
+    ) -> int | None:
         with self._token_lock:
             if generation is not None and generation != self._token_generation:
-                # clear_token() ran while this request was in flight: the
-                # caller no longer wants this session to exist.
-                return
+                # clear_token() or a newer login ran while this request was in flight:
+                # do not resurrect or overwrite a newer session token.
+                return None
             self._token = token
             self._token_owner = username
+            self._token_generation += 1
+            return self._token_generation
 
     def _ensure_opener(self) -> Callable[..., Any]:
         if self._opener is None:
@@ -334,6 +336,12 @@ class PortalClient:
     def _login(
         self, username: str, password: str, generation: int | None = None
     ) -> str:
+        token, _ = self._login_with_generation(username, password, generation)
+        return token
+
+    def _login_with_generation(
+        self, username: str, password: str, generation: int | None = None
+    ) -> tuple[str, int | None]:
         if not username or not password:
             raise PortalAuthenticationError("Portal credentials are unavailable")
         payload = self._request_json(
@@ -345,8 +353,17 @@ class PortalClient:
         if not isinstance(token, str) or not token:
             self._discard_token(generation)
             raise PortalAuthenticationError("Portal login was rejected")
-        self._store_token(token, username, generation)
-        return token
+        stored_gen = self._store_token(token, username, generation)
+        return token, stored_gen if stored_gen is not None else generation
+
+    def _store_refreshed_token(
+        self, payload: dict[str, Any], username: str, generation: int | None
+    ) -> tuple[str | None, int | None]:
+        refreshed = payload.get("token")
+        if isinstance(refreshed, str) and refreshed:
+            stored_gen = self._store_token(refreshed, username, generation)
+            return refreshed, stored_gen if stored_gen is not None else generation
+        return None, generation
 
     def fetch_day(
         self, target_date: date, username: str, password: str
@@ -354,10 +371,12 @@ class PortalClient:
         if is_demo_account(username):
             self._verify_demo_credentials(username, password)
             return get_demo_day_schedule(target_date).sessions
-        generation = self._current_generation()
-        token = self._cached_token(username) or self._login(
-            username, password, generation
-        )
+        generation: int | None = self._current_generation()
+        token = self._cached_token(username)
+        if not token:
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
         try:
             payload = self._request_json(
                 "GET",
@@ -368,16 +387,16 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json(
                 "GET",
                 "lichhoc/ngay",
                 token=token,
                 query={"date": target_date.isoformat()},
             )
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        self._store_refreshed_token(payload, username, generation)
         try:
             return parse_portal_day(payload, target_date)
         except ValueError as exc:
@@ -391,10 +410,12 @@ class PortalClient:
         if is_demo_account(username):
             self._verify_demo_credentials(username, password)
             return dict(get_demo_week_schedule(target_date).days)
-        generation = self._current_generation()
-        token = self._cached_token(username) or self._login(
-            username, password, generation
-        )
+        generation: int | None = self._current_generation()
+        token = self._cached_token(username)
+        if not token:
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
         query = {"date": target_date.isoformat()}
         try:
             payload = self._request_json(
@@ -403,13 +424,13 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json(
                 "GET", "lichhoc/lichTuan", token=token, query=query
             )
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        self._store_refreshed_token(payload, username, generation)
         try:
             return parse_portal_week(payload, target_date)
         except ValueError as exc:
@@ -422,20 +443,22 @@ class PortalClient:
         if is_demo_account(username):
             self._verify_demo_credentials(username, password)
             return get_demo_credit_progress()
-        generation = self._current_generation()
-        token = self._cached_token(username) or self._login(
-            username, password, generation
-        )
+        generation: int | None = self._current_generation()
+        token = self._cached_token(username)
+        if not token:
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
         try:
             payload = self._request_json("GET", "hoctap/tiendo", token=token)
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json("GET", "hoctap/tiendo", token=token)
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        self._store_refreshed_token(payload, username, generation)
         body = payload.get("body")
         return body if isinstance(body, dict) else None
 
@@ -446,10 +469,12 @@ class PortalClient:
         if is_demo_account(username):
             self._verify_demo_credentials(username, password)
             return get_demo_full_transcript()
-        generation = self._current_generation()
-        token = self._cached_token(username) or self._login(
-            username, password, generation
-        )
+        generation: int | None = self._current_generation()
+        token = self._cached_token(username)
+        if not token:
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
         try:
             payload = self._request_json(
                 "GET",
@@ -459,15 +484,17 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json(
                 "GET",
                 "hoctap/bangdiem2",
                 token=token,
             )
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        refreshed, generation = self._store_refreshed_token(payload, username, generation)
+        if refreshed:
+            token = refreshed
 
         body = payload.get("body")
         if isinstance(body, list) and body:
@@ -520,22 +547,27 @@ class PortalClient:
         if is_demo_account(username):
             self._verify_demo_credentials(username, password)
             return get_demo_current_semester_courses()
-        generation = self._current_generation()
-        token = self._cached_token(username) or self._login(
-            username, password, generation
-        )
+        generation: int | None = self._current_generation()
+        token = self._cached_token(username)
+        if not token:
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
         try:
             hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
 
-        refreshed_token = hk_payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
+        refreshed_token, generation = self._store_refreshed_token(
+            hk_payload, username, generation
+        )
+        if refreshed_token:
             token = refreshed_token
-            self._store_token(refreshed_token, username, generation)
 
         hk_list = hk_payload.get("body")
         if not isinstance(hk_list, list) or not hk_list:
@@ -566,14 +598,17 @@ class PortalClient:
             except _PortalHttpError as exc:
                 if exc.status != 401:
                     raise
-                token = self._login(username, password, generation)
+                token, generation = self._login_with_generation(
+                    username, password, generation
+                )
                 mon_payload = self._request_json(
                     "GET", f"hoctap/montheoky/{dot_id}", token=token
                 )
-            mon_refreshed = mon_payload.get("token")
-            if isinstance(mon_refreshed, str) and mon_refreshed:
+            mon_refreshed, generation = self._store_refreshed_token(
+                mon_payload, username, generation
+            )
+            if mon_refreshed:
                 token = mon_refreshed
-                self._store_token(mon_refreshed, username, generation)
             mon_body = mon_payload.get("body")
             if isinstance(mon_body, list) and mon_body:
                 normalized_items: list[dict[str, Any]] = []

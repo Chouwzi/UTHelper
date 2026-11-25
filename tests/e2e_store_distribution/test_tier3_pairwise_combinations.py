@@ -1171,6 +1171,7 @@ def test_t3_p10_android_artifact_x_elf_align_x_compliance(
             capture_output=True,
             text=True,
             timeout=15,
+            stdin=subprocess.DEVNULL,
         )
         assert help_proc.returncode == 0
         assert "--aab" in help_proc.stdout or "--channel" in help_proc.stdout, (
@@ -1200,7 +1201,7 @@ def test_t3_p10_android_artifact_x_elf_align_x_compliance(
             cmd.extend(["--certificate-sha256", DEFAULT_TRUSTED_SIGNER_SHA256])
         env = os.environ.copy()
         env["ANDROID_HOME"] = str(sdk_root)
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
         if expect_pass:
             assert proc.returncode == 0, proc.stderr or proc.stdout
         else:
@@ -1770,6 +1771,7 @@ def test_t3_p18_msix_packaging_x_tile_dimensions_x_channel_asset() -> None:
             capture_output=True,
             text=True,
             timeout=20,
+            stdin=subprocess.DEVNULL,
         )
         assert param_probe.returncode == 0, param_probe.stderr
         params = {p.strip().lower(): p.strip() for p in param_probe.stdout.split(",") if p.strip()}
@@ -1799,7 +1801,7 @@ def test_t3_p18_msix_packaging_x_tile_dimensions_x_channel_asset() -> None:
             if cand_key in params:
                 cmd.extend([f"-{params[cand_key]}", val])
 
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
         assert proc.returncode == 0, proc.stderr or proc.stdout
         assert msix_out.is_file()
 
@@ -1808,6 +1810,7 @@ def test_t3_p18_msix_packaging_x_tile_dimensions_x_channel_asset() -> None:
             capture_output=True,
             text=True,
             timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         assert unpack_proc.returncode == 0, unpack_proc.stderr or unpack_proc.stdout
 
