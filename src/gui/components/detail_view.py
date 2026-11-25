@@ -111,6 +111,7 @@ class DetailView(ft.Container):
         get_quiz_account_id=None,
         on_open_url=None,
         on_open_external=None,
+        get_account_epoch=None,
         *,
         embedded_in_pane: bool = False,
     ):
@@ -124,6 +125,7 @@ class DetailView(ft.Container):
             get_quiz_account_id,
             on_open_url,
             on_open_external,
+            get_account_epoch,
             embedded_in_pane=embedded_in_pane,
         )
         self._init_controls()
@@ -140,6 +142,7 @@ class DetailView(ft.Container):
         get_quiz_account_id=None,
         on_open_url=None,
         on_open_external=None,
+        get_account_epoch=None,
         *,
         embedded_in_pane: bool = False,
     ):
@@ -157,6 +160,7 @@ class DetailView(ft.Container):
         self._get_quiz_account_id = get_quiz_account_id
         self._on_open_url = on_open_url
         self._on_open_external = on_open_external
+        self._get_account_epoch = get_account_epoch
         self._quiz_launch_target = None
         self._selected_files = []          
         self._is_uploading  = False
@@ -166,7 +170,143 @@ class DetailView(ft.Container):
         self._pending_file_mutation: tuple[MutationOperation, bool] | None = None
         self._view_generation = 0
         self._snapshot_load_generation = 0
+        self._account_generation = 0
+        self._owner_account_epoch = self._current_account_epoch()
         self._pane_width: float | None = None
+
+    def _current_account_epoch(self) -> int | None:
+        getter = getattr(self, "_get_account_epoch", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if isinstance(val, int) and not isinstance(val, bool):
+                    return val
+            except Exception:
+                pass
+        for cb_attr in ("_on_status_changed", "_submission_workflow_factory"):
+            cb = getattr(self, cb_attr, None)
+            owner = getattr(cb, "__self__", None) or getattr(
+                getattr(cb, "func", None), "__self__", None
+            )
+            if owner is not None and hasattr(owner, "_account_epoch"):
+                val = getattr(owner, "_account_epoch", None)
+                if isinstance(val, int) and not isinstance(val, bool):
+                    return val
+        return None
+
+    def _effective_expected_account_epoch(self) -> int | None:
+        owner_epoch = getattr(self, "_owner_account_epoch", None)
+        if owner_epoch is not None:
+            return owner_epoch
+        current = getattr(self, "_current_account_epoch", None)
+        return current() if callable(current) else None
+
+    def _is_account_context_current(
+        self, account_generation: int, expected_account_epoch: int | None
+    ) -> bool:
+        if getattr(self, "_account_generation", 0) != account_generation:
+            return False
+        if expected_account_epoch is not None:
+            current_epoch = self._current_account_epoch()
+            if current_epoch is not None and current_epoch != expected_account_epoch:
+                return False
+        return True
+
+    def reset_for_account_switch(self, account_epoch: int | None = None) -> None:
+        """Invalidate in-flight work and clear account-owned state on account switch/logout."""
+        self._account_generation = getattr(self, "_account_generation", 0) + 1
+        self._view_generation = getattr(self, "_view_generation", 0) + 1
+        self._snapshot_load_generation = (
+            getattr(self, "_snapshot_load_generation", 0) + 1
+        )
+        self._owner_account_epoch = (
+            account_epoch
+            if account_epoch is not None
+            else self._current_account_epoch()
+        )
+        self.visible = False
+        self._current_url = ""
+        self._current_data = {}
+        self._quiz_launch_target = None
+        self._last_server_status = ""
+        for coll_attr in (
+            "_selected_files",
+            "_submitted_files",
+            "_selected_file_indices",
+        ):
+            coll = getattr(self, coll_attr, None)
+            if coll is not None and hasattr(coll, "clear"):
+                coll.clear()
+        self._is_multiselect_mode = False
+        self._editing_file_index = -1
+        self._pending_delete_indices = []
+        self._pending_file_mutation = None
+        self._submission_snapshot = None
+        self._submission_fingerprint = ""
+        self._submission_policy = None
+        self._is_uploading = False
+
+        for dlg_attr in (
+            "_file_edit_dialog",
+            "_delete_confirm_dialog",
+            "_replace_confirm_dialog",
+        ):
+            dlg = getattr(self, dlg_attr, None)
+            if dlg is not None:
+                dlg.open = False
+
+        for ctrl_attr in (
+            "_loading_bar",
+            "_error_banner",
+            "_badge_ctrl",
+            "_file_list_col",
+            "_submitted_files_col",
+            "_submitted_area",
+            "_submission_area",
+            "_upload_progress",
+            "_upload_status",
+            "_upload_mode_row",
+            "_submission_statement",
+            "_submission_policy_text",
+            "_pick_btn",
+            "_submit_btn",
+            "_finalize_btn",
+            "_batch_delete_btn",
+            "_multiselect_btn",
+            "_edit_submitted_btn",
+            "_open_btn",
+            "_quiz_open_btn",
+            "_quiz_auth_btn",
+            "_quiz_runtime_notice",
+        ):
+            ctrl = getattr(self, ctrl_attr, None)
+            if ctrl is not None:
+                ctrl.visible = False
+        for text_attr in (
+            "_title_text",
+            "_course_text",
+            "_upload_status",
+            "_submission_policy_text",
+        ):
+            txt = getattr(self, text_attr, None)
+            if txt is not None:
+                txt.value = ""
+        for col_attr in ("_content_col", "_file_list_col", "_submitted_files_col"):
+            col = getattr(self, col_attr, None)
+            controls = getattr(col, "controls", None)
+            if controls is not None and hasattr(controls, "clear"):
+                controls.clear()
+        for dis_attr in ("_file_list_col", "_upload_mode_row", "_quiz_open_btn"):
+            ctrl = getattr(self, dis_attr, None)
+            if ctrl is not None:
+                ctrl.disabled = False
+        prog = getattr(self, "_upload_progress", None)
+        if prog is not None:
+            prog.value = None
+        stmt = getattr(self, "_submission_statement", None)
+        if stmt is not None:
+            stmt.value = False
+        DetailView._set_header_open_visible(self, False)
 
     @staticmethod
     def _normalize_width(width) -> float | None:
@@ -1236,6 +1376,10 @@ class DetailView(ft.Container):
                     client
                     and self._client_matches_native_submission_site(client, url)
                     and (not client_is_bound or self._has_submission_workflow(client))
+                    and self._is_account_context_current(
+                        getattr(self, "_account_generation", 0),
+                        self._effective_expected_account_epoch(),
+                    )
                 ):
                     prefetched = quiz_details.get("raw_submission_status")
                     load_generation, view_generation = (
@@ -1980,13 +2124,36 @@ class DetailView(ft.Container):
         self._submission_status_value.weight = ft.FontWeight.W_600
 
     def _notify_submission_status(
-        self, snapshot: SubmissionSnapshot, target_url: str
+        self,
+        snapshot: SubmissionSnapshot,
+        target_url: str,
+        *,
+        expected_account_epoch: int | None = None,
     ):
         status = DetailView._map_submission_status(snapshot.raw_status)
         if target_url == self._current_url:
             self._last_server_status = status
             self._current_data["submission_status"] = status
         if status and self._on_status_changed and target_url:
+            epoch = (
+                expected_account_epoch
+                if expected_account_epoch is not None
+                else DetailView._effective_expected_account_epoch(self)
+            )
+            if epoch is not None:
+                try:
+                    sig = inspect.signature(self._on_status_changed)
+                    accepts_epoch = "expected_account_epoch" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    accepts_epoch = False
+                if accepts_epoch:
+                    self._on_status_changed(
+                        target_url, status, expected_account_epoch=epoch
+                    )
+                    return
             self._on_status_changed(target_url, status)
 
     def _apply_mutation_result(self, result: SubmissionMutationResult):
@@ -2207,6 +2374,8 @@ class DetailView(ft.Container):
             return
 
         generation = self._view_generation
+        account_generation = getattr(self, "_account_generation", 0)
+        expected_epoch = self._effective_expected_account_epoch()
         target_url = url
         target_course_id = course_id
         intent = self._build_file_intent(
@@ -2233,6 +2402,10 @@ class DetailView(ft.Container):
                 intent,
                 selected_files,
             )
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ):
+                return
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
@@ -2244,18 +2417,25 @@ class DetailView(ft.Container):
                     self._upload_progress.value = 1.0
             elif result.snapshot is not None:
                 DetailView._notify_submission_status(
-                    self, result.snapshot, target_url
+                    self,
+                    result.snapshot,
+                    target_url,
+                    expected_account_epoch=expected_epoch,
                 )
         except Exception:
             logger.error("Submission mutation failed unexpectedly")
-            if self._is_current_mutation_context(
+            if self._is_account_context_current(
+                account_generation, expected_epoch
+            ) and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._show_upload_status(
                     "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
                 )
         finally:
-            if self._is_current_mutation_context(
+            if self._is_account_context_current(
+                account_generation, expected_epoch
+            ) and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._is_uploading = False
@@ -2282,6 +2462,8 @@ class DetailView(ft.Container):
             return
 
         generation = self._view_generation
+        account_generation = getattr(self, "_account_generation", 0)
+        expected_epoch = self._effective_expected_account_epoch()
         target_url = url
         target_course_id = course_id
         finalize_intent = FinalizeSubmissionIntent(
@@ -2304,6 +2486,10 @@ class DetailView(ft.Container):
                 target_course_id,
                 finalize_intent,
             )
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ):
+                return
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
@@ -2312,18 +2498,25 @@ class DetailView(ft.Container):
                     self._upload_progress.value = 1.0
             elif result.snapshot is not None:
                 DetailView._notify_submission_status(
-                    self, result.snapshot, target_url
+                    self,
+                    result.snapshot,
+                    target_url,
+                    expected_account_epoch=expected_epoch,
                 )
         except Exception:
             logger.error("Submission finalization failed unexpectedly")
-            if self._is_current_mutation_context(
+            if self._is_account_context_current(
+                account_generation, expected_epoch
+            ) and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._show_upload_status(
                     "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
                 )
         finally:
-            if self._is_current_mutation_context(
+            if self._is_account_context_current(
+                account_generation, expected_epoch
+            ) and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._is_uploading = False
@@ -2393,6 +2586,8 @@ class DetailView(ft.Container):
         view_generation: int,
     ):
         """Load one already-reserved snapshot request and apply it if current."""
+        account_generation = getattr(self, "_account_generation", 0)
+        expected_epoch = self._effective_expected_account_epoch()
         try:
             result = await asyncio.to_thread(
                 self._load_submission_snapshot,
@@ -2401,7 +2596,9 @@ class DetailView(ft.Container):
                 course_id,
                 prefetched_status,
             )
-            if not self._is_current_snapshot_load(
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ) or not self._is_current_snapshot_load(
                 load_generation,
                 view_generation,
                 url,
@@ -2417,7 +2614,9 @@ class DetailView(ft.Container):
             self._page.update()
         except Exception:
             logger.exception("Load submitted snapshot failed unexpectedly")
-            if not self._is_current_snapshot_load(
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ) or not self._is_current_snapshot_load(
                 load_generation,
                 view_generation,
                 url,

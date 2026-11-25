@@ -137,12 +137,21 @@ def _set_webview_occlusion(reason: str, occluded: bool) -> None:
 
 
 def _build_account_data_cache(username: str | None):
-    """Build an isolated DataCache; logged-out state never uses namespace=None."""
+    """Build an isolated DataCache; logged-out and demo states never migrate legacy cache."""
     from core.data_cache import DataCache
 
     clean_user = str(username or "").strip()
     if clean_user:
-        return DataCache(namespace=f"{settings.MOODLE_BASE_URL}|{clean_user}")
+        demo_user = is_demo_account(clean_user)
+        if demo_user:
+            clean_user = normalize_demo_username(clean_user)
+        try:
+            return DataCache(
+                namespace=f"{settings.MOODLE_BASE_URL}|{clean_user}",
+                allow_legacy_migration=not demo_user,
+            )
+        except TypeError:
+            return DataCache(namespace=f"{settings.MOODLE_BASE_URL}|{clean_user}")
     try:
         return DataCache(
             namespace="__logged_out__",
@@ -530,6 +539,91 @@ class AppController:
         if not self._attach_modal_occlusion_release():
             _set_webview_occlusion("modal_dialog", False)
 
+    def _restore_refresh_button(self) -> None:
+        refresh_btn = getattr(self, "refresh_btn", None)
+        if refresh_btn is None or not getattr(refresh_btn, "disabled", False):
+            return
+        refresh_btn.disabled = False
+        upd = getattr(refresh_btn, "update", None)
+        if callable(upd):
+            try:
+                upd()
+                return
+            except Exception:
+                pass
+        page = getattr(self, "page", None)
+        page_upd = getattr(page, "update", None)
+        if callable(page_upd):
+            try:
+                page_upd()
+            except Exception:
+                pass
+
+    def _teardown_detail_view_for_account_switch(self, *, clear_ui: bool) -> None:
+        """Reset DetailView state and close any open detail overlay on account switch."""
+        detail_view = getattr(self, "detail_view", None)
+        view_manager = getattr(self, "view_manager", None)
+        detail_was_open = bool(
+            getattr(detail_view, "visible", False)
+            or (
+                view_manager is not None
+                and getattr(view_manager, "detail_switcher", None) is not None
+                and getattr(view_manager.detail_switcher, "content", None) is detail_view
+            )
+        )
+        reset_detail = getattr(detail_view, "reset_for_account_switch", None)
+        if callable(reset_detail):
+            try:
+                reset_detail(account_epoch=getattr(self, "_account_epoch", 0))
+            except TypeError:
+                reset_detail()
+            except Exception:
+                logger.debug("DetailView account reset failed", exc_info=True)
+        if not clear_ui:
+            return
+        from_calendar = bool(getattr(self, "_detail_from_calendar", False))
+        self._detail_from_calendar = False
+        if view_manager is not None and detail_was_open:
+            origin = getattr(view_manager, "_detail_origin", None)
+            if origin is None:
+                origin = (
+                    getattr(self, "calendar_view", None)
+                    if from_calendar
+                    else getattr(self, "dashboard", None)
+                )
+            clear_layer = getattr(view_manager, "_clear_detail_layer", None)
+            if callable(clear_layer):
+                try:
+                    clear_layer()
+                    if origin is not None and not getattr(
+                        getattr(self, "settings_view", None), "visible", False
+                    ):
+                        origin.visible = True
+                        origin.opacity = 1.0
+                        if getattr(view_manager, "detail_switcher", None) is None:
+                            show_only = getattr(view_manager, "_show_only", None)
+                            if callable(show_only):
+                                show_only(origin)
+                except Exception:
+                    logger.debug("Detail overlay clear failed", exc_info=True)
+            else:
+                close_detail = getattr(view_manager, "close_detail", None)
+                safe_run = getattr(self, "_safe_run_task", None)
+                if callable(close_detail) and callable(safe_run):
+                    safe_run(close_detail, from_calendar)
+            page = getattr(self, "page", None)
+            update_fn = getattr(page, "update", None)
+            if callable(update_fn):
+                try:
+                    update_fn()
+                except Exception:
+                    pass
+        elif detail_view is not None:
+            try:
+                detail_view.visible = False
+            except Exception:
+                pass
+
     def _teardown_account_session(
         self,
         new_identity: tuple[str, str],
@@ -540,6 +634,7 @@ class AppController:
         trigger_android_logout: bool = True,
         clear_ui: bool = True,
         mark_logged_out: bool = False,
+        preserve_login_state: bool = False,
     ) -> int:
         """Unified account-switch & logout teardown.
 
@@ -559,6 +654,7 @@ class AppController:
         )
         self._is_loading = False
         self._active_sync_epoch = None
+        self._restore_refresh_button()
 
         # 2. Invalidate in-flight sync coalescing & cancel background warmers.
         sync_coord = getattr(self, "_sync_coordinator", None)
@@ -638,7 +734,11 @@ class AppController:
             orchestrator = getattr(self, "orchestrator", None)
             if orchestrator is not None:
                 try:
-                    was_logged_in = bool(getattr(orchestrator, "is_logged_in", False))
+                    preserved_logged_in = (
+                        bool(getattr(orchestrator, "is_logged_in", False))
+                        if preserve_login_state and not mark_logged_out
+                        else False
+                    )
                     clear_caches = getattr(orchestrator, "clear_caches", None)
                     if callable(clear_caches):
                         clear_caches()
@@ -654,10 +754,8 @@ class AppController:
                         orchestrator._thnn_activities_cache = []
                     if hasattr(orchestrator, "_last_thnn_fetch_ts"):
                         orchestrator._last_thnn_fetch_ts = 0.0
-                    if mark_logged_out:
-                        orchestrator.is_logged_in = False
-                    elif hasattr(orchestrator, "is_logged_in"):
-                        orchestrator.is_logged_in = was_logged_in
+                    if mark_logged_out or hasattr(orchestrator, "is_logged_in"):
+                        orchestrator.is_logged_in = preserved_logged_in
                     for client_attr in ("client", "thnn_client"):
                         client_obj = getattr(orchestrator, client_attr, None)
                         clear_session = getattr(client_obj, "clear_session", None)
@@ -770,6 +868,8 @@ class AppController:
             set_state(self._today_schedule_state)
 
         # 7. Clear UI surfaces when visible so stale account data disappears immediately.
+        if reset_moodle_and_caches or clear_ui:
+            self._teardown_detail_view_for_account_switch(clear_ui=clear_ui)
         if clear_ui:
             quiz_player_view = getattr(self, "quiz_player_view", None)
             if quiz_player_view is not None and getattr(
@@ -864,6 +964,7 @@ class AppController:
             schedule_refresh_trigger="login",
             trigger_android_logout=False,
             clear_ui=identity_changed,
+            preserve_login_state=True,
         )
         if do_android_logout or is_demo_account(settings.UTH_USERNAME):
             mobile_bridge = getattr(self, "_android_background", None)
@@ -896,6 +997,9 @@ class AppController:
         settings.MOODLE_WS_TOKEN = ""
         settings.MOODLE_WS_TOKEN_ORIGIN = ""
         settings.MOODLE_SESSION = ""
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is not None and hasattr(orchestrator, "is_logged_in"):
+            orchestrator.is_logged_in = False
         await asyncio.to_thread(save_settings)
         await self._complete_login_success()
 
@@ -1466,10 +1570,17 @@ class AppController:
         self.page.update()
 
     async def _destroy_window(self) -> None:
+        prepare = getattr(self, "_prepare_async_shutdown", None)
+        if callable(prepare):
+            prepare()
+        window = getattr(getattr(self, "page", None), "window", None)
+        destroy_fn = getattr(window, "destroy", None)
+        if not callable(destroy_fn):
+            return
         try:
-            await self.page.window.destroy()
+            await destroy_fn()
         except RuntimeError as exc:
-            if str(exc) != "Session closed":
+            if "Session closed" not in str(exc):
                 raise
             logger.debug("Window session closed before custom exit completed")
 
@@ -2033,6 +2144,7 @@ class AppController:
             get_quiz_account_id=lambda: settings.UTH_USERNAME,
             on_open_url=self._open_url_in_app,
             on_open_external=self._open_url_external,
+            get_account_epoch=lambda: getattr(self, "_account_epoch", 0),
         )
         self.calendar_view = CalendarView(
             self.page,
@@ -3691,29 +3803,50 @@ class AppController:
         )
         from gui.components.course_grade_table import match_portal_course_to_summary
 
+        account_epoch = getattr(self, "_account_epoch", 0)
+
+        def _epoch_is_current() -> bool:
+            return account_epoch == getattr(self, "_account_epoch", 0)
+
         def _work() -> MoodleCourseGradesResult:
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             store = getattr(self, "_course_cache_store", None)
             catalog_service = getattr(self, "_course_catalog_service", None)
             if store is None or catalog_service is None:
-                return self._lookup_legacy_monitor_grades(portal_course)
+                return (
+                    self._lookup_legacy_monitor_grades(portal_course)
+                    if _epoch_is_current()
+                    else MoodleCourseGradesResult()
+                )
 
             courses: list = []
             try:
                 courses = list(getattr(store.load_catalog(), "courses", None) or [])
             except Exception:
                 courses = []
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             if not courses:
                 try:
                     courses = list(catalog_service.refresh_catalog(include_thnn=True) or [])
                 except Exception:
                     logger.debug("On-demand catalog refresh failed", exc_info=True)
                     courses = []
+                if not _epoch_is_current():
+                    return MoodleCourseGradesResult()
 
             matched = match_portal_course_to_summary(
                 portal_course, courses, semester_name=semester_name
             )
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             if matched is None:
-                return self._lookup_legacy_monitor_grades(portal_course)
+                return (
+                    self._lookup_legacy_monitor_grades(portal_course)
+                    if _epoch_is_current()
+                    else MoodleCourseGradesResult()
+                )
 
             try:
                 grades = list(
@@ -3724,6 +3857,9 @@ class AppController:
                 logger.debug("On-demand load_course_grades failed", exc_info=True)
                 grades = []
 
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
+
             if grades:
                 last_synced = 0
                 try:
@@ -3731,6 +3867,8 @@ class AppController:
                     last_synced = int(getattr(detail, "last_synced_at", 0) or 0)
                 except Exception:
                     pass
+                if not _epoch_is_current():
+                    return MoodleCourseGradesResult()
                 return MoodleCourseGradesResult(
                     grades=grades,
                     course_id=matched.id,
@@ -3741,6 +3879,8 @@ class AppController:
                 )
 
             legacy_res = self._lookup_legacy_monitor_grades(portal_course)
+            if not _epoch_is_current():
+                return MoodleCourseGradesResult()
             if legacy_res.grades:
                 return legacy_res
             return MoodleCourseGradesResult(
@@ -3750,7 +3890,10 @@ class AppController:
                 needs_async_fetch=False,
             )
 
-        return await asyncio.to_thread(_work)
+        result = await asyncio.to_thread(_work)
+        if not _epoch_is_current():
+            return MoodleCourseGradesResult()
+        return result
 
     async def _check_grades_background(self):
         """Chạy cùng chu kỳ cập nhật Tổng quan qua GradeMonitor (WS nhẹ).
@@ -3785,7 +3928,8 @@ class AppController:
 
         if account_epoch != getattr(self, "_account_epoch", 0):
             return
-        await self._notify_grade_changes(grade_changes)
+        if grade_changes and not is_demo_account(settings.UTH_USERNAME):
+            await self._notify_grade_changes(grade_changes)
 
     async def _notify_grade_changes(self, grade_changes: list) -> None:
         if not grade_changes:
@@ -4128,6 +4272,7 @@ class AppController:
         if self._is_loading:
             return
         if not self._has_sync_credentials():
+            self._restore_refresh_button()
             return
         account_epoch = getattr(self, "_account_epoch", 0)
         data_cache = self._data_cache
@@ -4213,6 +4358,9 @@ class AppController:
                 return
             if not outcome.can_commit:
                 raise RuntimeError(outcome.error or "Incomplete Moodle activity snapshot")
+            orch_ref = getattr(self, "orchestrator", None)
+            if orch_ref is not None and hasattr(orch_ref, "is_logged_in"):
+                orch_ref.is_logged_in = True
             result = list(outcome.activities or [])
 
             cache = self.orchestrator.get_cached_details_snapshot()
@@ -4378,6 +4526,14 @@ class AppController:
         except Exception as exc:
             if not _epoch_is_current():
                 return
+            orch_ref = getattr(self, "orchestrator", None)
+            if (
+                not is_demo_account(settings.UTH_USERNAME)
+                and not str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
+                and orch_ref is not None
+                and hasattr(orch_ref, "is_logged_in")
+            ):
+                orch_ref.is_logged_in = False
             self._diag_breadcrumb("refresh", "failed", "moodle")
             logger.exception(f"[Load] Lỗi: {exc}")
             try:
@@ -4850,7 +5006,7 @@ class AppController:
             if not _is_current():
                 return
             self.view_manager.show_course_grades_data(courses)
-            if changes:
+            if changes and not is_demo_account(settings.UTH_USERNAME):
                 await self._notify_grade_changes(changes)
         except Exception as e:
             if not _is_current():
@@ -5807,8 +5963,25 @@ class AppController:
                 self._reconcile_class_schedule_notifications, schedule_snapshot
             )
         self._show_snackbar("Đã lưu cài đặt", ft.Icons.SAVE_ROUNDED, C.SAFE)
-    def _on_activity_status_changed(self, url: str, new_status: str):
+    def _on_activity_status_changed(
+        self,
+        url: str,
+        new_status: str,
+        expected_account_epoch: int | None = None,
+    ):
         """Callback từ DetailView khi trạng thái nộp bài được cập nhật hoặc thay đổi."""
+        current_epoch = getattr(self, "_account_epoch", 0)
+        if (
+            expected_account_epoch is not None
+            and expected_account_epoch != current_epoch
+        ):
+            logger.info(
+                "Discarding stale activity status update for %s (epoch %s != %s)",
+                url,
+                expected_account_epoch,
+                current_epoch,
+            )
+            return
         new_status = normalize_submission_status(new_status)
         updated = False
         import time
@@ -6037,27 +6210,38 @@ class AppController:
             except Exception:
                 logger.warning("Countdown refresh failed", exc_info=True)
 
+    @staticmethod
+    def _run_shutdown_step(label: str, step) -> None:
+        try:
+            step()
+        except Exception:
+            logger.debug("Ignored shutdown step error (%s)", label, exc_info=True)
+
     def _prepare_async_shutdown(self) -> None:
         """Close asyncio coordinators and Flet UI hosts on the event loop thread."""
         page_alive = getattr(self, "_page_alive", None)
         if page_alive is not None:
-            page_alive.clear()
+            self._run_shutdown_step("page_alive.clear", page_alive.clear)
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         prefetch_cancel = getattr(self, "_prefetch_cancel_event", None)
         if prefetch_cancel is not None:
-            prefetch_cancel.set()
+            self._run_shutdown_step("prefetch_cancel.set", prefetch_cancel.set)
         detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
-            detail_warm_cancel.set()
+            self._run_shutdown_step("detail_warm_cancel.set", detail_warm_cancel.set)
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
-            coordinator.close()
+            self._run_shutdown_step("sync_coordinator.close", coordinator.close)
         schedule_coordinator = getattr(self, "_today_schedule_coordinator", None)
         if schedule_coordinator is not None:
-            schedule_coordinator.close()
+            self._run_shutdown_step(
+                "today_schedule_coordinator.close", schedule_coordinator.close
+            )
         close_wv = getattr(self, "_close_app_webview", None)
         if callable(close_wv):
-            close_wv(update_page=False)
+            self._run_shutdown_step(
+                "close_app_webview", lambda: close_wv(update_page=False)
+            )
 
     def _shutdown_for_exit(self) -> None:
         lock = getattr(self, "_exit_cleanup_lock", None)
@@ -6071,44 +6255,84 @@ class AppController:
 
         view_manager = getattr(self, "view_manager", None)
         if view_manager is not None:
-            view_manager.cancel_pending_settings_navigation()
+            cancel_nav = getattr(
+                view_manager, "cancel_pending_settings_navigation", None
+            )
+            if callable(cancel_nav):
+                self._run_shutdown_step(
+                    "view_manager.cancel_pending_settings_navigation", cancel_nav
+                )
         else:
             settings_view = getattr(self, "settings_view", None)
             cancel_load = getattr(settings_view, "cancel_pending_load", None)
             if callable(cancel_load):
-                cancel_load()
+                self._run_shutdown_step(
+                    "settings_view.cancel_pending_load", cancel_load
+                )
+
         activation_broker = getattr(self, "activation_broker", None)
         if activation_broker is not None:
-            activation_broker.close(timeout_seconds=1.0)
+            close_broker = getattr(activation_broker, "close", None)
+            if callable(close_broker):
+                self._run_shutdown_step(
+                    "activation_broker.close",
+                    lambda: close_broker(timeout_seconds=1.0),
+                )
+
         tray = getattr(self, "tray", None)
         if tray is not None:
-            tray.close(timeout_seconds=1.0)
+            close_tray = getattr(tray, "close", None)
+            if callable(close_tray):
+                self._run_shutdown_step(
+                    "tray.close", lambda: close_tray(timeout_seconds=1.0)
+                )
+
         page_alive = getattr(self, "_page_alive", None)
         if page_alive is not None:
-            page_alive.clear()
+            self._run_shutdown_step("page_alive.clear", page_alive.clear)
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         prefetch_cancel = getattr(self, "_prefetch_cancel_event", None)
         if prefetch_cancel is not None:
-            prefetch_cancel.set()
+            self._run_shutdown_step("prefetch_cancel.set", prefetch_cancel.set)
         detail_warm_cancel = getattr(self, "_card_detail_warm_cancel_event", None)
         if detail_warm_cancel is not None:
-            detail_warm_cancel.set()
+            self._run_shutdown_step("detail_warm_cancel.set", detail_warm_cancel.set)
+
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is not None:
-            coordinator.close()
+            close_sync = getattr(coordinator, "close", None)
+            if callable(close_sync):
+                self._run_shutdown_step("sync_coordinator.close", close_sync)
+
         schedule_coordinator = getattr(self, "_today_schedule_coordinator", None)
         if schedule_coordinator is not None:
-            schedule_coordinator.close()
+            close_sched = getattr(schedule_coordinator, "close", None)
+            if callable(close_sched):
+                self._run_shutdown_step(
+                    "today_schedule_coordinator.close", close_sched
+                )
+
         update_coordinator = getattr(self, "_update_coordinator", None)
         if update_coordinator is not None:
-            update_coordinator.shutdown(timeout_seconds=1.0)
-        self._close_app_webview(update_page=False)
+            shutdown_upd = getattr(update_coordinator, "shutdown", None)
+            if callable(shutdown_upd):
+                self._run_shutdown_step(
+                    "update_coordinator.shutdown",
+                    lambda: shutdown_upd(timeout_seconds=1.0),
+                )
+
+        close_wv = getattr(self, "_close_app_webview", None)
+        if callable(close_wv):
+            self._run_shutdown_step(
+                "close_app_webview", lambda: close_wv(update_page=False)
+            )
+
         courses_coord = getattr(self, "_courses_coordinator", None)
         if courses_coord is not None:
-            try:
-                courses_coord.close()
-            except Exception:
-                logger.debug("Ignored courses coordinator close error", exc_info=True)
+            close_courses = getattr(courses_coord, "close", None)
+            if callable(close_courses):
+                self._run_shutdown_step("courses_coordinator.close", close_courses)
+
         # Close NotificationManager & WindowsNotifier scheduler threads cleanly.
         seen_notifiers: set[int] = set()
         for notif_mgr in (
@@ -6120,28 +6344,18 @@ class AppController:
             seen_notifiers.add(id(notif_mgr))
             close_mgr = getattr(notif_mgr, "close", None)
             if callable(close_mgr):
-                try:
-                    close_mgr()
-                except Exception:
-                    logger.debug("Ignored notification manager close error", exc_info=True)
+                self._run_shutdown_step("notifier.close", close_mgr)
             for channel in getattr(notif_mgr, "notifiers", ()) or ():
                 close_ch = getattr(channel, "close", None)
                 if callable(close_ch):
-                    try:
-                        close_ch()
-                    except Exception:
-                        logger.debug("Ignored notifier channel close error", exc_info=True)
+                    self._run_shutdown_step("notifier_channel.close", close_ch)
+
         orchestrator = getattr(self, "orchestrator", None)
         for client_attr in ("client", "thnn_client"):
             client = getattr(orchestrator, client_attr, None)
             close_client = getattr(client, "close", None)
             if callable(close_client):
-                try:
-                    close_client()
-                except Exception:
-                    logger.debug(
-                        "Ignored orchestrator %s close error", client_attr, exc_info=True
-                    )
+                self._run_shutdown_step(f"orchestrator.{client_attr}.close", close_client)
 
     def _on_disconnect(self, e):
         self._shutdown_for_exit()
