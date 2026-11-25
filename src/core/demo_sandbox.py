@@ -7,10 +7,12 @@ read-only mutation guards without importing any GUI or Flet modules.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import date, datetime
 import hashlib
 import hmac
+import threading
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -42,10 +44,14 @@ DEMO_USERNAME: str = "uthelper_demo"
 DEMO_USER_ID: int = 990_001
 
 _PBKDF2_ITERATIONS: int = 200_000
+_MAX_DEMO_PASSWORD_CHARS: int = 1024
 _DEMO_PASSWORD_SALT: bytes = b"uthelper-reviewer-demo-v1-salt-2026"
 _DEMO_PASSWORD_DIGEST_HEX: str = (
     "e61538f99cf036a6b444937413d7e6632d86d39c96dd9768e1f3be47e85ab531"
 )
+_DEMO_CRED_CACHE_LOCK = threading.Lock()
+_DEMO_CRED_CACHE: OrderedDict[tuple[str, bytes], bool] = OrderedDict()
+_DEMO_CRED_CACHE_MAX: int = 16
 
 __all__ = [
     "DEMO_USERNAME",
@@ -65,6 +71,7 @@ __all__ = [
     "normalize_demo_username",
     "render_demo_grade_report_html",
     "render_demo_session_html",
+    "verify_demo_credentials_cached",
 ]
 
 
@@ -87,7 +94,12 @@ def is_demo_account(username: str | None) -> bool:
 
 def is_demo_credentials(username: str | None, password: str | None) -> bool:
     """Verify Reviewer Demo username and password via constant-time PBKDF2-HMAC-SHA256."""
-    if not is_demo_account(username) or not isinstance(password, str) or not password:
+    if (
+        not is_demo_account(username)
+        or not isinstance(password, str)
+        or not password
+        or len(password) > _MAX_DEMO_PASSWORD_CHARS
+    ):
         return False
     candidate_hex = hashlib.pbkdf2_hmac(
         "sha256",
@@ -96,6 +108,34 @@ def is_demo_credentials(username: str | None, password: str | None) -> bool:
         _PBKDF2_ITERATIONS,
     ).hex()
     return hmac.compare_digest(candidate_hex, _DEMO_PASSWORD_DIGEST_HEX)
+
+
+def verify_demo_credentials_cached(
+    username: str | None, password: str | None
+) -> bool:
+    """Memoize PBKDF2 demo credential checks in a bounded LRU keyed by SHA-256 digest."""
+    if (
+        not is_demo_account(username)
+        or not isinstance(password, str)
+        or not password
+        or len(password) > _MAX_DEMO_PASSWORD_CHARS
+    ):
+        return False
+    norm_user = normalize_demo_username(username)
+    pwd_digest = hashlib.sha256(password.encode("utf-8")).digest()
+    key = (norm_user, pwd_digest)
+    with _DEMO_CRED_CACHE_LOCK:
+        cached = _DEMO_CRED_CACHE.get(key)
+        if cached is not None:
+            _DEMO_CRED_CACHE.move_to_end(key)
+            return cached
+    valid = is_demo_credentials(norm_user, password)
+    with _DEMO_CRED_CACHE_LOCK:
+        _DEMO_CRED_CACHE[key] = valid
+        _DEMO_CRED_CACHE.move_to_end(key)
+        while len(_DEMO_CRED_CACHE) > _DEMO_CRED_CACHE_MAX:
+            _DEMO_CRED_CACHE.popitem(last=False)
+    return valid
 
 
 def handle_demo_ws_call(

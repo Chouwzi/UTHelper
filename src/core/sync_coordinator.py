@@ -116,7 +116,9 @@ class ActivitySyncCoordinator:
 
     def _signal_wake(self) -> None:
         loop = self._loop
-        if loop is not None and not loop.is_closed():
+        if loop is not None:
+            if loop.is_closed():
+                return
             try:
                 running = asyncio.get_running_loop()
             except RuntimeError:
@@ -124,10 +126,13 @@ class ActivitySyncCoordinator:
             if running is not loop:
                 try:
                     loop.call_soon_threadsafe(self._wake_event.set)
-                    return
                 except RuntimeError:
                     pass
-        self._wake_event.set()
+                return
+        try:
+            self._wake_event.set()
+        except RuntimeError:
+            pass
 
     def wake(self) -> None:
         """Recompute the next due time after settings/data changes."""
@@ -153,20 +158,27 @@ class ActivitySyncCoordinator:
         self._in_flight_account_key = None
         if task is not None and not task.done():
             loop = self._loop
-            if loop is not None and not loop.is_closed():
-                try:
-                    running = asyncio.get_running_loop()
-                except RuntimeError:
-                    running = None
-                if running is not loop:
+            if loop is not None:
+                if not loop.is_closed():
                     try:
-                        loop.call_soon_threadsafe(task.cancel)
+                        running = asyncio.get_running_loop()
                     except RuntimeError:
-                        pass
-                else:
-                    task.cancel()
+                        running = None
+                    if running is not loop:
+                        try:
+                            loop.call_soon_threadsafe(task.cancel)
+                        except RuntimeError:
+                            pass
+                    else:
+                        try:
+                            task.cancel()
+                        except RuntimeError:
+                            pass
             else:
-                task.cancel()
+                try:
+                    task.cancel()
+                except RuntimeError:
+                    pass
         self._signal_wake()
 
     def _can_sync(self) -> bool:
@@ -235,15 +247,25 @@ class ActivitySyncCoordinator:
                 self._in_flight_account_key = self._account_key
             task = self._in_flight
 
+        closing_generator = False
         try:
             value = await asyncio.shield(task)
             return SyncRequestResult(trigger, not coalesced, coalesced, value=value)
+        except GeneratorExit:
+            closing_generator = True
+            raise
         finally:
-            async with self._guard:
+            if closing_generator or (self._loop is not None and self._loop.is_closed()):
                 if self._in_flight is task and task.done():
                     self._in_flight = None
                     self._in_flight_epoch = None
                     self._in_flight_account_key = None
+            else:
+                async with self._guard:
+                    if self._in_flight is task and task.done():
+                        self._in_flight = None
+                        self._in_flight_epoch = None
+                        self._in_flight_account_key = None
             self.wake()
 
     async def run(self) -> None:

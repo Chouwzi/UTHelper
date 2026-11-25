@@ -76,16 +76,16 @@ class DataOrchestrator:
         raw = getattr(settings, "UTH_USERNAME", "")
         if is_demo_account(raw):
             return normalize_demo_username(raw)
-        return str(raw or "").strip()
+        return str(raw or "").strip().casefold()
 
     def _sync_account_scope(self) -> None:
         """Reset account-scoped caches when `settings.UTH_USERNAME` changes."""
-        current_key = self._current_account_key()
         lock = getattr(self, "_account_state_lock", None)
         if lock is None:
             lock = threading.RLock()
             self._account_state_lock = lock
         with lock:
+            current_key = self._current_account_key()
             if not hasattr(self, "_active_account_key"):
                 self._active_account_key = current_key
                 return
@@ -99,27 +99,40 @@ class DataOrchestrator:
             self._userid_cache = None
             self._courses_cache = None
             self._last_fetch_ts = 0
-            self.latest_course_grades = []
-        thnn_lock = getattr(self, "_thnn_lock", None)
-        if thnn_lock is not None:
-            with thnn_lock:
-                self._thnn_generation = int(getattr(self, "_thnn_generation", 0)) + 1
-        if hasattr(self, "_detail_lock"):
-            self.clear_detail_cache()
-        client = getattr(self, "client", None)
-        if client is not None and hasattr(client, "clear_session"):
-            client.clear_session()
-        thnn_client = getattr(self, "thnn_client", None)
-        if thnn_client is not None and hasattr(thnn_client, "clear_session"):
-            thnn_client.clear_session()
-        for svc_attr in ("moodle_service", "thnn_service"):
-            svc = getattr(self, svc_attr, None)
-            clear_fn = getattr(svc, "clear_all_caches", None)
-            if callable(clear_fn):
-                try:
-                    clear_fn()
-                except Exception:
-                    pass
+            grades_lock = getattr(self, "_course_grades_lock", None)
+            if grades_lock is not None:
+                with grades_lock:
+                    self._course_grades_generation = (
+                        int(getattr(self, "_course_grades_generation", 0)) + 1
+                    )
+                    self.latest_course_grades = []
+            else:
+                self._course_grades_generation = (
+                    int(getattr(self, "_course_grades_generation", 0)) + 1
+                )
+                self.latest_course_grades = []
+            thnn_lock = getattr(self, "_thnn_lock", None)
+            if thnn_lock is not None:
+                with thnn_lock:
+                    self._thnn_generation = (
+                        int(getattr(self, "_thnn_generation", 0)) + 1
+                    )
+            if hasattr(self, "_detail_lock"):
+                self.clear_detail_cache()
+            client = getattr(self, "client", None)
+            if client is not None and hasattr(client, "clear_session"):
+                client.clear_session()
+            thnn_client = getattr(self, "thnn_client", None)
+            if thnn_client is not None and hasattr(thnn_client, "clear_session"):
+                thnn_client.clear_session()
+            for svc_attr in ("moodle_service", "thnn_service"):
+                svc = getattr(self, svc_attr, None)
+                clear_fn = getattr(svc, "clear_all_caches", None)
+                if callable(clear_fn):
+                    try:
+                        clear_fn()
+                    except Exception:
+                        pass
 
     def _get_cached_detail(self, url: str):
         now = time.monotonic()
@@ -204,22 +217,51 @@ class DataOrchestrator:
 
     def clear_caches(self) -> None:
         """Clear all account-scoped in-memory caches on login/logout/account switch."""
-        with self._thnn_lock:
-            self._thnn_generation += 1
-            self._thnn_cache_by_account.clear()
-            self._last_thnn_fetch_ts_by_account.clear()
-        self.clear_detail_cache()
-        self._courses_cache = None
-        self._userid_cache = None
-        self._last_fetch_ts = 0
-        self.is_logged_in = False
-        with self._course_grades_lock:
-            self._course_grades_generation += 1
-            self.latest_course_grades = []
-        try:
-            self.moodle_service.clear_all_caches()
-        except Exception:
-            pass
+        lock = getattr(self, "_account_state_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._account_state_lock = lock
+        with lock:
+            self._active_account_key = self._current_account_key()
+            self._courses_cache = None
+            self._userid_cache = None
+            self._last_fetch_ts = 0
+            self.is_logged_in = False
+            grades_lock = getattr(self, "_course_grades_lock", None)
+            if grades_lock is not None:
+                with grades_lock:
+                    self._course_grades_generation += 1
+                    self.latest_course_grades = []
+            else:
+                self._course_grades_generation = (
+                    int(getattr(self, "_course_grades_generation", 0)) + 1
+                )
+                self.latest_course_grades = []
+            thnn_lock = getattr(self, "_thnn_lock", None)
+            if thnn_lock is not None:
+                with thnn_lock:
+                    self._thnn_generation = (
+                        int(getattr(self, "_thnn_generation", 0)) + 1
+                    )
+                    if hasattr(self, "_thnn_cache_by_account"):
+                        self._thnn_cache_by_account.clear()
+                    if hasattr(self, "_last_thnn_fetch_ts_by_account"):
+                        self._last_thnn_fetch_ts_by_account.clear()
+            if hasattr(self, "_detail_lock"):
+                self.clear_detail_cache()
+            for client_attr in ("client", "thnn_client"):
+                client_obj = getattr(self, client_attr, None)
+                clear_session = getattr(client_obj, "clear_session", None)
+                if callable(clear_session):
+                    clear_session()
+            for svc_attr in ("moodle_service", "thnn_service"):
+                svc = getattr(self, svc_attr, None)
+                clear_fn = getattr(svc, "clear_all_caches", None)
+                if callable(clear_fn):
+                    try:
+                        clear_fn()
+                    except Exception:
+                        pass
 
     @staticmethod
     def _build_time_policy():
