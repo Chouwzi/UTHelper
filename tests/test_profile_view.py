@@ -469,11 +469,13 @@ def test_profile_view_desktop_card_matches_mockup_layout():
     assert len({tile.height for tile in tiles}) == 1
 
 
-def test_profile_view_mobile_footer_and_info_toggle(monkeypatch):
+def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):
     from gui.components import profile_view as profile_view_module
 
     monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
-    view = _make_view()
+    shown: list = []
+    page = SimpleNamespace(show_dialog=lambda sheet: shown.append(sheet))
+    view = _make_view(page=page)
     view.update_snapshot(_make_snapshot())
 
     # Sticky "Tổng:" bar under the cards, filtered by semester + tab.
@@ -486,26 +488,38 @@ def test_profile_view_mobile_footer_and_info_toggle(monkeypatch):
     assert view._footer_text.value == format_vnd(4500000)
     assert view._footer_text.color == C.SAFE
 
-    # Tapping the name/MSSV card expands details in that same card.
+    # The compact card stays closed; tapping the avatar opens a popup.
     card = view._data_host.controls[0]
-    header = card.content.controls[0]
-    assert header.on_click is not None
-    assert view._info_expanded is False
-    assert header.content.controls[2].icon == ft.Icons.CHEVRON_RIGHT_ROUNDED
-    header.on_click(None)
-    assert view._info_expanded is True
-    expanded_card = view._data_host.controls[0]
-    assert len(expanded_card.content.controls) == 3
-    details = expanded_card.content.controls[2]
-    assert isinstance(details, ft.Column)
-    assert len(details.controls) == 9
-    assert details.controls[0].controls[1].value == "Khoa:"
-    assert details.controls[-1].controls[1].value == "Email:"
-    assert "Thông tin chi tiết" not in str(view._data_host.controls)
+    identity = card.content
+    avatar = identity.controls[0]
+    chevron = identity.controls[2]
+    assert avatar.on_click is not None
+    assert chevron.on_click is not None
+    assert len(identity.controls) == 3
+    avatar.on_click(None)
+    assert len(shown) == 1
+    assert shown[0] is view._profile_sheet
+    popup_rows = shown[0].content.content.controls
+    assert popup_rows[0].value == "Nguyễn Văn A"
+    assert len(popup_rows) == 12  # Name + all 11 student fields.
+    assert popup_rows[1].controls[1].value == "MSSV:"
+    assert popup_rows[-1].controls[2].value == "sv001@example.com"
 
     # No data on screen -> the total bar hides with it.
     view.show_error("Không tải được hồ sơ từ Portal.")
     assert view._footer.visible is False
+
+
+def test_profile_view_mobile_avatar_popup_is_skipped_without_a_page(monkeypatch):
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+    avatar = view._data_host.controls[0].content.controls[0]
+    view._open_student_details()
+    assert avatar.on_click is not None
+    assert view._profile_sheet is None
 
 
 def test_profile_view_mobile_semester_dropdown_opens_picker(monkeypatch):

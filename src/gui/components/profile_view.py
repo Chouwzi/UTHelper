@@ -15,9 +15,9 @@ Desktop
 
 Phone (``UI_IS_MOBILE``)
   Compact header (back · centered title), compact profile card with a
-  chevron that expands the student details in place, 2×2 summary tiles, a
-  semester *dropdown* (scrollable bottom-sheet picker), segmented tabs, one
-  tappable card per fee (detail bottom sheet) and a sticky "Tổng:" bar.
+  tappable avatar that opens student details in a popup, 2×2 summary tiles,
+  a semester *dropdown* (scrollable bottom-sheet picker), segmented tabs,
+  one tappable card per fee (detail bottom sheet) and a sticky "Tổng:" bar.
 
 Data arrives from the controller through ``update_snapshot`` (cached first,
 then fresh), so the screen renders instantly offline and refreshes itself.
@@ -323,9 +323,9 @@ class ProfileView(ft.Container):
         self._table_host_width: float | None = None
         # Opened fee-detail bottom sheet (mobile); None when closed.
         self._detail_sheet: ft.BottomSheet | None = None
-        # Mobile profile disclosure and semester picker state.
+        # Mobile profile detail and semester picker sheets.
         self._semester_sheet: ft.BottomSheet | None = None
-        self._info_expanded: bool = False
+        self._profile_sheet: ft.BottomSheet | None = None
         self._updated_text: ft.Text | None = None
         # Sticky mobile total bar (mockup): "Tổng: …" under the fee cards.
         self._footer_text: ft.Text | None = None
@@ -585,63 +585,35 @@ class ProfileView(ft.Container):
             (ft.Icons.EMAIL_ROUNDED, "Email", profile.email),
         ]
         if mobile:
-            # The name/MSSV card itself is the disclosure control. Details
-            # expand inside this card so there is no duplicate section below.
-            identity = ft.Container(
-                content=ft.Row(
-                    controls=[
-                        self._avatar,
-                        ft.Column(
-                            controls=[self._name_text, self._sid_text, badge],
-                            spacing=5,
-                            tight=True,
-                            expand=True,
-                        ),
-                        ft.Icon(
-                            ft.Icons.EXPAND_LESS_ROUNDED
-                            if self._info_expanded
-                            else ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            # Tap the avatar (or its trailing chevron) to see details in a
+            # popup; keep the compact student card at a fixed height.
+            self._avatar.ink = True
+            self._avatar.on_click = self._open_student_details
+            identity = ft.Row(
+                controls=[
+                    self._avatar,
+                    ft.Column(
+                        controls=[self._name_text, self._sid_text, badge],
+                        spacing=5,
+                        tight=True,
+                        expand=True,
+                    ),
+                    ft.Container(
+                        content=ft.Icon(
+                            ft.Icons.CHEVRON_RIGHT_ROUNDED,
                             size=22,
                             color=C.TEXT_SECONDARY,
                         ),
-                    ],
-                    spacing=12,
-                    tight=True,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                padding=ft.Padding.symmetric(horizontal=2, vertical=2),
-                ink=True,
-                on_click=lambda _event: self._toggle_info(),
-            )
-            mobile_controls: list[ft.Control] = [identity]
-            if self._info_expanded:
-                detail_items = [
-                    (ft.Icons.WORK_ROUNDED, "Khoa", profile.faculty),
-                    (ft.Icons.MENU_BOOK_ROUNDED, "Ngành", profile.major),
-                    (ft.Icons.CATEGORY_ROUNDED, "Chuyên ngành", profile.specialization),
-                    (ft.Icons.GROUP_ROUNDED, "Lớp", profile.class_name),
-                    (ft.Icons.CALENDAR_TODAY_ROUNDED, "Khóa", profile.cohort),
-                    (ft.Icons.CAKE_ROUNDED, "Ngày sinh", profile.birth_date),
-                    (ft.Icons.LOCATION_ON_ROUNDED, "Nơi sinh", profile.hometown),
-                    (ft.Icons.PHONE_ROUNDED, "Số điện thoại", profile.phone),
-                    (ft.Icons.EMAIL_ROUNDED, "Email", profile.email),
-                ]
-                mobile_controls.extend(
-                    [
-                        ft.Divider(height=1, thickness=1, color=C.BORDER),
-                        ft.Column(
-                            controls=[_info_row(*item) for item in detail_items],
-                            spacing=8,
-                            tight=True,
-                        ),
-                    ]
+                        ink=True,
+                        on_click=self._open_student_details,
+                    ),
+                ],
+                spacing=12,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 )
             return ft.Container(
-                content=ft.Column(
-                    controls=mobile_controls,
-                    spacing=8,
-                    tight=True,
-                ),
+                content=identity,
                 padding=ft.Padding.symmetric(horizontal=14, vertical=12),
                 border_radius=14,
                 border=ft.Border.all(1, C.BORDER),
@@ -1205,6 +1177,84 @@ class ProfileView(ft.Container):
             logger.warning("Cannot open fee detail sheet: %s", exc)
             self._detail_sheet = None
 
+    def _open_student_details(self, _event=None) -> None:
+        """Show the mobile student information in a dismissible popup sheet."""
+        page = self._page_ref
+        snapshot = self._snapshot
+        if (
+            page is None
+            or snapshot is None
+            or not callable(getattr(page, "show_dialog", None))
+        ):
+            return
+        if self._profile_sheet is not None:
+            try:
+                page.pop_dialog()
+            except Exception:  # noqa: BLE001 - already dismissed by the user
+                logger.debug("Previous student detail sheet was already closed")
+            self._profile_sheet = None
+        profile = snapshot.profile
+        pairs = [
+            ("MSSV", profile.student_id),
+            ("Hệ đào tạo", profile.education_type),
+            ("Khoa", profile.faculty),
+            ("Ngành", profile.major),
+            ("Chuyên ngành", profile.specialization),
+            ("Lớp", profile.class_name),
+            ("Khóa", profile.cohort),
+            ("Ngày sinh", profile.birth_date),
+            ("Nơi sinh", profile.hometown),
+            ("Số điện thoại", profile.phone),
+            ("Email", profile.email),
+        ]
+        controls: list[ft.Control] = [
+            ft.Text(
+                profile.full_name or "Thông tin sinh viên",
+                size=18,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+            )
+        ]
+        controls.extend(
+            _info_row(ft.Icons.PERSON_ROUNDED, label, value or "—")
+            for label, value in pairs
+        )
+        sheet = ft.BottomSheet(
+            content=ft.Container(
+                content=ft.Column(
+                    controls=controls,
+                    spacing=10,
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                bgcolor=C.BG,
+                padding=ft.Padding.only(left=16, right=16, top=8, bottom=20),
+            ),
+            bgcolor=C.BG,
+            dismissible=True,
+            draggable=True,
+            show_drag_handle=True,
+            use_safe_area=True,
+            scrollable=True,
+            maintain_bottom_view_insets_padding=True,
+            elevation=12,
+            barrier_color=C.SCRIM,
+            shape=ft.RoundedRectangleBorder(radius=18),
+            animation_style=ft.AnimationStyle(
+                duration=220,
+                reverse_duration=180,
+                curve=ft.AnimationCurve.EASE_OUT_CUBIC,
+                reverse_curve=ft.AnimationCurve.EASE_IN_CUBIC,
+            ),
+            on_dismiss=lambda _event: setattr(self, "_profile_sheet", None),
+        )
+        self._profile_sheet = sheet
+        try:
+            page.show_dialog(sheet)
+        except Exception as exc:  # noqa: BLE001 - never break the tap
+            logger.warning("Cannot open student detail sheet: %s", exc)
+            self._profile_sheet = None
+
     def _build_fee_detail_sheet(
         self, title: str, row: TuitionRow | OtherFeeRow
     ) -> ft.BottomSheet:
@@ -1366,11 +1416,6 @@ class ProfileView(ft.Container):
         self._footer_text.value = format_vnd(amount)
         # Mockup: green when everything is paid, red while debt remains.
         self._footer_text.color = C.CRITICAL if debt > 0 else C.SAFE
-
-    def _toggle_info(self, _event=None) -> None:
-        self._info_expanded = not self._info_expanded
-        self._render_data()
-        self._update()
 
     def _open_semester_picker(self, _event=None) -> None:
         """Phone dropdown: choose the active semester from a bottom sheet."""
