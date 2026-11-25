@@ -353,6 +353,7 @@ def get_submission_badge(data: dict):
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
 import urllib.parse
 import urllib.request
@@ -491,13 +492,55 @@ def cleanup_image_cache():
         logger.warning(f"Lỗi khi chạy dọn dẹp cache ảnh: {e}")
 
 
-def _clear_image_cache_directory(cache_dir: Path) -> int:
-    """Safely remove regular files directly inside ``cache_dir`` without following symlinks."""
+def _is_reparse_point_or_symlink(path: Path) -> bool:
+    """Return True when ``path`` is a symlink, Windows NTFS junction, or reparse point."""
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            if is_junction():
+                return True
+        except OSError:
+            return True
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    file_attrs = getattr(st, "st_file_attributes", 0)
+    return bool(file_attrs & reparse_flag)
+
+
+def _clear_image_cache_directory(cache_dir: Path, *, expected_base: Path) -> int:
+    """Safely remove regular files directly inside ``expected_base/cache/images``.
+
+    Refuses to traverse symlinks, Windows NTFS junctions, or reparse points on
+    either ``cache/`` or ``cache/images/`` (or entries inside ``cache/images/``),
+    and verifies the resolved cache directory stays pinned inside ``expected_base``.
+    """
     removed = 0
     try:
-        if cache_dir.is_symlink() or not cache_dir.exists() or not cache_dir.is_dir():
+        if not expected_base.exists() or not expected_base.is_dir():
             return 0
+        cache_parent = cache_dir.parent
+        if _is_reparse_point_or_symlink(cache_parent) or _is_reparse_point_or_symlink(
+            cache_dir
+        ):
+            return 0
+        if not cache_dir.exists() or not cache_dir.is_dir():
+            return 0
+        expected_root = expected_base.resolve() / "cache" / "images"
         resolved_root = cache_dir.resolve()
+        if resolved_root != expected_root:
+            return 0
         entries = list(cache_dir.iterdir())
     except OSError as exc:
         logger.debug("Skipping description image cache clear for %s: %s", cache_dir, exc)
@@ -505,10 +548,7 @@ def _clear_image_cache_directory(cache_dir: Path) -> int:
 
     for entry in entries:
         try:
-            if entry.is_symlink():
-                if entry.parent.resolve() == resolved_root:
-                    entry.unlink(missing_ok=True)
-                    removed += 1
+            if _is_reparse_point_or_symlink(entry):
                 continue
             if not entry.is_file():
                 continue
@@ -525,18 +565,21 @@ def clear_cached_description_images() -> int:
     """Purge cached Moodle description images from user data and mirrored assets cache."""
     from config import _USER_DATA_DIR
 
-    user_cache_dir = Path(_USER_DATA_DIR) / "cache" / "images"
-    removed = _clear_image_cache_directory(user_cache_dir)
+    user_base = Path(_USER_DATA_DIR)
+    user_cache_dir = user_base / "cache" / "images"
+    removed = _clear_image_cache_directory(user_cache_dir, expected_base=user_base)
 
     try:
-        assets_cache_dir = get_active_assets_dir() / "cache" / "images"
-        if assets_cache_dir.exists() and not assets_cache_dir.is_symlink():
-            if (
-                user_cache_dir.is_symlink()
-                or not user_cache_dir.exists()
-                or assets_cache_dir.resolve() != user_cache_dir.resolve()
-            ):
-                removed += _clear_image_cache_directory(assets_cache_dir)
+        assets_base = Path(get_active_assets_dir())
+        if assets_base.exists() and assets_base.is_dir():
+            same_base = (
+                user_base.exists() and assets_base.resolve() == user_base.resolve()
+            )
+            if not same_base:
+                assets_cache_dir = assets_base / "cache" / "images"
+                removed += _clear_image_cache_directory(
+                    assets_cache_dir, expected_base=assets_base
+                )
     except OSError as exc:
         logger.debug("Skipping mirrored assets image cache clear: %s", exc)
 
@@ -838,6 +881,27 @@ DEMO_LMS_WEBVIEW_GUARD_MESSAGE: str = (
 )
 
 
+def _configured_uth_hosts_normalized() -> set[str]:
+    hosts: set[str] = set()
+    try:
+        from config import settings
+
+        for attr in ("PORTAL_API_BASE", "MOODLE_BASE_URL"):
+            raw = str(getattr(settings, attr, "") or "").strip()
+            if not raw:
+                continue
+            parsed = _urlparse.urlsplit(raw)
+            if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+                continue
+            raw_host = parsed.hostname.casefold()
+            norm = raw_host[:-1] if raw_host.endswith(".") else raw_host
+            if norm and all(norm.split(".")):
+                hosts.add(norm)
+    except Exception:
+        pass
+    return hosts
+
+
 def is_uth_lms_url(url: object) -> bool:
     """Return True when ``url`` is an HTTP(S) URL targeting a live UTH host (``*.ut.edu.vn``).
 
@@ -849,14 +913,16 @@ def is_uth_lms_url(url: object) -> bool:
     candidate = url.strip()
     if not candidate:
         return False
-    if "\\" in candidate or any(
-        ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in candidate
-    ):
+    if "\\" in candidate or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate):
         return False
     try:
         parsed = _urlparse.urlsplit(candidate)
         port = parsed.port
     except (TypeError, ValueError):
+        return False
+    if any(ch.isspace() for ch in parsed.scheme) or any(
+        ch.isspace() for ch in parsed.netloc
+    ):
         return False
     if parsed.scheme.lower() not in ("http", "https"):
         return False
@@ -876,6 +942,8 @@ def is_uth_lms_url(url: object) -> bool:
     if any(not label for label in labels):
         return False
     if host == "ut.edu.vn" or host.endswith(".ut.edu.vn"):
+        return True
+    if host in _configured_uth_hosts_normalized():
         return True
     from core.url_validation import is_trusted_uth_lms_url
 

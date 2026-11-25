@@ -1326,11 +1326,16 @@ class CoursesCoordinator:
         self, att: CourseAttachment, source: str = "courses"
     ) -> None:
         """Fetch an attachment with user feedback and prompt to save it locally."""
+        start_epoch = getattr(self, "_account_epoch", 0)
         self._show_snack(f"Đang tải xuống «{att.file_name}»...")
         try:
             raw = await self._fetch_attachment_bytes_async(source, att)
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             await self._save_bytes_async(att.file_name, raw)
         except Exception as exc:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             logger.warning("Save attachment failed for %s: %s", att.file_name, exc)
             self._show_snack(f"Lỗi tải file «{att.file_name}»: {exc}")
 
@@ -1402,14 +1407,44 @@ class CoursesCoordinator:
             await self._save_bytes_async(safe_leaf, data)
             return
 
+        start_epoch = getattr(self, "_account_epoch", 0)
         unique_name = f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
+        out: Optional[Path] = None
         try:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             tmp_dir = self.preview_cache.cache_dir / "external"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             out = tmp_dir / unique_name
-            await asyncio.to_thread(self._write_external_file_with_motw, out, data)
+
+            def _write_if_current() -> bool:
+                if getattr(self, "_account_epoch", 0) != start_epoch:
+                    return False
+                self._write_external_file_with_motw(out, data)
+                if getattr(self, "_account_epoch", 0) != start_epoch:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return False
+                return True
+
+            wrote = await asyncio.to_thread(_write_if_current)
+            if not wrote or getattr(self, "_account_epoch", 0) != start_epoch:
+                try:
+                    out.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
             await ft.UrlLauncher().launch_url(out.as_uri())
         except Exception:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                if out is not None:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                return
             await self._save_bytes_async(file_name, data)
 
     def _show_snack(self, text: str) -> None:

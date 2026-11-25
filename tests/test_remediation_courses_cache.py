@@ -595,6 +595,8 @@ def test_demo03_pre_cache_description_images_returns_early_without_network_or_di
         "https://courses.ut.edu.vn:8443/course/view.php?id=1",
         "http://courses.ut.edu.vn/course/view.php?id=1",
         "http://thnn.ut.edu.vn:80/my/",
+        "https://courses.ut.edu.vn/pluginfile.php/123/mod_assign/intro/Bai tap 1.pdf",
+        "https://courses.ut.edu.vn/course/view.php?name=Lap trinh",
     ],
 )
 def test_is_uth_lms_url_accepts_valid_uth_http_and_https_hosts(url: str):
@@ -630,7 +632,8 @@ def test_is_uth_lms_url_accepts_valid_uth_http_and_https_hosts(url: str):
         r"https://evil.com\@courses.ut.edu.vn/x",
         "https://courses.ut.edu.vn/path\nHeader: injected",
         "https://courses.ut.edu.vn/path\r\nEvil: 1",
-        "https://courses.ut.edu.vn/has space",
+        "https://courses .ut.edu.vn/path",
+        "https://courses.ut.edu.vn /path",
         "https://courses.ut.edu.vn:notaport/x",
         "https://courses.ut.edu.vn:99999/x",
         "https://.ut.edu.vn/",
@@ -910,7 +913,14 @@ def test_is_uth_lms_url_rejects_port_zero_and_supports_configured_custom_https_h
     monkeypatch.setattr(
         config.settings, "MOODLE_BASE_URL", "https://custom-lms.example.edu"
     )
+    monkeypatch.setattr(
+        config.settings, "PORTAL_API_BASE", "https://custom-portal.example.edu"
+    )
     assert utils.is_uth_lms_url("https://custom-lms.example.edu/course/view.php?id=1") is True
+    assert utils.is_uth_lms_url("https://custom-lms.example.edu./course/view.php?id=1") is True
+    assert utils.is_uth_lms_url("http://custom-lms.example.edu/course/view.php?id=1") is True
+    assert utils.is_uth_lms_url("https://custom-portal.example.edu./home") is True
+    assert utils.is_uth_lms_url("http://custom-portal.example.edu/home") is True
     assert utils.is_uth_lms_url("https://custom-lms.example.edu@evil.com/") is False
 
 
@@ -942,3 +952,103 @@ def test_d05_singleton_surface_double_true_does_not_strand_webview_occluded():
         assert is_globally_occluded() is False
     finally:
         clear_global_webview_occlusion()
+
+
+def test_d04_clear_cached_description_images_blocks_windows_ntfs_junctions_and_parent_junctions(
+    tmp_path: Path, monkeypatch
+):
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Windows NTFS junction test requires win32")
+
+    # 1. Leaf junction: userdata/cache/images -> victim_docs
+    user_dir = tmp_path / "userdata_leaf"
+    assets_dir = tmp_path / "assets_leaf"
+    victim_docs = tmp_path / "victim_docs"
+    victim_docs.mkdir(parents=True)
+    thesis = victim_docs / "thesis.docx"
+    thesis.write_bytes(b"important-thesis")
+    (user_dir / "cache").mkdir(parents=True)
+    leaf_junction = user_dir / "cache" / "images"
+    res = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(leaf_junction), str(victim_docs)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"mklink /J failed: {res.stderr}"
+
+    monkeypatch.setattr(config, "_USER_DATA_DIR", user_dir)
+    monkeypatch.setattr(utils, "get_active_assets_dir", lambda: assets_dir)
+
+    assert utils.clear_cached_description_images() == 0
+    assert thesis.exists()
+    assert thesis.read_bytes() == b"important-thesis"
+
+    # 2. Parent junction: userdata/cache -> victim_parent (containing images/secret.png)
+    user_dir_parent = tmp_path / "userdata_parent"
+    user_dir_parent.mkdir(parents=True)
+    victim_parent = tmp_path / "victim_parent"
+    (victim_parent / "images").mkdir(parents=True)
+    secret_img = victim_parent / "images" / "secret.png"
+    secret_img.write_bytes(b"outside-secret")
+    parent_junction = user_dir_parent / "cache"
+    res2 = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(parent_junction), str(victim_parent)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res2.returncode == 0, f"mklink /J parent failed: {res2.stderr}"
+
+    monkeypatch.setattr(config, "_USER_DATA_DIR", user_dir_parent)
+    assert utils.clear_cached_description_images() == 0
+    assert secret_img.exists()
+    assert secret_img.read_bytes() == b"outside-secret"
+
+
+def test_d04_open_external_async_logout_mid_write_unlinks_and_never_launches(
+    tmp_path: Path, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    pcache = PreviewFileCache(tmp_path / "pcache")
+    store = CourseCacheStore(cache_dir=tmp_path / "store", namespace="acct-a")
+    srv = LocalPreviewServer()
+    coord = CoursesCoordinator(
+        page=_make_fake_page(ft.PagePlatform.WINDOWS),  # type: ignore[arg-type]
+        catalog_service=CourseCatalogService(cache_store=store, preview_cache=pcache),
+        preview_cache=pcache,
+        archive_service=ArchiveService(),
+        preview_server=srv,
+        on_open_assignment_fallback=lambda _m: None,
+        on_launch_url=lambda _u: None,
+    )
+    launch_mock = AsyncMock()
+    save_mock = AsyncMock()
+    monkeypatch.setattr(ft.UrlLauncher, "launch_url", launch_mock)
+    monkeypatch.setattr(coord, "_save_bytes_async", save_mock)
+
+    orig_write = CoursesCoordinator._write_external_file_with_motw
+
+    def _write_with_mid_logout(out: Path, data: bytes) -> None:
+        # Simulate logout happening right before/during disk write!
+        coord.reset_for_account_switch(None)
+        orig_write(out, data)
+
+    monkeypatch.setattr(
+        coord,
+        "_write_external_file_with_motw",
+        _write_with_mid_logout,
+    )
+    try:
+        asyncio.run(coord._open_external_async("confidential.pdf", b"%PDF-1.4\nsecret"))
+        ext_dir = pcache.cache_dir / "external"
+        remaining = list(ext_dir.iterdir()) if ext_dir.exists() else []
+        assert remaining == []
+        launch_mock.assert_not_awaited()
+        save_mock.assert_not_awaited()
+    finally:
+        coord.close()
