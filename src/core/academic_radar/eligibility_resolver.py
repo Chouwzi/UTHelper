@@ -1,7 +1,23 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 from core.academic_radar.models import CourseEligibility
+
+
+def _safe_float(val: Any) -> float | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped or stripped == "-":
+            return None
+        val = stripped.replace(",", ".")
+    try:
+        numeric = float(val)
+    except (ValueError, TypeError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 # Known conditional subject code prefixes or specific codes verified in UTH curriculum
@@ -19,35 +35,64 @@ KNOWN_CONDITIONAL_PREFIXES = (
 )
 
 
+def _is_truthy_flag(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return math.isfinite(val) and val != 0
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "yes"}
+    return False
+
+
+def _matches_conditional_code(raw_code: Any) -> bool:
+    code = str(raw_code or "").strip().upper()
+    if not code:
+        return False
+    return code in KNOWN_CONDITIONAL_CODES or any(
+        code.startswith(prefix) for prefix in KNOWN_CONDITIONAL_PREFIXES
+    )
+
+
 class CourseEligibilityResolver:
     """Resolves whether a course is academic (GPA-contributing), conditional, transferred, or unknown."""
 
     def resolve(self, course_data: dict[str, Any]) -> CourseEligibility:
         # Priority 1: Transferred courses
-        if course_data.get("isChuyenDiem") is True or course_data.get("is_transferred") is True:
+        if _is_truthy_flag(course_data.get("isChuyenDiem")) or _is_truthy_flag(
+            course_data.get("is_transferred")
+        ):
             return CourseEligibility(
                 status="transferred",
                 reason="Học phần chuyển điểm / miễn điểm",
             )
 
         # Priority 2: Zero-credit / conditional courses
-        credits = float(course_data.get("soTinChi") or course_data.get("credits") or 0.0)
-        code = str(course_data.get("maLopHocPhan") or course_data.get("maHocPhan") or course_data.get("course_code") or "").strip()
+        parsed_credits = _safe_float(course_data.get("soTinChi"))
+        if parsed_credits is None:
+            parsed_credits = _safe_float(course_data.get("credits"))
+        if parsed_credits is None:
+            parsed_credits = _safe_float(course_data.get("stc"))
+        candidate_codes = (
+            course_data.get("maHocPhan"),
+            course_data.get("course_code"),
+            course_data.get("maLopHocPhan"),
+        )
 
-        if credits == 0.0:
+        if parsed_credits == 0.0:
             return CourseEligibility(
                 status="conditional",
                 reason="Học phần điều kiện (0 tín chỉ)",
             )
 
-        if code in KNOWN_CONDITIONAL_CODES or any(code.startswith(p) for p in KNOWN_CONDITIONAL_PREFIXES):
+        if any(_matches_conditional_code(c) for c in candidate_codes):
             return CourseEligibility(
                 status="conditional",
                 reason="Học phần điều kiện theo quy chế UTH (GDTC/GDQP/Anh văn tổng quát)",
             )
 
         # Priority 3: Standard academic courses
-        if credits > 0.0:
+        if parsed_credits is not None and parsed_credits > 0.0:
             return CourseEligibility(
                 status="academic",
                 reason="Học phần tính điểm học lực tích lũy",

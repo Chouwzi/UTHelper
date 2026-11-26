@@ -11,18 +11,17 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Iterable
 
 from core.today_schedule import ClassSession
 
 SUPPORTED_LEAD_HOURS = (1, 2, 3)
 
-# The reconciler only arms classes starting within this many days of ``now``
-# (today's sessions already arrive with the dashboard snapshot). The window
-# slides forward on every reconcile, so a student who keeps the app closed for
-# a whole week still receives the reminders that were persisted on the last
-# foreground run instead of losing them after tomorrow.
+# The reconciler arms classes through 23:59:59 on this calendar day after
+# today; today's sessions already arrive with the dashboard snapshot. The
+# window slides forward on every reconcile, so a student who keeps the app
+# closed still receives reminders persisted on the last foreground run.
 REMINDER_LOOKAHEAD_DAYS = 14
 
 _ONLINE_MARKERS = (
@@ -193,8 +192,8 @@ def build_class_schedule_reminders(
 ) -> tuple[ClassScheduleReminder, ...]:
     """Create deduplicated reminders at each selected 1/2/3-hour lead time.
 
-    Sessions starting more than ``REMINDER_LOOKAHEAD_DAYS`` after ``now`` are
-    skipped: the next reconcile slides the window forward and arms them then.
+    Sessions starting after 23:59:59 on the fourteenth calendar day following
+    today are skipped until the next reconcile slides the window forward.
     """
     if not enabled:
         return ()
@@ -213,7 +212,11 @@ def build_class_schedule_reminders(
 
     reminders: list[ClassScheduleReminder] = []
     seen: set[str] = set()
-    horizon = current + timedelta(days=REMINDER_LOOKAHEAD_DAYS)
+    horizon = datetime.combine(
+        current.date() + timedelta(days=REMINDER_LOOKAHEAD_DAYS),
+        time.max,
+        tzinfo=current.tzinfo,
+    )
     for session in sessions:
         if session.cancelled or session.start_at <= current:
             continue

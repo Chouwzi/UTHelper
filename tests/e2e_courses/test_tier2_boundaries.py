@@ -1094,15 +1094,23 @@ def test_f9_boundary_app_controller_confirm_pop_true_at_root_false_when_handled(
     ctrl.settings_view = SimpleNamespace(visible=False)
     ctrl.calendar_view = SimpleNamespace(visible=False)
     ctrl.grade_overview_view = SimpleNamespace(visible=False)
-    ctrl.view_manager = SimpleNamespace(_detail_origin=None)
+    ctrl.view_manager = SimpleNamespace(
+        _detail_origin=None,
+        show_dashboard=lambda: setattr(tab, "visible", False),
+    )
 
     # In detail mobile -> handled -> confirm_pop(False)
     asyncio.run(ctrl._on_root_view_confirm_pop(SimpleNamespace(control=fv)))
     assert fv.confirmed_pops == [False]
 
-    # Now at catalog list root -> not handled -> confirm_pop(True)
+    # At Courses catalog root -> returns to Dashboard -> confirm_pop(False)
     asyncio.run(ctrl._on_root_view_confirm_pop(SimpleNamespace(control=fv)))
-    assert fv.confirmed_pops == [False, True]
+    assert fv.confirmed_pops == [False, False]
+    assert tab.visible is False
+
+    # Now at Dashboard root -> not handled -> confirm_pop(True)
+    asyncio.run(ctrl._on_root_view_confirm_pop(SimpleNamespace(control=fv)))
+    assert fv.confirmed_pops == [False, False, True]
 
 
 # ---------------------------------------------------------------------------

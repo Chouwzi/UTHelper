@@ -2,6 +2,8 @@ import os
 import sys
 import asyncio
 import logging
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +15,12 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import gui.app_controller as app_controller_module
-from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
+from core.today_schedule import (
+    ClassSession,
+    ScheduleLoadStatus,
+    TodayScheduleViewState,
+    UpcomingScheduleCache,
+)
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
 from gui.app_controller import (
@@ -51,7 +58,7 @@ def test_dashboard_filter_models_share_counts_and_short_trigger_labels():
 
     assert urgency[0].trigger_label == "Mức độ"
     assert urgency[1].count == 1
-    assert activity_type[0].trigger_label == "Tất cả"
+    assert activity_type[0].trigger_label == "Loại bài"
     assert activity_type[1].count == 4
     assert courses[0].trigger_label == "Môn học"
     assert [option.key for option in courses] == ["all", "Course A", "Course B"]
@@ -563,16 +570,39 @@ def test_reconcile_auth_failure_clears_the_previously_armed_schedule(monkeypatch
     assert applied == [()]
 
 
-def test_fetch_upcoming_sessions_requests_the_full_two_week_window():
+def _isolate_upcoming_schedule_cache(controller, tmp_path, credentials):
+    controller._settings_identity = credentials
+    controller._get_upcoming_schedule_cache = lambda username: UpcomingScheduleCache(
+        tmp_path, namespace=f"portal|{username}"
+    )
+
+
+def test_fetch_upcoming_sessions_requests_the_full_two_week_window(tmp_path):
     """Days +1..+14 after today are fetched with the reconciler's credentials."""
     controller = AppController.__new__(AppController)
     requested = []
 
     def fetch_day(target_date, username, password):
         requested.append((target_date, username, password))
-        return (f"session-{target_date.isoformat()}",)
+        return (
+            ClassSession(
+                session_id=f"session-{target_date.isoformat()}",
+                subject="Calculus",
+                course_code="MATH101",
+                start_at=datetime.combine(target_date, datetime.min.time()),
+                end_at=datetime.combine(target_date, datetime.min.time())
+                + timedelta(hours=2),
+                room="A.101",
+                campus="Campus 1",
+                period_start=1,
+                period_end=3,
+                cancelled=False,
+                note="",
+            ),
+        )
 
     controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("student-01", "secret"))
 
     sessions = asyncio.run(
         controller._fetch_upcoming_sessions(("student-01", "secret"))
@@ -586,7 +616,70 @@ def test_fetch_upcoming_sessions_requests_the_full_two_week_window():
     assert len(sessions) == 14
 
 
-def test_fetch_upcoming_sessions_aborts_the_window_when_one_day_fails():
+def test_fetch_upcoming_sessions_reuses_fresh_cached_window(tmp_path):
+    controller = AppController.__new__(AppController)
+    calls = []
+
+    def fetch_day(target_date, username, password):
+        calls.append((target_date, username, password))
+        return ()
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("student-01", "secret"))
+
+    first = asyncio.run(controller._fetch_upcoming_sessions(("student-01", "secret")))
+    second = asyncio.run(controller._fetch_upcoming_sessions(("student-01", "secret")))
+
+    assert first == second == ()
+    assert len(calls) == 14
+
+
+def test_fetch_upcoming_sessions_stops_when_account_changes_mid_window(tmp_path):
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    requested = []
+    credentials = ("student-01", "secret")
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        controller._settings_identity = ("", "")
+        return ("old-account-session",)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, credentials)
+
+    sessions = asyncio.run(controller._fetch_upcoming_sessions(credentials))
+
+    assert sessions == ()
+    assert requested == [today + timedelta(days=1)]
+    cache = controller._get_upcoming_schedule_cache("student-01")
+    assert cache.load_fresh() is None
+
+
+def test_fetch_upcoming_sessions_stops_after_logout_even_if_same_account_relogs(
+    tmp_path,
+):
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    requested = []
+    credentials = ("student-01", "secret")
+    controller._account_epoch = 4
+
+    def fetch_day(target_date, _username, _password):
+        requested.append(target_date)
+        controller._account_epoch += 1
+        return ()
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, credentials)
+
+    sessions = asyncio.run(controller._fetch_upcoming_sessions(credentials))
+
+    assert sessions == ()
+    assert requested == [today + timedelta(days=1)]
+
+
+def test_fetch_upcoming_sessions_aborts_the_window_when_one_day_fails(tmp_path):
     """A failed day aborts the run so the armed alarms are left untouched.
 
     The manager keeps the previously persisted set when the fetch raises
@@ -605,6 +698,7 @@ def test_fetch_upcoming_sessions_aborts_the_window_when_one_day_fails():
         return (target_date.isoformat(),)
 
     controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("u", "p"))
 
     with pytest.raises(OSError):
         asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
@@ -613,7 +707,7 @@ def test_fetch_upcoming_sessions_aborts_the_window_when_one_day_fails():
     assert requested == [today + timedelta(days=offset) for offset in range(1, 6)]
 
 
-def test_fetch_upcoming_sessions_fails_fast_on_a_dead_network():
+def test_fetch_upcoming_sessions_fails_fast_on_a_dead_network(tmp_path):
     """The first failure aborts the window instead of paying 14 timeouts."""
     controller = AppController.__new__(AppController)
     requested = []
@@ -623,6 +717,7 @@ def test_fetch_upcoming_sessions_fails_fast_on_a_dead_network():
         raise OSError("network down")
 
     controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("u", "p"))
 
     with pytest.raises(OSError):
         asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
@@ -630,7 +725,7 @@ def test_fetch_upcoming_sessions_fails_fast_on_a_dead_network():
     assert len(requested) == 1
 
 
-def test_fetch_upcoming_sessions_propagates_a_rejected_portal_session():
+def test_fetch_upcoming_sessions_propagates_a_rejected_portal_session(tmp_path):
     """Auth failure aborts the window so the manager clears stale alarms."""
     from core.today_schedule import ScheduleAuthenticationError
 
@@ -646,6 +741,7 @@ def test_fetch_upcoming_sessions_propagates_a_rejected_portal_session():
         return (target_date.isoformat(),)
 
     controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("u", "p"))
 
     with pytest.raises(ScheduleAuthenticationError):
         asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
@@ -1102,7 +1198,7 @@ def test_android_launcher_forwards_verified_local_path_identity_version_and_sign
         url="https://github.com/Chouwzi/UTHelper/releases/download/v2.2.3/UTHelper-2.2.3.apk",
         sha256="a" * 64,
         size=123,
-        signer_identity="com.uthelper.uthelper",
+        signer_identity="io.github.chouwzi.uthelper",
         certificate_fingerprint="b" * 64,
         install_strategy={"kind": "android_package_installer"},
     )
@@ -1114,7 +1210,7 @@ def test_android_launcher_forwards_verified_local_path_identity_version_and_sign
             str(Path("UTHelper.apk")),
             package.sha256,
             package.size,
-            "com.uthelper.uthelper",
+            "io.github.chouwzi.uthelper",
             2_002_003,
             package.certificate_fingerprint,
         )
@@ -1421,14 +1517,14 @@ def test_open_store_url_uses_external_launch_and_https_fallback(monkeypatch):
     )
 
     ok = controller._open_store_url(
-        "market://details?id=com.uthelper.uthelper",
-        "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+        "market://details?id=io.github.chouwzi.uthelper",
+        "https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
     )
     assert ok is True
     assert calls == [
-        ("market://details?id=com.uthelper.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
+        ("market://details?id=io.github.chouwzi.uthelper", ft.LaunchMode.EXTERNAL_APPLICATION),
         (
-            "https://play.google.com/store/apps/details?id=com.uthelper.uthelper",
+            "https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper",
             ft.LaunchMode.EXTERNAL_APPLICATION,
         ),
     ]
@@ -1513,7 +1609,7 @@ def test_create_update_coordinator_android_uses_run_page_task_verifier_and_safe_
         "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
         "a" * 64,
         10,
-        "com.uthelper.uthelper",
+        "io.github.chouwzi.uthelper",
         "b" * 64,
         {"kind": "android_package_installer"},
     )
@@ -2110,7 +2206,7 @@ def test_app_controller_retry_after_sha256_mismatch_redownloads_with_real_coordi
         url="https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
         sha256="a" * 64,
         size=7,
-        signer_identity="com.uthelper.uthelper",
+        signer_identity="io.github.chouwzi.uthelper",
         certificate_fingerprint="b" * 64,
         install_strategy={"kind": "android_package_installer"},
     )
@@ -2212,3 +2308,1008 @@ def test_app_controller_retry_after_sha256_mismatch_redownloads_with_real_coordi
         assert controller._update_ready is True
     finally:
         assert coordinator.shutdown(timeout_seconds=1.0) is True
+
+
+def test_lookup_moodle_course_grades_cached_and_async_with_semester_disambiguation(tmp_path):
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.courses.cache_store import CourseCacheStore
+    from core.courses.models import (
+        CourseGradeItem as CoreMoodleGradeItem,
+        CourseSummary,
+    )
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="test|user")
+    old_course = CourseSummary(
+        id=101,
+        source="courses",
+        fullname="[HKI_2024-2025] Lập trình Python (012000101)",
+        shortname="HKI_2024-2025_012000101",
+        display_name="Lập trình Python",
+        course_code="012000101",
+        semester_label="HKI 2024-2025",
+        last_synced_at=100,
+    )
+    cur_course = CourseSummary(
+        id=202,
+        source="courses",
+        fullname="[HKI_2025-2026] Lập trình Python (012000101)",
+        shortname="HKI_2025-2026_012000101",
+        display_name="Lập trình Python",
+        course_code="012000101",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    uncached_course = CourseSummary(
+        id=303,
+        source="courses",
+        fullname="[HKI_2025-2026] Mạng máy tính (012000201)",
+        shortname="HKI_2025-2026_012000201",
+        display_name="Mạng máy tính",
+        course_code="012000201",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    store.save_catalog([old_course, cur_course, uncached_course], synced_at=200)
+    store.save_course_detail(
+        "courses",
+        101,
+        sections=[],
+        grades=[CoreMoodleGradeItem(id=1, item_name="Old Grade", grade_formatted="5.0")],
+        synced_at=100,
+    )
+    store.save_course_detail(
+        "courses",
+        202,
+        sections=[],
+        grades=[CoreMoodleGradeItem(id=2, item_name="New Grade", grade_formatted="9.5")],
+        synced_at=200,
+    )
+
+    loaded_calls = []
+
+    class _FakeCatalogService:
+        def refresh_catalog(self, include_thnn=False):
+            return [old_course, cur_course, uncached_course]
+
+        def load_course_grades(self, source, course_id, force=False):
+            loaded_calls.append((source, course_id, force))
+            grades = [CoreMoodleGradeItem(id=3, item_name="Lab 1", grade_formatted="8.0")]
+            store.save_course_detail(source, course_id, sections=[], grades=grades, synced_at=300)
+            return grades
+
+    controller = AppController.__new__(AppController)
+    controller._course_cache_store = store
+    controller._course_catalog_service = _FakeCatalogService()
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: []),
+    )
+
+    portal_python = RadarCourseGradeItem(
+        course_id="1",
+        course_code="012000101",
+        course_name="Lập trình Python",
+        credits=3,
+        subject_code="0120001",
+        class_code="012000101",
+    )
+    res_cached = controller._lookup_moodle_course_grades_cached(
+        portal_python, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res_cached.course_id == 202
+    assert res_cached.source == "courses"
+    assert res_cached.needs_async_fetch is False
+    assert [g.item_name for g in res_cached.grades] == ["New Grade"]
+
+    # Matched summary with empty detail.grades triggers async fetch
+    portal_net = RadarCourseGradeItem(
+        course_id="2",
+        course_code="012000201",
+        course_name="Mạng máy tính",
+        credits=3,
+        subject_code="0120002",
+        class_code="012000201",
+    )
+    res_pending = controller._lookup_moodle_course_grades_cached(
+        portal_net, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res_pending.course_id == 303
+    assert res_pending.grades == []
+    assert res_pending.needs_async_fetch is True
+
+    res_async = asyncio.run(
+        controller._fetch_moodle_course_grades_async(
+            portal_net, "Học kỳ 1 năm học 2025-2026"
+        )
+    )
+    assert loaded_calls == [("courses", 303, False)]
+    assert res_async.needs_async_fetch is False
+    assert [g.item_name for g in res_async.grades] == ["Lab 1"]
+
+
+def test_navigate_back_closes_grade_overview_dialog_before_closing_grades():
+    async def scenario():
+        from unittest.mock import AsyncMock, Mock
+
+        controller = AppController.__new__(AppController)
+        controller.settings_view = SimpleNamespace(visible=False, _handle_back=AsyncMock())
+        controller.detail_view = SimpleNamespace(visible=False)
+        controller.calendar_view = SimpleNamespace(visible=False)
+        controller.course_grades_view = SimpleNamespace(visible=False)
+        controller.grade_overview_view = SimpleNamespace(
+            visible=True,
+            handle_back=Mock(return_value=True),
+        )
+        controller._close_grades = AsyncMock()
+        controller._sync_rail_active = lambda *a, **k: None
+
+        assert await controller._navigate_back() is True
+        controller.grade_overview_view.handle_back.assert_called_once_with()
+        controller._close_grades.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_lookup_moodle_course_grades_cached_does_not_shadow_matched_course_with_legacy_monitor(
+    tmp_path,
+):
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.course_grade_scraper import CourseGradeReport, GradeRow
+    from core.course_grades_service import CourseWithGrades
+    from core.courses.cache_store import CourseCacheStore
+    from core.courses.models import CourseSummary
+
+    store = CourseCacheStore(cache_dir=tmp_path, namespace="test|shadow")
+    matched_summary = CourseSummary(
+        id=501,
+        source="courses",
+        fullname="[HKI_2025-2026] Cơ sở dữ liệu (012005501)",
+        shortname="HKI_2025-2026_012005501",
+        display_name="Cơ sở dữ liệu",
+        course_code="012005501",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    store.save_catalog([matched_summary], synced_at=200)
+
+    stale_monitor_course = CourseWithGrades(
+        course_id=99,
+        name="Cơ sở dữ liệu",
+        shortname="HKI_2023-2024_OLD",
+        report=CourseGradeReport(
+            course_id=99,
+            rows=[GradeRow(name="Old Exam", grade="5.0", percentage="50 %")],
+        ),
+    )
+
+    controller = AppController.__new__(AppController)
+    controller._course_cache_store = store
+    controller._course_catalog_service = SimpleNamespace()
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[stale_monitor_course],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: [stale_monitor_course]),
+    )
+
+    portal_db = RadarCourseGradeItem(
+        course_id="501",
+        course_code="012005501",
+        course_name="Cơ sở dữ liệu",
+        credits=3,
+        subject_code="0120055",
+        class_code="012005501",
+    )
+    res = controller._lookup_moodle_course_grades_cached(
+        portal_db, "Học kỳ 1 năm học 2025-2026"
+    )
+    assert res.course_id == 501
+    assert res.source == "courses"
+    assert res.grades == []
+    assert res.needs_async_fetch is True
+
+
+def test_match_portal_course_to_summary_rejects_short_summary_course_code_prefix():
+    from core.academic_radar.models import CourseGradeItem as RadarCourseGradeItem
+    from core.courses.models import CourseSummary
+    from gui.components.course_grade_table import match_portal_course_to_summary
+
+    portal_course = RadarCourseGradeItem(
+        course_id="12",
+        course_code="012000901",
+        course_name="Lập trình C",
+        credits=3,
+        subject_code="0120009",
+        class_code="012000901",
+    )
+    short_code_summary = CourseSummary(
+        id=10,
+        source="courses",
+        fullname="[HKI_2025-2026] Nhập môn AI (01)",
+        shortname="HKI_2025-2026_01",
+        display_name="Nhập môn AI",
+        course_code="01",
+        semester_label="HKI 2025-2026",
+        last_synced_at=200,
+    )
+    assert (
+        match_portal_course_to_summary(
+            portal_course,
+            [short_code_summary],
+            semester_name="Học kỳ 1 năm học 2025-2026",
+        )
+        is None
+    )
+
+
+def test_perform_data_sync_discards_stale_account_result_on_account_switch(tmp_path, monkeypatch):
+    from core.data_cache import DataCache
+    from core.sync_coordinator import FetchOutcome
+    import gui.app_controller as app_controller_module
+
+    monkeypatch.setattr(app_controller_module.settings, "UTH_USERNAME", "userA")
+    monkeypatch.setattr(app_controller_module.settings, "UTH_PASSWORD", "pwA")
+
+    in_fetch = asyncio.Event()
+    release_fetch = asyncio.Event()
+    cache_a = DataCache(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|userA")
+    cache_b = DataCache(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|userB")
+
+    async def slow_fetch_a():
+        in_fetch.set()
+        await release_fetch.wait()
+        return FetchOutcome.complete(
+            [
+                {
+                    "title": "Secret User A Assignment",
+                    "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=999",
+                    "deadline": "2026-12-30 23:59:00",
+                    "submission_status": "not_submitted",
+                }
+            ]
+        )
+
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 1
+    controller._active_sync_epoch = None
+    controller._prefetch_epoch = 0
+    controller._prefetch_cancel_event = threading.Event()
+    controller._card_detail_warm_cancel_event = threading.Event()
+    controller._data_lock = threading.Lock()
+    controller._cards_lock = threading.Lock()
+    controller._is_loading = False
+    controller._skeleton_visible = False
+    controller.all_data = []
+    controller.active_cards = []
+    controller._pending_updates = {}
+    controller._data_cache = cache_a
+    controller.refresh_btn = SimpleNamespace(disabled=False)
+    controller.empty_state = SimpleNamespace(visible=False)
+    controller.error_state = SimpleNamespace(visible=False)
+    controller.error_text = SimpleNamespace(value="")
+    controller.page = SimpleNamespace(update=lambda: None, overlay=[])
+    controller._android_background = SimpleNamespace(
+        available=True,
+        configure=AsyncMock(),
+        import_activities=AsyncMock(),
+        diagnostics=AsyncMock(return_value={}),
+    )
+    controller.notifier = SimpleNamespace(
+        dispatch=AsyncMock(),
+        reconcile_schedules=AsyncMock(),
+    )
+    controller.orchestrator = SimpleNamespace(
+        fetch_activity_outcome_async=slow_fetch_a,
+        get_cached_details_snapshot=lambda: {},
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: None),
+        clear_detail_cache=lambda: None,
+    )
+    controller._diag_breadcrumb = lambda *a, **k: None
+    controller._set_sync_status = lambda *a, **k: None
+    controller._update_footer = lambda: None
+    controller._show_snackbar = lambda *a, **k: None
+    controller._safe_run_task = lambda *a, **k: None
+
+    async def scenario():
+        sync_task = asyncio.create_task(controller._perform_data_sync("auto"))
+        await in_fetch.wait()
+        # Switch to Account B while Account A's fetch is in flight.
+        controller._account_epoch += 1
+        controller._data_cache = cache_b
+        release_fetch.set()
+        await sync_task
+
+    asyncio.run(scenario())
+
+    assert controller.all_data == []
+    assert cache_b.load_snapshot().activities == []
+    assert cache_a.load_snapshot().activities == []
+    controller._android_background.import_activities.assert_not_awaited()
+    controller.notifier.dispatch.assert_not_awaited()
+
+
+def test_prefetch_details_preserves_pending_submission_and_guards_account_epoch(tmp_path):
+    from core.data_cache import DataCache
+
+    url = "https://courses.ut.edu.vn/mod/assign/view.php?id=777"
+    cache = DataCache(cache_dir=tmp_path, namespace="https://courses.ut.edu.vn|userA")
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 3
+    controller._prefetch_epoch = 5
+    controller._prefetch_cancel_event = threading.Event()
+    controller._card_detail_warm_cancel_event = threading.Event()
+    controller._data_lock = threading.Lock()
+    controller._is_loading = False
+    controller._data_cache = cache
+    controller.all_data = [
+        {
+            "title": "Lab 07",
+            "url": url,
+            "deadline": "2026-12-30 23:59:00",
+            "submission_status": "submitted",
+        }
+    ]
+    controller._pending_updates = {}
+    controller._update_footer = lambda: None
+    controller._schedule_card_detail_warmup = lambda: False
+
+    def prefetch_statuses(_acts, _workers, _cancel):
+        # User submits AFTER prefetch starts while server returns stale not_submitted.
+        with controller._data_lock:
+            controller._pending_updates[url] = (time.time() + 1.0, "submitted")
+        return {url: {"submission_status": "not_submitted", "course": "CS"}}
+
+    controller.orchestrator = SimpleNamespace(
+        prefetch_activity_statuses=prefetch_statuses
+    )
+
+    asyncio.run(controller._prefetch_details_async(controller.all_data, prefetch_epoch=5))
+    assert controller.all_data[0]["submission_status"] == "submitted"
+
+    # Now verify account switch mid-prefetch discards stale results completely.
+    def prefetch_and_switch(_acts, _workers, _cancel):
+        controller._account_epoch += 1
+        return {url: {"submission_status": "not_submitted", "course": "StaleA"}}
+
+    controller.orchestrator.prefetch_activity_statuses = prefetch_and_switch
+    controller.all_data = [{"title": "UserB", "url": url, "submission_status": "graded"}]
+    asyncio.run(controller._prefetch_details_async(controller.all_data, prefetch_epoch=5))
+    assert controller.all_data[0]["submission_status"] == "graded"
+
+
+def test_handle_logout_clears_all_account_state_and_never_uses_none_namespace(monkeypatch):
+    import gui.app_controller as app_controller_module
+    from config import settings
+
+    events = []
+    monkeypatch.setattr(settings, "UTH_USERNAME", "sv_A")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "secret_A")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "tok_A")
+    monkeypatch.setattr(settings, "MOODLE_SESSION", "sess_A")
+    monkeypatch.setattr(app_controller_module, "save_settings", lambda: events.append("save_settings") or True)
+
+    controller = AppController.__new__(AppController)
+    controller._settings_identity = ("sv_A", "secret_A")
+    controller._account_epoch = 0
+    controller._prefetch_epoch = 0
+    controller._detail_request_epoch = 0
+    controller._grades_request_epoch = 0
+    controller._course_grades_request_epoch = 0
+    controller._prefetch_cancel_event = threading.Event()
+    controller._card_detail_warm_cancel_event = threading.Event()
+    controller._data_lock = threading.Lock()
+    controller._cards_lock = threading.Lock()
+    controller.all_data = [{"title": "A"}]
+    controller._pending_updates = {"u": (1.0, "submitted")}
+    controller.active_cards = [object()]
+    controller._sync_coordinator = SimpleNamespace(
+        invalidate=lambda account_key=None: events.append(("sync_invalidate", account_key))
+    )
+    controller.orchestrator = SimpleNamespace(
+        clear_caches=lambda: events.append("orch_clear_caches"),
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: events.append("moodle_clear")),
+        clear_detail_cache=lambda: events.append("detail_clear"),
+        _userid_cache=42,
+        _thnn_activities_cache=[{"title": "THNN_A"}],
+        _last_thnn_fetch_ts=12345.0,
+        is_logged_in=True,
+        latest_course_grades=[object()],
+        client=SimpleNamespace(clear_session=lambda: events.append("client_clear")),
+        thnn_client=SimpleNamespace(clear_session=lambda: events.append("thnn_clear")),
+        course_grade_monitor=SimpleNamespace(
+            reset=lambda: events.append("cgm_reset"),
+            set_namespace=lambda ns: events.append(("cgm_ns", ns)),
+        ),
+        grade_monitor=SimpleNamespace(
+            reset=lambda: events.append("gm_reset"),
+            set_namespace=lambda ns: events.append(("gm_ns", ns)),
+        ),
+    )
+    controller.notifier = SimpleNamespace(
+        clear_account_state=lambda: events.append("notif_clear"),
+        set_namespace=lambda ns: events.append(("notif_ns", ns)),
+    )
+    controller._academic_grade_service = SimpleNamespace(
+        clear_session=lambda: events.append("academic_clear")
+    )
+    controller._portal_client = SimpleNamespace(clear_token=lambda: events.append("portal_clear"))
+    controller._portal_week_client = SimpleNamespace(clear_token=lambda: events.append("portal_week_clear"))
+    controller._week_schedule_cache = SimpleNamespace(set_namespace=lambda ns: events.append(("week_ns", ns)))
+    controller.calendar_view = SimpleNamespace(reset_schedule=lambda: events.append("cal_reset"))
+    controller._today_schedule_coordinator = SimpleNamespace(
+        replace_cache=lambda _c: events.append("today_replace"),
+        refresh=AsyncMock(),
+    )
+    controller._today_schedule_component = SimpleNamespace(set_state=lambda _s: None)
+    controller._courses_coordinator = SimpleNamespace(
+        reset_for_account_switch=lambda ns: events.append(("courses_reset", ns))
+    )
+    # Quiz player is VISIBLE during logout — sessions MUST still be cleared!
+    quiz_clear = AsyncMock()
+    controller.quiz_player_view = SimpleNamespace(
+        visible=True,
+        force_close=lambda: events.append("quiz_force_close"),
+        clear_persisted_sessions=quiz_clear,
+    )
+    controller._sync_quiz_immersive = lambda active: events.append(("quiz_immersive", active))
+    controller._android_background = SimpleNamespace(available=True, logout=AsyncMock())
+    controller.settings_view = SimpleNamespace(visible=True)
+    controller._close_settings = AsyncMock()
+    controller._close_app_webview = lambda update_page=False: events.append("close_wv")
+    controller._schedule_webview2_profile_purge = lambda keep: events.append(("purge_wv2", keep))
+    controller._show_snackbar = lambda *a, **k: events.append("snack")
+    controller._show_login_dialog = AsyncMock()
+    controller.page = SimpleNamespace()
+    scheduled = []
+    controller._safe_run_task = lambda fn, *a, **k: scheduled.append((fn, a, k))
+
+    asyncio.run(controller._handle_logout_async())
+
+    assert settings.UTH_USERNAME == ""
+    assert settings.UTH_PASSWORD == ""
+    assert settings.MOODLE_WS_TOKEN == ""
+    assert settings.MOODLE_SESSION == ""
+    assert controller.all_data == []
+    assert controller._pending_updates == {}
+    assert controller.orchestrator._thnn_activities_cache == []
+    assert controller.orchestrator._last_thnn_fetch_ts == 0.0
+    assert controller.quiz_player_view.visible is False
+    from core.data_cache import DataCache
+
+    assert controller._data_cache._cache_path == DataCache(namespace="__logged_out__")._cache_path
+    assert controller._data_cache._cache_path != DataCache(namespace=None)._cache_path
+    assert "save_settings" in events
+    assert "orch_clear_caches" in events
+    assert "client_clear" in events
+    assert "thnn_clear" in events
+    assert "cgm_reset" in events
+    assert "gm_reset" in events
+    assert "notif_clear" in events
+    assert "academic_clear" in events
+    assert "quiz_force_close" in events
+    assert any(fn is quiz_clear for fn, _, _ in scheduled)
+    assert any(fn is controller._android_background.logout for fn, _, _ in scheduled)
+    assert any(fn is controller._show_login_dialog for fn, _, _ in scheduled)
+
+
+def test_show_grades_logged_out_has_no_attribute_error_and_respects_account_epoch(monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "")
+
+    shown = []
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 1
+    controller._grades_request_epoch = 0
+    controller._diag_screen = lambda *a, **k: None
+    controller._diag_breadcrumb = lambda *a, **k: None
+    controller._sync_rail_active = lambda: None
+    controller.orchestrator = SimpleNamespace(_get_userid=lambda: None)
+    controller.view_manager = SimpleNamespace(
+        show_grades_loading=lambda: shown.append("loading"),
+        show_academic_radar_data=lambda sems, profs, *_a: shown.append(("radar", sems)),
+        show_grades_error=lambda msg: shown.append(("error", msg)),
+    )
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=lambda **kw: [],
+    )
+
+    asyncio.run(controller._show_grades(force_refresh=False))
+    assert ("radar", []) in shown
+    assert not any(tag == "error" for tag in shown if isinstance(tag, tuple) and tag[0] == "error")
+
+    # Verify stale epoch result is discarded on account switch mid-load.
+    shown.clear()
+
+    def load_then_switch(**_kw):
+        controller._account_epoch += 1
+        return [SimpleNamespace(name="OldSem")]
+
+    controller._academic_grade_service = SimpleNamespace(
+        load_academic_data=load_then_switch,
+        get_radar_profiles=lambda s: s,
+    )
+    asyncio.run(controller._show_grades(force_refresh=True))
+    assert shown == ["loading"]
+
+
+def test_check_grades_background_checks_course_grades_view_not_courses_view():
+    ws_calls = []
+    html_calls = []
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 1
+    controller.orchestrator = SimpleNamespace(
+        check_grade_changes=lambda: ws_calls.append(True) or [],
+        refresh_course_grades=lambda: html_calls.append(True) or ([], []),
+    )
+    controller.notifier = SimpleNamespace(dispatch_grade_alert=AsyncMock())
+    # Courses tab is visible, but legacy course_grades_view is hidden -> must NOT scrape HTML!
+    controller.courses_view = SimpleNamespace(visible=True)
+    controller.course_grades_view = SimpleNamespace(visible=False)
+
+    asyncio.run(controller._check_grades_background())
+    assert ws_calls == [True]
+    assert html_calls == []
+
+
+def test_notify_grade_changes_routes_via_show_snackbar_and_prunes_overlay():
+    controller = AppController.__new__(AppController)
+    overlay = [ft.Container(), ft.SnackBar(content=ft.Text("old1")), ft.SnackBar(content=ft.Text("old2"))]
+    controller.page = SimpleNamespace(overlay=overlay, update=lambda: None)
+    controller.notifier = SimpleNamespace(dispatch_grade_alert=AsyncMock())
+
+    change = SimpleNamespace(item_name="Midterm", old_grade="7.0", new_grade="9.0")
+    asyncio.run(controller._notify_grade_changes([change]))
+
+    snackbars = [c for c in overlay if isinstance(c, ft.SnackBar)]
+    assert len(snackbars) == 1
+    assert snackbars[0].open is True
+    assert not hasattr(controller.page, "snack_bar")
+    # Non-SnackBar overlay items remain untouched.
+    assert any(isinstance(c, ft.Container) for c in overlay)
+
+
+def test_navigate_back_from_courses_root_tab_returns_to_home():
+    closed = []
+    controller = AppController.__new__(AppController)
+    controller.quiz_player_view = None
+    controller._app_webview_host = None
+    controller._app_webview_pane = None
+    controller._today_schedule_component = None
+    controller.settings_view = SimpleNamespace(visible=False)
+    controller.detail_view = SimpleNamespace(visible=False)
+    controller.course_grades_view = SimpleNamespace(visible=False)
+    controller.calendar_view = SimpleNamespace(visible=False)
+    controller.grade_overview_view = SimpleNamespace(visible=False)
+    controller.courses_view = SimpleNamespace(visible=True, handle_back=lambda: False)
+    controller._close_courses = AsyncMock(side_effect=lambda: closed.append("courses"))
+    controller._sync_rail_active = lambda: None
+
+    handled = asyncio.run(controller._navigate_back())
+    assert handled is True
+    assert closed == ["courses"]
+
+
+def test_window_hidden_or_minimized_skips_tray_loop_updates():
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(window=SimpleNamespace(visible=False, minimized=False))
+    assert controller._is_window_hidden_or_minimized() is True
+
+    controller.page = SimpleNamespace(window=SimpleNamespace(visible=True, minimized=True))
+    assert controller._is_window_hidden_or_minimized() is True
+
+    controller.page = SimpleNamespace(window=SimpleNamespace(visible=True, minimized=False))
+    assert controller._is_window_hidden_or_minimized() is False
+
+
+def test_shutdown_closes_windows_notifier_and_thnn_client_and_prepares_async():
+    closed = []
+    controller = AppController.__new__(AppController)
+    controller._exit_cleanup_lock = threading.Lock()
+    controller._exit_cleanup_done = False
+    controller._page_alive = threading.Event()
+    controller._page_alive.set()
+    controller._prefetch_cancel_event = threading.Event()
+    controller._card_detail_warm_cancel_event = threading.Event()
+    controller._sync_coordinator = SimpleNamespace(close=lambda: closed.append("sync"))
+    controller._today_schedule_coordinator = SimpleNamespace(close=lambda: closed.append("today"))
+    controller._close_app_webview = lambda update_page=False: closed.append("wv")
+    win_notifier = SimpleNamespace(close=lambda: closed.append("windows_notifier"))
+    controller.notifier = SimpleNamespace(
+        close=lambda: closed.append("notifier_mgr"),
+        notifiers=[win_notifier],
+    )
+    controller.orchestrator = SimpleNamespace(
+        client=SimpleNamespace(close=lambda: closed.append("client")),
+        thnn_client=SimpleNamespace(close=lambda: closed.append("thnn_client")),
+        notifier=controller.notifier,
+    )
+
+    controller._prepare_async_shutdown()
+    assert "sync" in closed
+    assert "today" in closed
+    assert not controller._page_alive.is_set()
+
+    controller._shutdown_for_exit()
+    assert "notifier_mgr" in closed
+    assert "windows_notifier" in closed
+    assert "client" in closed
+    assert "thnn_client" in closed
+
+
+def test_webview_occlusion_seam_and_bottom_inset_64(monkeypatch):
+    import gui.app_controller as app_controller_module
+
+    occlusions = []
+    monkeypatch.setattr(
+        app_controller_module,
+        "_set_webview_occlusion",
+        lambda reason, occ: occlusions.append((reason, occ)),
+    )
+
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(
+        web=False,
+        width=500,
+        height=800,
+        show_dialog=lambda dlg: setattr(controller, "_last_dlg", dlg),
+        pop_dialog=lambda: None,
+    )
+    controller._nav_shell = SimpleNamespace(
+        rail_visible=False,
+        set_immersive=lambda _a: None,
+        bar=None,
+    )
+    controller._get_distribution_profile = lambda: SimpleNamespace(
+        supports_github_self_update=True
+    )
+
+    _left, _top, _w, _h, bottom_inset = controller._compute_app_webview_bounds(500, 800)
+    assert bottom_inset == 64.0
+
+    controller._sync_quiz_immersive(True)
+    controller._sync_quiz_immersive(False)
+    assert ("quiz_player", True) in occlusions
+    assert ("quiz_player", False) in occlusions
+
+    controller._show_update_confirmation()
+    assert ("modal_dialog", True) in occlusions
+    controller._last_dlg.on_dismiss(None)
+    assert ("modal_dialog", False) in occlusions
+
+
+def test_test_notification_channels_offload_via_safe_run_task():
+    controller = AppController.__new__(AppController)
+    scheduled = []
+    controller._safe_run_task = lambda fn, *a, **k: scheduled.append(fn) or object()
+
+    controller._on_test_tele("critical")
+    controller._on_test_discord("warning")
+    controller._on_test_mail("safe")
+    controller._on_test_tray("quiz")
+
+    assert len(scheduled) == 4
+
+
+def test_settings_account_login_persists_and_routes_through_unified_teardown(monkeypatch):
+    import gui.app_controller as app_controller_module
+    from config import settings
+
+    calls = []
+    monkeypatch.setattr(settings, "UTH_USERNAME", "old_user")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "old_pass")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "old_tok")
+    monkeypatch.setattr(settings, "MOODLE_SESSION", "old_sess")
+    monkeypatch.setattr(
+        app_controller_module,
+        "save_settings",
+        lambda: calls.append(("save_settings", settings.UTH_USERNAME, settings.MOODLE_WS_TOKEN)) or True,
+    )
+
+    controller = AppController.__new__(AppController)
+    controller._complete_login_success = AsyncMock(side_effect=lambda: calls.append(("complete_login", settings.UTH_USERNAME)))
+
+    asyncio.run(controller._handle_settings_account_login_async("new_user", "new_pass"))
+
+    assert settings.UTH_USERNAME == "new_user"
+    assert settings.UTH_PASSWORD == "new_pass"
+    assert settings.MOODLE_WS_TOKEN == ""
+    assert settings.MOODLE_SESSION == ""
+    assert calls == [
+        ("save_settings", "new_user", ""),
+        ("complete_login", "new_user"),
+    ]
+
+
+def test_show_course_grades_discards_stale_account_epoch():
+    shown = []
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 1
+    controller._course_grades_request_epoch = 0
+    controller._diag_screen = lambda *a, **k: None
+    controller._diag_breadcrumb = lambda *a, **k: None
+    controller.view_manager = SimpleNamespace(
+        show_course_grades_loading=lambda: shown.append("loading"),
+        show_course_grades_data=lambda data: shown.append(("data", data)),
+        show_course_grades_error=lambda: shown.append("error"),
+    )
+
+    def refresh_and_switch():
+        controller._account_epoch += 1
+        return (["StaleCourseA"], [SimpleNamespace(item_name="X", old_grade="5", new_grade="9")])
+
+    controller.orchestrator = SimpleNamespace(
+        latest_course_grades=[],
+        course_grade_monitor=SimpleNamespace(load_cached=lambda: []),
+        refresh_course_grades=refresh_and_switch,
+    )
+    controller._notify_grade_changes = AsyncMock()
+
+    asyncio.run(controller._show_course_grades(force_refresh=True))
+
+    assert shown == ["loading"]
+    controller._notify_grade_changes.assert_not_awaited()
+
+
+def test_ios_startup_hydrates_keychain_registers_backend_and_allows_save_settings(
+    monkeypatch, tmp_path
+):
+    import json
+    import config
+    import gui.app_controller as app_controller_module
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120099",
+                "UTH_PASSWORD": "legacy-ios-password",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+    monkeypatch.setattr(config.sys, "_IOS_", True, raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_ANDROID", False)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_IOS", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_MOBILE", True)
+    monkeypatch.setattr(app_controller_module.platform_utils, "IS_WINDOWS", False)
+    config.register_secret_backend(None)
+    config.register_secret_backend_factory(None)
+
+    loaded = config.load_settings()
+    monkeypatch.setattr(config, "settings", loaded)
+    monkeypatch.setattr(app_controller_module, "settings", loaded)
+
+    # Fail-closed before iOS startup registers the native Keychain backend.
+    assert config.save_settings() is False
+
+    events = []
+    keychain_store = {
+        "ws_token": "ios-keychain-ws",
+        "ws_token_origin": "https://courses.ut.edu.vn",
+    }
+
+    class _FakeIosBridge:
+        available = True
+
+        async def read_app_secrets(self):
+            events.append("read_keychain")
+            return dict(keychain_store)
+
+        async def write_app_secrets(self, secrets_map):
+            events.append(("write_keychain", dict(secrets_map)))
+            keychain_store.clear()
+            keychain_store.update(secrets_map)
+            return True
+
+        async def clear_app_secrets(self):
+            keychain_store.clear()
+            return True
+
+    bridge = _FakeIosBridge()
+
+    # 1. Verify AppController.__init__ schedules _startup_android_sequence on iOS.
+    scheduled_in_init = []
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            app_controller_module.AppController,
+            "_init_window",
+            lambda self: setattr(self, "_android_background", bridge),
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_create_update_coordinator",
+            lambda self: None,
+        )
+        mp.setattr(
+            app_controller_module.AppController, "_init_ui", lambda self: None
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_load_cached_snapshot",
+            lambda self: False,
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_configure_mobile_back_navigation",
+            lambda self: None,
+        )
+        mp.setattr(
+            app_controller_module.AppController,
+            "_safe_run_task",
+            lambda self, fn, *args, **kwargs: scheduled_in_init.append(
+                getattr(fn, "__name__", str(fn))
+            ),
+        )
+        fake_init_page = SimpleNamespace(
+            session=SimpleNamespace(connection=object()),
+            on_disconnect=None,
+            on_keyboard_event=None,
+            on_resize=None,
+            update=lambda: None,
+        )
+        init_ctrl = AppController(fake_init_page)
+        del init_ctrl
+    assert "_startup_android_sequence" in scheduled_in_init
+    assert "_initialize_android_background" not in scheduled_in_init
+
+    # 2. Verify _startup_android_sequence hydrates Keychain, registers backend,
+    #    skips Android-only background init, and makes save_settings() succeed.
+    scheduled_tasks = []
+
+    def fake_run_task(handler, *args, **kwargs):
+        task = asyncio.create_task(handler(*args, **kwargs))
+        scheduled_tasks.append(task)
+        return task
+
+    controller = AppController.__new__(AppController)
+    controller._android_background = bridge
+    controller._page_alive = app_controller_module.threading.Event()
+    controller._page_alive.set()
+    controller.page = SimpleNamespace(
+        session=SimpleNamespace(connection=object()),
+        run_task=fake_run_task,
+    )
+    controller._today_schedule_coordinator = SimpleNamespace(
+        run=AsyncMock(side_effect=lambda: events.append("schedule"))
+    )
+    controller._initialize_android_background = AsyncMock(
+        side_effect=lambda: events.append("android_bg_init")
+    )
+    controller._load_data_async = AsyncMock(
+        side_effect=lambda trigger="manual": events.append(("load_data", trigger))
+    )
+    controller._show_login_dialog = AsyncMock(
+        side_effect=lambda: events.append("login")
+    )
+    controller._schedule_cached_detail_hydration = lambda _has_cache: False
+    controller._schedule_card_detail_warmup = lambda: False
+
+    async def _run():
+        await controller._startup_android_sequence(True, False)
+        if scheduled_tasks:
+            await asyncio.gather(*scheduled_tasks)
+        loaded.UTH_PASSWORD = "updated-ios-password"
+        return await asyncio.to_thread(config.save_settings)
+
+    try:
+        saved_ok = asyncio.run(_run())
+        assert saved_ok is True
+        assert events[0] == "read_keychain"
+        assert ("load_data", "startup") in events
+        assert "login" not in events
+        controller._initialize_android_background.assert_not_awaited()
+        assert loaded.MOODLE_WS_TOKEN == "ios-keychain-ws"
+        assert keychain_store["password"] == "updated-ios-password"
+        persisted = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "UTH_PASSWORD" not in persisted
+        assert "MOODLE_WS_TOKEN" not in persisted
+    finally:
+        config.register_secret_backend(None)
+        config.register_secret_backend_factory(None)
+
+
+def test_attach_modal_occlusion_release_awaits_async_flet_dismiss_and_clears_occlusion(
+    monkeypatch,
+):
+    import inspect
+    import warnings
+    import gui.app_controller as app_controller_module
+
+    occlusions = []
+    monkeypatch.setattr(
+        app_controller_module,
+        "_set_webview_occlusion",
+        lambda reason, occ: occlusions.append((reason, occ)),
+    )
+
+    dismissed = []
+    dlg = SimpleNamespace(open=True, on_dismiss=None)
+    dialogs_controls = [dlg]
+
+    async def wrapped_on_dismiss(event=None):
+        await asyncio.sleep(0)
+        dismissed.append(event)
+        if dlg in dialogs_controls:
+            dialogs_controls.remove(dlg)
+
+    dlg.on_dismiss = wrapped_on_dismiss
+
+    controller = AppController.__new__(AppController)
+    controller.page = SimpleNamespace(
+        _dialogs=SimpleNamespace(controls=dialogs_controls),
+        overlay=[],
+        dialog=None,
+    )
+
+    assert controller._attach_modal_occlusion_release() is True
+    assert inspect.iscoroutinefunction(dlg.on_dismiss)
+
+    sentinel_event = SimpleNamespace(data=None)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        asyncio.run(dlg.on_dismiss(sentinel_event))
+
+    assert dismissed == [sentinel_event]
+    assert dialogs_controls == []
+    assert occlusions == [("modal_dialog", False)]
+    unawaited = [w for w in caught if "was never awaited" in str(w.message)]
+    assert unawaited == []
+
+    # Even if the wrapped dismiss handler raises, modal occlusion must still release.
+    occlusions.clear()
+    failing_dlg = SimpleNamespace(open=True, on_dismiss=None)
+
+    async def failing_dismiss(_event=None):
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+    failing_dlg.on_dismiss = failing_dismiss
+    controller.page = SimpleNamespace(
+        _dialogs=SimpleNamespace(controls=[failing_dlg]),
+        overlay=[],
+        dialog=None,
+    )
+    assert controller._attach_modal_occlusion_release() is True
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(failing_dlg.on_dismiss(sentinel_event))
+    assert occlusions == [("modal_dialog", False)]
+
+
+def test_perform_data_sync_skips_when_logged_out_without_error_state_or_fetch(monkeypatch):
+    from unittest.mock import Mock
+    import gui.app_controller as app_controller_module
+
+    monkeypatch.setattr(app_controller_module.settings, "UTH_USERNAME", "")
+    monkeypatch.setattr(app_controller_module.settings, "UTH_PASSWORD", "")
+    monkeypatch.setattr(app_controller_module.settings, "MOODLE_WS_TOKEN", "")
+
+    controller = AppController.__new__(AppController)
+    controller._account_epoch = 1
+    controller._active_sync_epoch = None
+    controller._is_loading = False
+    controller.all_data = []
+    controller._data_cache = SimpleNamespace(load=Mock(return_value=([], None)))
+    controller.refresh_btn = SimpleNamespace(disabled=False)
+    controller.empty_state = SimpleNamespace(visible=False)
+    controller.error_state = SimpleNamespace(visible=False)
+    controller.error_text = SimpleNamespace(value="")
+    controller.page = SimpleNamespace(update=Mock(), overlay=[])
+    controller.orchestrator = SimpleNamespace(
+        fetch_activity_outcome_async=AsyncMock(side_effect=RuntimeError("no credentials")),
+        moodle_service=SimpleNamespace(clear_all_caches=Mock()),
+        clear_detail_cache=Mock(),
+    )
+    controller._diag_breadcrumb = Mock()
+    controller._set_sync_status = Mock()
+    controller._update_footer = Mock()
+
+    asyncio.run(controller._perform_data_sync("timer"))
+
+    controller.orchestrator.fetch_activity_outcome_async.assert_not_awaited()
+    assert controller._is_loading is False
+    assert controller.refresh_btn.disabled is False
+    assert controller.error_state.visible is False
+    controller._set_sync_status.assert_not_called()

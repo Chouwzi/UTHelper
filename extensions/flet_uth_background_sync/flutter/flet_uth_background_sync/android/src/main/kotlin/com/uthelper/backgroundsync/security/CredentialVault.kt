@@ -4,9 +4,14 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -63,8 +68,7 @@ class CredentialVault internal constructor(
 
     private val credentialFile = File(context.noBackupFilesDir, "uth_ws_credential.json")
 
-    @Synchronized
-    fun write(baseUrl: String, token: String) {
+    fun write(baseUrl: String, token: String) = synchronized(VAULT_LOCK) {
         val origin = TrustedMoodleUri.normalizeTrustedOrigin(baseUrl)
             ?: throw IllegalArgumentException("Untrusted Moodle credential origin")
         require(token.isNotBlank())
@@ -79,40 +83,41 @@ class CredentialVault internal constructor(
         writeAtomically(credentialFile, payload.toString())
     }
 
-    @Synchronized
-    fun read(): MoodleCredential? = runCatching {
-        if (!credentialFile.exists()) return null
-        val payload = JSONObject(credentialFile.readText(Charsets.UTF_8))
-        val origin = TrustedMoodleUri.normalizeTrustedOrigin(payload.getString("base_url"))
-            ?: return null
-        val key = keyProvider.getExistingKey(KEY_ALIAS) ?: return null
-        val cipher = Cipher.getInstance(TRANSFORMATION).apply {
-            init(
-                Cipher.DECRYPT_MODE,
-                key,
-                GCMParameterSpec(
-                    128,
-                    Base64.decode(payload.getString("iv"), Base64.NO_WRAP),
-                ),
-            )
-        }
-        val token = cipher.doFinal(
-            Base64.decode(payload.getString("ciphertext"), Base64.NO_WRAP)
-        ).toString(Charsets.UTF_8)
-        if (token.isBlank()) return null
-        MoodleCredential(origin, token)
-    }.getOrNull()
+    fun read(): MoodleCredential? = synchronized(VAULT_LOCK) {
+        runCatching {
+            if (!credentialFile.exists()) return@synchronized null
+            val payload = JSONObject(credentialFile.readText(Charsets.UTF_8))
+            val origin = TrustedMoodleUri.normalizeTrustedOrigin(payload.getString("base_url"))
+                ?: return@synchronized null
+            val key = keyProvider.getExistingKey(KEY_ALIAS) ?: return@synchronized null
+            val cipher = Cipher.getInstance(TRANSFORMATION).apply {
+                init(
+                    Cipher.DECRYPT_MODE,
+                    key,
+                    GCMParameterSpec(
+                        128,
+                        Base64.decode(payload.getString("iv"), Base64.NO_WRAP),
+                    ),
+                )
+            }
+            val token = cipher.doFinal(
+                Base64.decode(payload.getString("ciphertext"), Base64.NO_WRAP)
+            ).toString(Charsets.UTF_8)
+            if (token.isBlank()) return@synchronized null
+            MoodleCredential(origin, token)
+        }.getOrNull()
+    }
 
-    @Synchronized
-    fun clear() {
+    fun clear() = synchronized(VAULT_LOCK) {
         credentialFile.delete()
-        File(credentialFile.parentFile, "${credentialFile.name}.tmp").delete()
+        cleanupTempFiles(credentialFile)
         runCatching { keyProvider.deleteKey(KEY_ALIAS) }
     }
 
     companion object {
         private const val KEY_ALIAS = "uthelper_moodle_ws_token_v1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private val VAULT_LOCK = Any()
     }
 }
 
@@ -124,14 +129,19 @@ class AppSecretVault internal constructor(
 
     private val secretsFile = File(context.noBackupFilesDir, "uth_app_secrets.json")
 
-    @Synchronized
-    fun readAll(): Map<String, String> {
-        if (!secretsFile.exists()) return emptyMap()
-        return try {
-            val envelope = JSONObject(secretsFile.readText(Charsets.UTF_8))
+    fun readAll(): Map<String, String> = synchronized(VAULT_LOCK) {
+        if (!secretsFile.exists()) return@synchronized emptyMap()
+        val rawText = try {
+            secretsFile.readText(Charsets.UTF_8)
+        } catch (ioError: IOException) {
+            // Never delete the vault file on transient filesystem I/O failures.
+            throw ioError
+        }
+        try {
+            val envelope = JSONObject(rawText)
             val key = keyProvider.getExistingKey(KEY_ALIAS) ?: run {
                 secretsFile.delete()
-                return emptyMap()
+                return@synchronized emptyMap()
             }
             val cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(
@@ -157,15 +167,24 @@ class AppSecretVault internal constructor(
                 }
             }
             result
-        } catch (_: Exception) {
-            // Fail closed on keystore invalidation, AEAD tag mismatch, or corrupt JSON.
+        } catch (ioError: IOException) {
+            throw ioError
+        } catch (_: GeneralSecurityException) {
+            // Permanent keystore invalidation or AEAD tag mismatch: fail closed, drop corrupt blob,
+            // and evict the potentially corrupted AndroidKeyStore key alias before next getOrCreateKey().
+            secretsFile.delete()
+            runCatching { keyProvider.deleteKey(KEY_ALIAS) }
+            emptyMap()
+        } catch (_: JSONException) {
+            secretsFile.delete()
+            emptyMap()
+        } catch (_: IllegalArgumentException) {
             secretsFile.delete()
             emptyMap()
         }
     }
 
-    @Synchronized
-    fun writeAll(secrets: Map<String, String>) {
+    fun writeAll(secrets: Map<String, String>) = synchronized(VAULT_LOCK) {
         val sanitized = linkedMapOf<String, String>()
         for ((k, v) in secrets) {
             if (k.isNotBlank() && v.isNotBlank()) {
@@ -174,7 +193,7 @@ class AppSecretVault internal constructor(
         }
         if (sanitized.isEmpty()) {
             clear()
-            return
+            return@synchronized
         }
         val plaintextJson = JSONObject()
         for ((k, v) in sanitized) {
@@ -190,25 +209,44 @@ class AppSecretVault internal constructor(
         writeAtomically(secretsFile, envelope.toString())
     }
 
-    @Synchronized
-    fun clear() {
+    fun clear() = synchronized(VAULT_LOCK) {
         secretsFile.delete()
-        File(secretsFile.parentFile, "${secretsFile.name}.tmp").delete()
+        cleanupTempFiles(secretsFile)
         runCatching { keyProvider.deleteKey(KEY_ALIAS) }
     }
 
     companion object {
         private const val KEY_ALIAS = "uthelper_app_secrets_v1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private val VAULT_LOCK = Any()
+    }
+}
+
+private fun cleanupTempFiles(target: File) {
+    val parent = target.parentFile ?: return
+    val prefix = "${target.name}."
+    parent.listFiles()?.forEach { candidate ->
+        if (candidate.isFile && candidate.name.startsWith(prefix) && candidate.name.endsWith(".tmp")) {
+            candidate.delete()
+        }
     }
 }
 
 private fun writeAtomically(target: File, content: String) {
     target.parentFile?.mkdirs()
-    val temporary = File(target.parentFile, "${target.name}.tmp")
-    temporary.writeText(content, Charsets.UTF_8)
-    check(temporary.renameTo(target) || run {
-        temporary.copyTo(target, overwrite = true)
+    val temporary = File(target.parentFile, "${target.name}.${UUID.randomUUID()}.tmp")
+    try {
+        FileOutputStream(temporary).use { stream ->
+            stream.write(content.toByteArray(Charsets.UTF_8))
+            stream.flush()
+            runCatching { stream.fd.sync() }
+        }
+        check(temporary.renameTo(target) || run {
+            temporary.copyTo(target, overwrite = true)
+            temporary.delete()
+        })
+    } catch (error: Throwable) {
         temporary.delete()
-    })
+        throw error
+    }
 }

@@ -84,6 +84,10 @@ class CourseListPane(ft.Container):
             icon_color=C.TEXT_SECONDARY,
             icon_size=20,
             tooltip="Làm mới danh sách môn học",
+            width=44,
+            height=44,
+            padding=ft.Padding.all(8),
+            size_constraints=ft.BoxConstraints(min_width=44, min_height=44),
             on_click=lambda _e: (
                 self._on_refresh_catalog() if callable(self._on_refresh_catalog) else None
             ),
@@ -111,7 +115,7 @@ class CourseListPane(ft.Container):
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             on_change=self._handle_search_change,
         )
-        self._chips_row = ft.Row(scroll=ft.ScrollMode.AUTO, spacing=6)
+        self._chips_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
         self._progress_strip = ft.ProgressBar(
             value=None, bar_height=2, color=C.ACCENT, bgcolor=C.BORDER, visible=False
         )
@@ -524,6 +528,8 @@ class CourseListPane(ft.Container):
         if isinstance(self.content, ft.Column):
             self.content.spacing = 6 if short_vp else 10
 
+        self._chips_row.wrap = not short_vp
+        self._chips_row.scroll = ft.ScrollMode.AUTO if short_vp else None
         self._chips_row.controls = self._build_semester_chips(state)
         self._progress_strip.visible = bool(state.loading_catalog)
         self._sync_status_note.visible = bool(state.loading_catalog)

@@ -23,6 +23,13 @@ void main() {
     );
     expect(settings.incognito, isFalse);
     expect(settings.saveFormData, isFalse);
+    expect(settings.useHybridComposition, isTrue);
+    expect(settings.cacheEnabled, isTrue);
+    expect(settings.cacheMode, CacheMode.LOAD_DEFAULT);
+    expect(settings.hardwareAcceleration, isTrue);
+    expect(settings.domStorageEnabled, isTrue);
+    expect(settings.databaseEnabled, isTrue);
+    expect(settings.offscreenPreRaster, isFalse);
   });
 
   test('can build sink settings with popups disabled', () {

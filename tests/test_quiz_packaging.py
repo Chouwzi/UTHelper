@@ -56,6 +56,7 @@ def test_source_checkout_imports_quiz_control_without_editable_install():
         capture_output=True,
         text=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -128,7 +129,7 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
     assert "sys.argv = ['flet', 'build', 'windows', '--yes']" in calls[0]["command"][2]
     assert calls[0]["cwd"] == project_root.resolve()
     assert calls[0]["check"] is False
-    assert calls[0]["timeout"] == 600
+    assert calls[0]["timeout"] == 1800
     assert calls[0]["env"]["PYTHONIOENCODING"] == "utf-8:replace"
     assert calls[0]["env"]["PYTHONUTF8"] == "1"
     assert calls[0]["env"]["PYTHONNOUSERSITE"] == "1"
@@ -149,6 +150,7 @@ def test_windows_quiz_client_build_is_cached_by_flutter_sources(tmp_path, monkey
         env=calls[0]["env"],
         capture_output=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert unicode_probe.returncode == 0, unicode_probe.stderr
     assert unicode_probe.stdout.decode("utf-8").strip() == "✅"
@@ -369,3 +371,153 @@ def test_flet_desktop_selects_built_quiz_client_on_windows(monkeypatch):
     selected_client = Path(args[0]).resolve()
     assert selected_client.parent == client.resolve().parent
     assert filecmp.cmp(selected_client, client, shallow=False)
+
+
+def test_windows_nuget_provisioning_verifies_sha256_and_repairs_corrupt_cache(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import io
+    import urllib.error
+
+    fake_payload = b"MZ" + b"verified-nuget-binary-payload"
+    fake_sha256 = hashlib.sha256(fake_payload).hexdigest().lower()
+    monkeypatch.setattr(quiz_client_bootstrap, "_NUGET_SHA256", fake_sha256)
+
+    # 1. Explicit invalid UTHELPER_NUGET_EXE fails closed.
+    with pytest.raises(
+        quiz_client_bootstrap.QuizClientBootstrapError,
+        match="UTHELPER_NUGET_EXE",
+    ):
+        quiz_client_bootstrap._ensure_windows_nuget_executable(
+            tmp_path, {"UTHELPER_NUGET_EXE": str(tmp_path / "missing-nuget.exe")}
+        )
+
+    # 2. Existing nuget.exe on PATH is reused without network I/O.
+    path_dir = tmp_path / "on_path"
+    path_dir.mkdir()
+    existing_nuget = path_dir / "nuget.exe"
+    existing_nuget.write_bytes(b"MZ-existing")
+    existing_nuget.chmod(0o755)
+    env_with_path = {"PATH": str(path_dir)}
+    resolved_existing = quiz_client_bootstrap._ensure_windows_nuget_executable(
+        tmp_path, env_with_path
+    )
+    assert resolved_existing == existing_nuget.resolve()
+
+    # 3. Corrupt cached nuget.exe is evicted, re-downloaded over HTTPS, and verified.
+    local_appdata = tmp_path / "local_appdata"
+    cached_target = (
+        local_appdata
+        / "UTHelper"
+        / "build-tools"
+        / "nuget"
+        / f"v{quiz_client_bootstrap._NUGET_VERSION}"
+        / "nuget.exe"
+    )
+    cached_target.parent.mkdir(parents=True)
+    cached_target.write_bytes(b"MZ-corrupt-stale-bytes")
+
+    downloads: list[str] = []
+
+    class _FakeOpener:
+        def __init__(self, data: bytes):
+            self._data = data
+
+        def open(self, request, timeout=None):
+            downloads.append(request.full_url)
+            return io.BytesIO(self._data)
+
+    monkeypatch.setattr(
+        quiz_client_bootstrap.urllib.request,
+        "build_opener",
+        lambda *_handlers: _FakeOpener(fake_payload),
+    )
+
+    clean_env = {"PATH": str(tmp_path / "empty_bin"), "LOCALAPPDATA": str(local_appdata)}
+    provisioned = quiz_client_bootstrap._ensure_windows_nuget_executable(
+        tmp_path, clean_env
+    )
+    assert provisioned == cached_target.resolve()
+    assert cached_target.read_bytes() == fake_payload
+    assert len(downloads) == 1
+    assert clean_env["PATH"].split(os.pathsep)[0] == str(cached_target.parent.resolve())
+
+    # Subsequent run hits the SHA-256-verified cache with zero network downloads.
+    clean_env_2 = {"PATH": str(tmp_path / "empty_bin"), "LOCALAPPDATA": str(local_appdata)}
+    provisioned_again = quiz_client_bootstrap._ensure_windows_nuget_executable(
+        tmp_path, clean_env_2
+    )
+    assert provisioned_again == cached_target.resolve()
+    assert len(downloads) == 1
+
+    # 4. Tampered download fails SHA-256 verification and writes nothing.
+    cached_target.unlink()
+    monkeypatch.setattr(
+        quiz_client_bootstrap.urllib.request,
+        "build_opener",
+        lambda *_handlers: _FakeOpener(b"MZ-tampered"),
+    )
+    with pytest.raises(
+        quiz_client_bootstrap.QuizClientBootstrapError,
+        match="SHA-256",
+    ):
+        quiz_client_bootstrap._ensure_windows_nuget_executable(
+            tmp_path,
+            {"PATH": str(tmp_path / "empty_bin"), "LOCALAPPDATA": str(local_appdata)},
+        )
+    assert not cached_target.exists()
+
+    # 5. HTTPS-only redirect handler blocks cleartext HTTP downgrades.
+    handler = quiz_client_bootstrap._HttpsOnlyRedirectHandler()
+    req = quiz_client_bootstrap.urllib.request.Request(
+        quiz_client_bootstrap._NUGET_DOWNLOAD_URL
+    )
+    with pytest.raises(urllib.error.URLError, match="non-HTTPS"):
+        handler.redirect_request(
+            req, None, 302, "Found", {}, "http://insecure.example/nuget.exe"
+        )
+
+
+def test_stale_cmake_nuget_notfound_cache_is_cleared_before_build(tmp_path, monkeypatch):
+    _create_minimal_quiz_project(tmp_path)
+    stale_cmake_dir = tmp_path / "build" / "flutter" / "build" / "windows" / "x64"
+    stale_cmake_dir.mkdir(parents=True)
+    stale_cache = stale_cmake_dir / "CMakeCache.txt"
+    stale_cache.write_text("NUGET:FILEPATH=NUGET-NOTFOUND\n", encoding="utf-8")
+
+    observed_stale_during_build: list[bool] = []
+
+    def build(_command, *, cwd, env, check, timeout=None):
+        observed_stale_during_build.append(
+            (cwd / "build" / "flutter" / "build" / "windows").exists()
+        )
+        (cwd / "build" / "windows").mkdir(parents=True, exist_ok=True)
+        (cwd / "build" / "windows" / "UTHelper.exe").write_bytes(b"client")
+        generated = cwd / "build" / "flutter" / "lib"
+        generated.mkdir(parents=True, exist_ok=True)
+        (generated / "flet_generated.dart").write_text(
+            "flet_uth_quiz.Extension()\n", encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(quiz_client_bootstrap, "_flet_cli_is_installed", lambda: True)
+    monkeypatch.setattr(quiz_client_bootstrap.subprocess, "run", build)
+    monkeypatch.setattr(
+        quiz_client_bootstrap.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=10**11, used=10**10, free=10**10),
+    )
+    monkeypatch.delenv("UTHELPER_SKIP_QUIZ_CLIENT_BUILD", raising=False)
+
+    quiz_client_bootstrap.ensure_windows_quiz_client(tmp_path)
+    assert observed_stale_during_build == [False]
+
+    # Clean CMakeCache without NUGET-NOTFOUND is preserved untouched.
+    clean_cmake_dir = tmp_path / "build" / "flutter" / "build" / "windows" / "x64"
+    clean_cmake_dir.mkdir(parents=True)
+    (clean_cmake_dir / "CMakeCache.txt").write_text(
+        r"NUGET:FILEPATH=C:/Tools/nuget.exe" + "\n", encoding="utf-8"
+    )
+    assert quiz_client_bootstrap._clear_stale_windows_cmake_nuget_cache(tmp_path) is False
+    assert (clean_cmake_dir / "CMakeCache.txt").is_file()

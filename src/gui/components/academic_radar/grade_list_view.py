@@ -23,9 +23,11 @@ class AcademicGradeListView(ft.Column):
         except Exception:
             pass
 
-    def update_theme(self) -> None:
+    def update_theme(self, *, update: bool = True) -> None:
         """Rebuild course grade rows using the active semantic palette."""
         self._build_list()
+        if not update:
+            return
         try:
             self.update()
         except Exception:

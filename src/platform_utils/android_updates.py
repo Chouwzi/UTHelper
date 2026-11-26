@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import CancelledError, TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 import threading
@@ -17,6 +18,7 @@ import time
 from packaging.version import InvalidVersion, Version
 
 from core.update_checker import DownloadCancelled, PackageIntegrityError
+from core.update_manifest import manual_install_reason
 from core.update_models import (
     LaunchResult,
     ReleasePackage,
@@ -25,8 +27,93 @@ from core.update_models import (
 )
 
 
-PACKAGE_ID = "com.uthelper.uthelper"
+PACKAGE_ID = "io.github.chouwzi.uthelper"
 logger = logging.getLogger(__name__)
+
+
+class AndroidPackageIdentityMismatchError(PackageIntegrityError):
+    """Raised before download/install when an Android package ID differs from installed app."""
+
+    def __init__(
+        self,
+        *,
+        expected_package_id: str,
+        actual_package_id: str,
+        release_url: str | None = None,
+    ) -> None:
+        self.expected_package_id = expected_package_id
+        self.actual_package_id = actual_package_id
+        self.release_url = release_url
+        self.manual_reason = (
+            f"Android package ID migration required: release targets {actual_package_id} "
+            f"instead of installed {expected_package_id}; download the APK manually from "
+            "GitHub Releases."
+        )
+        super().__init__(f"package_mismatch: {self.manual_reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidManualDownloadFallback:
+    """Manual GitHub Releases fallback descriptor for incompatible Android package IDs."""
+
+    manual_download_required: bool
+    reason: str
+    release_url: str | None
+    expected_package_id: str
+    actual_package_id: str
+
+
+def _resolve_expected_package_id(package_id: str | None) -> str:
+    if isinstance(package_id, str) and package_id.strip():
+        return package_id.strip()
+    return PACKAGE_ID
+
+
+def _is_package_id_mismatch(status: str, reason: str) -> bool:
+    normalized_status = str(status or "").strip().lower()
+    normalized_reason = str(reason or "").strip().lower()
+    return (
+        normalized_status == "package_mismatch"
+        or normalized_reason == "package_mismatch"
+        or "package_mismatch" in normalized_reason
+        or "package id mismatch" in normalized_reason
+        or "unexpected package identity" in normalized_reason
+    )
+
+
+def resolve_android_manual_fallback(
+    candidate: UpdateCandidate,
+    *,
+    expected_package_id: str | None = None,
+    install_result: LaunchResult | None = None,
+) -> AndroidManualDownloadFallback | None:
+    """Return manual GitHub Releases fallback metadata on Android package ID mismatch."""
+    if candidate.package.platform != "android":
+        return None
+    expected = _resolve_expected_package_id(expected_package_id)
+    actual = str(candidate.package.signer_identity or "").strip()
+    pre_mismatch = bool(actual and actual != expected)
+    post_mismatch = bool(
+        install_result is not None
+        and not install_result.acknowledged
+        and _is_package_id_mismatch(install_result.status, install_result.reason)
+    )
+    if not pre_mismatch and not post_mismatch:
+        return None
+    reason = manual_install_reason(
+        candidate,
+        expected_signer_identity=expected,
+    ) or (
+        "Android package ID mismatch detected by installer; download the APK "
+        "manually from GitHub Releases."
+    )
+    return AndroidManualDownloadFallback(
+        manual_download_required=True,
+        reason=reason,
+        release_url=candidate.manifest.release_notes_url,
+        expected_package_id=expected,
+        actual_package_id=actual or "unknown",
+    )
 
 try:
     from flet import FletException as _FletException
@@ -72,15 +159,34 @@ def android_release_build_number(version: str) -> int:
 class NativeUpdateClient:
     """Wait for a native response, never treating queued work as success."""
 
-    def __init__(self, bridge, task_runner, release_version_provider):
+    def __init__(
+        self,
+        bridge,
+        task_runner,
+        release_version_provider,
+        *,
+        package_id: str | None = None,
+    ):
         self.bridge = bridge
         self.task_runner = task_runner
         self.release_version_provider = release_version_provider
+        self._package_id = package_id
         self.stopped = threading.Event()
+
+    @property
+    def expected_package_id(self) -> str:
+        return _resolve_expected_package_id(self._package_id)
 
     def identity(self, package: ReleasePackage) -> tuple:
         if package.platform != "android" or package.package_type != "apk" or self.bridge is None or not self.bridge.available:
             raise RuntimeError("Android update service is unavailable")
+        expected_package_id = self.expected_package_id
+        actual_signer = str(package.signer_identity or "").strip()
+        if actual_signer and actual_signer != expected_package_id:
+            raise AndroidPackageIdentityMismatchError(
+                expected_package_id=expected_package_id,
+                actual_package_id=actual_signer,
+            )
         version = self.release_version_provider()
         if not version:
             raise RuntimeError("Android update release version is unavailable")
@@ -88,7 +194,7 @@ class NativeUpdateClient:
             package.url,
             package.sha256,
             package.size,
-            PACKAGE_ID,
+            expected_package_id,
             android_release_build_number(version),
             package.certificate_fingerprint,
         )
@@ -134,6 +240,9 @@ class AndroidPackageVerifier:
     certificate validation are enforced natively in ApkUpdateInstaller.
     """
 
+    def __init__(self, *, package_id: str | None = None):
+        self._package_id = package_id
+
     def verify(
         self,
         path: Path,
@@ -141,6 +250,14 @@ class AndroidPackageVerifier:
     ) -> VerificationResult:
         candidate_path = Path(path)
         package = candidate.package
+        expected_package_id = _resolve_expected_package_id(self._package_id)
+        actual_signer = str(package.signer_identity or "").strip()
+        if (
+            package.platform == "android"
+            and actual_signer
+            and actual_signer != expected_package_id
+        ):
+            return VerificationResult(False, "package_mismatch")
         try:
             if (
                 package.platform != "android"
@@ -163,8 +280,20 @@ class AndroidPackageVerifier:
 class AndroidPackageLauncher:
     supports_cached_package_retry = True
 
-    def __init__(self, bridge, task_runner, release_version_provider):
-        self._native = NativeUpdateClient(bridge, task_runner, release_version_provider)
+    def __init__(
+        self,
+        bridge,
+        task_runner,
+        release_version_provider,
+        *,
+        package_id: str | None = None,
+    ):
+        self._native = NativeUpdateClient(
+            bridge,
+            task_runner,
+            release_version_provider,
+            package_id=package_id,
+        )
 
     def launch(self, path: Path, package: ReleasePackage) -> LaunchResult:
         try:
@@ -182,6 +311,14 @@ class AndroidPackageLauncher:
             status = result["status"]
             reason = result.get("reason") or status
             if status != "installer_opened":
+                if _is_package_id_mismatch(status, reason):
+                    logger.warning(
+                        "Android update handoff rejected package ID mismatch: status=%s stage=%s reason=%s",
+                        status,
+                        result.get("stage", "unknown"),
+                        reason,
+                    )
+                    return LaunchResult(False, "package_mismatch", status="failed")
                 logger.warning(
                     "Android update handoff: status=%s stage=%s reason=%s",
                     status,
@@ -189,6 +326,13 @@ class AndroidPackageLauncher:
                     reason,
                 )
             return LaunchResult(status == "installer_opened", reason, status=status)
+        except AndroidPackageIdentityMismatchError as exc:
+            logger.warning(
+                "Android update blocked pre-launch package ID mismatch: expected=%s actual=%s",
+                exc.expected_package_id,
+                exc.actual_package_id,
+            )
+            return LaunchResult(False, "package_mismatch", status="failed")
         except _BRIDGE_EXCEPTIONS as exc:
             logger.warning("Android update bridge failed: %s", type(exc).__name__)
             return LaunchResult(False, "Android installer service failed", status="bridge_failed")
@@ -220,12 +364,18 @@ class AndroidPackageDownloader:
         *,
         observation_timeout_seconds: float = 1800.0,
         poll_interval_seconds: float = 0.5,
+        package_id: str | None = None,
     ):
         if not 0 < observation_timeout_seconds <= 1800:
             raise ValueError("Android download observation must be within 30 minutes")
         if not 0 < poll_interval_seconds <= 5:
             raise ValueError("Android download polling interval is invalid")
-        self._native = NativeUpdateClient(bridge, task_runner, release_version_provider)
+        self._native = NativeUpdateClient(
+            bridge,
+            task_runner,
+            release_version_provider,
+            package_id=package_id,
+        )
         self._detached = threading.Event()
         self._timeout = observation_timeout_seconds
         self._poll_interval = poll_interval_seconds
@@ -238,7 +388,10 @@ class AndroidPackageDownloader:
         if not self._native.release_version_provider():
             # No release is selected yet, so there is no OS transfer to resume.
             return False
-        identity = self._native.identity(package)
+        try:
+            identity = self._native.identity(package)
+        except AndroidPackageIdentityMismatchError:
+            return False
         result = self._native.call(self._native.bridge.get_update_download_status, *identity)
         return result["status"] in {"pending", "running", "paused", "completed"}
 

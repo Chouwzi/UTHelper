@@ -357,6 +357,7 @@ try {
             "jszip.min.js",
             "pptx_host.html",
             "pptx_host.js",
+            "pptx_worker.js",
             "pptx_engine.js",
             "viewer.css",
             "viewer_common.js"
@@ -368,6 +369,29 @@ try {
             }
             if ((Get-Item -LiteralPath $assetPath).Length -le 0) {
                 throw "MSIX verification failed: office_viewer asset is empty: $assetName"
+            }
+        }
+    }
+
+    $pdfViewerDir = Join-Path $inspectRoot "app\assets\pdf_viewer"
+    if ($RequireOfficeViewer -or (Test-Path -LiteralPath $pdfViewerDir -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $pdfViewerDir -PathType Container)) {
+            throw "MSIX verification failed: app\assets\pdf_viewer directory is missing"
+        }
+        $requiredPdfViewerAssets = @(
+            "pdf_host.html",
+            "pdf_host.js",
+            "pdf_viewer.css",
+            "pdf.min.mjs",
+            "pdf.worker.min.mjs"
+        )
+        foreach ($assetName in $requiredPdfViewerAssets) {
+            $assetPath = Join-Path $pdfViewerDir $assetName
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+                throw "MSIX verification failed: required pdf_viewer asset is missing: $assetName"
+            }
+            if ((Get-Item -LiteralPath $assetPath).Length -le 0) {
+                throw "MSIX verification failed: pdf_viewer asset is empty: $assetName"
             }
         }
     }

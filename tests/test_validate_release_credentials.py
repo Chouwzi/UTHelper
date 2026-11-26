@@ -45,6 +45,7 @@ def _run(overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess
         text=True,
         timeout=5,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
 

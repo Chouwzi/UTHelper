@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import stat
 import struct
+import tomllib
 import zipfile
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from scripts.package_unsigned_ipa import (
     IpaError,
     _REQUIRED_OFFICE_VIEWER_ASSETS,
+    _REQUIRED_PDF_VIEWER_ASSETS,
     inspect_device_app,
     inspect_ipa,
     verify_ios_app_office_viewer_assets,
@@ -20,9 +22,26 @@ from scripts.package_unsigned_ipa import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
 VERSION = "2.2.0"
 BUILD = "2002000"
-BUNDLE_ID = "com.uthelper.UTHelper"
+BUNDLE_ID = "io.github.chouwzi.uthelper"
+
+
+def test_ios_bundle_id_matches_pyproject_and_release_verifiers():
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    verify_sh = (ROOT / "scripts" / "verify_ipa_release.sh").read_text(encoding="utf-8")
+    release_yml = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    benchmark_yml = (ROOT / ".github" / "workflows" / "package-benchmark.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert BUNDLE_ID == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert '[[ "$BUNDLE_ID" == "io.github.chouwzi.uthelper" ]]' in verify_sh
+    assert "--bundle-id io.github.chouwzi.uthelper" in release_yml
+    assert "--bundle-id io.github.chouwzi.uthelper" in benchmark_yml
 
 
 def _make_app(
@@ -257,6 +276,8 @@ def test_inspector_require_office_viewer_accepts_nested_app_zip_and_rejects_miss
     with zipfile.ZipFile(app_zip, "w") as nested:
         for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
             nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in _REQUIRED_PDF_VIEWER_ASSETS:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
 
     assert verify_ios_app_office_viewer_assets(app, require=True) is True
     ipa = tmp_path / "UTHelper.ipa"
@@ -273,7 +294,17 @@ def test_inspector_require_office_viewer_accepts_nested_app_zip_and_rejects_miss
     with zipfile.ZipFile(app_zip, "w") as nested:
         for asset in _REQUIRED_OFFICE_VIEWER_ASSETS[:-1]:
             nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in _REQUIRED_PDF_VIEWER_ASSETS:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
     with pytest.raises(IpaError, match="missing office_viewer asset"):
+        verify_ios_app_office_viewer_assets(app, require=True)
+
+    with zipfile.ZipFile(app_zip, "w") as nested:
+        for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
+            nested.writestr(f"assets/office_viewer/{asset}", f"/* {asset} */")
+        for asset in _REQUIRED_PDF_VIEWER_ASSETS[:-1]:
+            nested.writestr(f"assets/pdf_viewer/{asset}", f"/* {asset} */")
+    with pytest.raises(IpaError, match="missing pdf_viewer asset"):
         verify_ios_app_office_viewer_assets(app, require=True)
 
 

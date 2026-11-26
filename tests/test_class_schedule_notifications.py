@@ -212,8 +212,8 @@ def test_look_ahead_window_arms_two_weeks_and_skips_beyond():
     outside = _session(
         now,
         session_id="session-outside",
-        start_at=now + timedelta(days=14, minutes=1),
-        end_at=now + timedelta(days=14, hours=3),
+        start_at=now + timedelta(days=15, minutes=1),
+        end_at=now + timedelta(days=15, hours=3),
     )
     reminders = build_class_schedule_reminders(
         [outside, inside, boundary], now=now, enabled=True, lead_hours=(1,)
@@ -222,3 +222,20 @@ def test_look_ahead_window_arms_two_weeks_and_skips_beyond():
         "session-inside",
         "session-boundary",
     ]
+
+
+def test_look_ahead_window_includes_late_classes_on_day_fourteen():
+    now = datetime(2026, 11, 16, 8, 0)
+    late_class = _session(
+        now,
+        session_id="late-day-fourteen",
+        start_at=datetime(2026, 11, 30, 23, 30),
+        end_at=datetime(2026, 12, 1, 1, 30),
+    )
+
+    reminders = build_class_schedule_reminders(
+        [late_class], now=now, enabled=True, lead_hours=(1,)
+    )
+
+    assert len(reminders) == 1
+    assert reminders[0].session.session_id == "late-day-fourteen"

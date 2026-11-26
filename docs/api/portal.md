@@ -314,6 +314,8 @@ vẫn nhận thông báo đi học. Cửa sổ có tính nguyên tử: một l�
 toàn bộ lịch đã đặt thay vì thay bằng cửa sổ nửa vời làm mất cảnh báo của ngày lỗi; lỗi xác thực
 vẫn dọn toàn bộ lịch như trước.
 
+The forward reminder window is cached per student account for three hours, so reopening the app does not repeat all 14 Portal requests. Fetching stops as soon as the active account changes. Day 14 remains eligible through 23:59:59. On iOS, class reminders are capped at 24 pending requests, leaving room within the shared 64-request limit for assignment deadlines.
+
 ### `GET /api/v1/lichhoc/tuan?date={YYYY-MM-DD}`
 
 **Description:** Lịch tuần; thêm `ngayBatDauHoc` và `giangVien` (có thể null).

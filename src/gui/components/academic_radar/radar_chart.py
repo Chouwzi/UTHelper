@@ -42,15 +42,15 @@ class AcademicRadarChart(ft.Container):
         self.previous_profile = previous_profile
         self.is_comparing = is_comparing
         self.on_metric_tap = on_metric_tap
-        chart_width = max(240.0, float(width))
+        chart_width = max(220.0, float(width))
         scale = chart_width / 340.0
-        chart_height = float(height) if height is not None else round(290.0 * scale, 1)
+        chart_height = float(height) if height is not None else round(316.0 * scale, 1)
         self._scale = scale
         self._chart_width = chart_width
         self._chart_height = chart_height
         self._center_x = chart_width / 2.0
-        self._center_y = chart_height / 2.0 - 2.0 * scale
-        self._radius = 86.0 * scale
+        self._center_y = chart_height / 2.0
+        self._radius = 84.0 * scale
 
         self.width = chart_width
         self.height = chart_height
@@ -225,7 +225,8 @@ class AcademicRadarChart(ft.Container):
         overlay_controls: list[ft.Control] = [canvas_control]
 
         scale = getattr(self, "_scale", 1.0)
-        box_w = round(66.0 * max(0.85, scale), 1)
+        box_w = round(78.0 * max(0.86, scale), 1)
+        box_h_guard = round(58.0 * max(0.86, scale), 1)
         for i, metric in enumerate(self.profile.ordered_metrics):
             # Compact radial distance bringing labels close to nodes without clipping
             label_r = 112.0 if i in (0, 3) else 114.0
@@ -236,19 +237,19 @@ class AcademicRadarChart(ft.Container):
 
             if i == 0:  # Top (12h) - spaced comfortably above top node
                 box_left = label_x - (box_w / 2.0)
-                box_top = label_y - 34 * scale
+                box_top = label_y - round(48.0 * max(0.86, scale), 1)
             elif i == 3:  # Bottom (6h) - spaced comfortably below bottom node
                 box_left = label_x - (box_w / 2.0)
-                box_top = label_y - 2 * scale
+                box_top = label_y - 2.0 * scale
             elif i in (1, 2):  # Right side (2h, 4h)
-                box_left = label_x - 14 * scale
-                box_top = label_y - 18 * scale
+                box_left = label_x - 10.0 * scale
+                box_top = label_y - 20.0 * scale
             else:  # Left side (8h, 10h)
-                box_left = label_x - (box_w - 10 * scale)
-                box_top = label_y - 18 * scale
+                box_left = label_x - (box_w - 10.0 * scale)
+                box_top = label_y - 20.0 * scale
 
             box_left = max(0.0, min(self._chart_width - box_w, box_left))
-            box_top = max(0.0, min(self._chart_height - 42.0, box_top))
+            box_top = max(0.0, min(self._chart_height - box_h_guard, box_top))
 
             # Pill button for label + score with smooth circular hover shape
             node_btn = ft.Container(
@@ -260,6 +261,7 @@ class AcademicRadarChart(ft.Container):
                             weight=ft.FontWeight.W_700,
                             color=C.TEXT_PRIMARY,
                             text_align=ft.TextAlign.CENTER,
+                            max_lines=2,
                         ),
                         ft.Container(
                             content=ft.Text(

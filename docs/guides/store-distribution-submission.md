@@ -7,17 +7,41 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
 
 | Channel ID | Platform & Artifact | Distribution Track | Update Mechanism | Self-Update Code/Permissions |
 | --- | --- | --- | --- | --- |
-| `chplay` | Android `.aab` (universal, 16 KB aligned) | Google Play Store (CH Play) | Google Play-managed (`market://details?id=com.uthelper.uthelper` + HTTPS fallback) | Stripped completely (manifest, Kotlin, DEX, Python) |
-| `apk_lts` | Android `.apk` (`universal` + `arm64-v8a`) | GitHub Releases (LTS) | Signed GitHub Releases (`DownloadManager` + `ApkUpdateInstaller`, Schema 3 `sideload`) | Retained |
+| `chplay` | Android `.aab` (`io.github.chouwzi.uthelper`, universal, 16 KB aligned) | Google Play Store (CH Play) | Google Play-managed (`market://details?id=io.github.chouwzi.uthelper` + HTTPS fallback) | Stripped completely (manifest, Kotlin, DEX, Python) |
+| `apk_lts` | Android `.apk` (`io.github.chouwzi.uthelper`, `universal` + `arm64-v8a`) | GitHub Releases (LTS) | Signed GitHub Releases (`DownloadManager` + `ApkUpdateInstaller`, Schema 3 `sideload`) | Retained |
 | `msstore` | Windows `.msix` (`x64`) | Microsoft Store | Microsoft Store-managed (`ms-windows-store://pdp/?ProductId=...`) | Disabled (zero GitHub polling or external installers) |
 | `exe_lts` | Windows `.msi` + Burn `.exe` (`x64`) | GitHub Releases (LTS) | Signed GitHub Releases (Authenticode-pinned `WindowsPackageVerifier` + `WindowsPackageLauncher`) | Retained |
-| `ios_sideload` | iOS unsigned `.ipa` (`arm64`) | GitHub Releases (LTS) | Manual user re-signing (Sideloadly / AltStore) | Manual release page link only |
+| `ios_sideload` | iOS unsigned `.ipa` (`io.github.chouwzi.uthelper`, `arm64`) | GitHub Releases (LTS) | Manual user re-signing (Sideloadly / AltStore) | Manual release page link only |
 
-> **Cross-channel migration note**: Store builds and GitHub LTS builds use
-> separate signing certificates (Play App Signing vs GitHub keystore) and
-> Windows packaging containers (MSIX container vs Program Files MSI). Users
-> moving between GitHub LTS and a Store channel must uninstall/reinstall rather
-> than upgrading in place across tracks.
+> **Cross-channel, legacy `apk_lts`, and iOS sideload migration notes**:
+> - Store builds and GitHub LTS builds use separate signing certificates (Play
+>   App Signing vs GitHub keystore) and Windows packaging containers (MSIX
+>   container vs Program Files MSI). Users moving between GitHub LTS and a Store
+>   channel must uninstall/reinstall rather than upgrading in place across
+>   tracks.
+> - **One-time reinstall for legacy `v2.2.8`–`v2.5.0` Android `apk_lts` users
+>   (`v2.5.1` Release Notes requirement)**: Starting with `v2.5.1`, Android
+>   (`chplay` and `apk_lts`) and iOS (`ipa`) unify on
+>   `io.github.chouwzi.uthelper`. Because shipped `v2.2.8`–`v2.5.0` Android
+>   `apk_lts` builds (`com.uthelper.uthelper`) reject a new `applicationId`
+>   after download with `"Android đã từ chối gói cập nhật"`, `v2.5.1` Release
+>   Notes must explicitly instruct those users to perform a one-time manual APK
+>   install of the `io.github.chouwzi.uthelper` build from GitHub Releases, sign
+>   in again, and uninstall the old `com.uthelper.uthelper` app. Starting in
+>   `v2.5.1`, the Android updater validates `package.signer_identity` before
+>   downloading and falls back to manual GitHub Releases download on any future
+>   package ID mismatch; subsequent `apk_lts` releases under
+>   `io.github.chouwzi.uthelper` update in place normally.
+> - **One-time reinstall for legacy `v2.2.8`–`v2.5.0` iOS sideload users
+>   (`Sideloadly` / `AltStore`)**: Because `v2.5.1` changes `CFBundleIdentifier`
+>   from `com.uthelper.UTHelper` to `io.github.chouwzi.uthelper` and iOS scopes
+>   the app sandbox and Keychain (`com.uthelper.app_secrets`, without an explicit
+>   `kSecAttrAccessGroup`) to `CFBundleIdentifier`, iOS sideload users must
+>   **uninstall the old `com.uthelper.UTHelper` app first** before installing
+>   `UTHelper-2.5.1.ipa` via Sideloadly or AltStore. Skipping uninstall leaves a
+>   separate Keychain partition, creates a duplicate app icon, and can hit
+>   Apple's 3-app active signing cap on free Apple IDs. After reinstalling, sign
+>   in again once.
 
 ---
 
@@ -32,7 +56,7 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
    - Uses `--no-android-legacy-packaging` (`extractNativeLibs="false"`) so
      uncompressed native `.so` libraries meet Google Play's **16 KB memory page
      size** mandate for Android 15+ (`targetSdk >= 35`, ready for API 36).
-   - Stages `distribution-channel.json` (`{"schema_version": 1, "channel": "chplay", "android_package_id": "com.uthelper.uthelper"}`)
+   - Stages `distribution-channel.json` (`{"schema_version": 1, "channel": "chplay", "android_package_id": "io.github.chouwzi.uthelper"}`)
      only during the build and cleans up `src/assets/distribution-channel.json`
      in `finally`.
 2. **Verify manifest, permissions, DEX & 16 KB ELF alignment**:
@@ -42,7 +66,7 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
      --channel chplay `
      --version <version> `
      --build-number <build_number> `
-     --package-id com.uthelper.uthelper `
+     --package-id io.github.chouwzi.uthelper `
      --certificate-sha256 <upload_cert_sha256> `
      --commit-sha <git_sha> `
      --workflow-run-id <run_id> `
@@ -71,8 +95,8 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
      in `AlarmScheduler.kt` when denied on Android 14+.
    - `AppController` does not create `UpdateCoordinator` or call GitHub APIs.
    - Settings → System hides the GitHub auto-update toggle/button/debug force
-     check and displays Google Play update info with `market://details?id=com.uthelper.uthelper`
-     (falling back to `https://play.google.com/store/apps/details?id=com.uthelper.uthelper`).
+     check and displays Google Play update info with `market://details?id=io.github.chouwzi.uthelper`
+     (falling back to `https://play.google.com/store/apps/details?id=io.github.chouwzi.uthelper`).
 
 ### Play Console Submission Steps
 
@@ -88,6 +112,34 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
   - Personal Play Console accounts created on or after Nov 13, 2023 must run a
     **Closed Testing** track with at least **12 opted-in testers for 14
     consecutive days** before applying for Production access.
+
+### Play Console `App access` (Reviewer Demo Credentials)
+
+Because UTHelper requires authentication before showing coursework, schedules,
+and grades, Google Play Console **Policy → App content → App access** must
+declare **"All or some functionality in my app is restricted"** and provide the
+built-in offline Reviewer Demo credentials below:
+
+- **Instruction name**: `Reviewer Demo Account (All 5 Tabs)`
+- **Username (`Mã số sinh viên (MSSV)`)**: `uthelper_demo`
+- **Password (`Mật khẩu`)**: `UTH-Review-2026!`
+- **2-step verification / OTP / VPN / location restrictions**: None required.
+- **Any other information required to access your app** (copy-paste verbatim in
+  English):
+
+```text
+UTHelper is an independent student study companion for Ho Chi Minh City University of Transport (UTH) students. Real accounts require a university-issued student ID (MSSV). For Google Play review and automated testing, please sign in with the built-in Reviewer Demo account above:
+
+1. Launch UTHelper. The app opens directly to the "Đăng nhập UTH" sign-in dialog (dismiss any standard Android OS notification permission prompt if shown).
+2. In the "Đăng nhập UTH" sign-in dialog, enter Username `uthelper_demo` in the first field ("Mã số sinh viên (MSSV)") and Password `UTH-Review-2026!` in the second field ("Mật khẩu"), then tap "Đăng nhập" (Sign in).
+3. All 5 primary navigation tabs unlock immediately using realistic, date-relative sample university data through the exact same UI, filtering, search, document reader, and GPA calculation code paths as a live student account:
+   - Tab 1 ("Tổng quan"): Upcoming assignments, quizzes, attendance, detail sheets, and today's class schedule.
+   - Tab 2 ("Môn học"): Enrolled courses, weekly sections, quiz review breakdown, and built-in offline PDF / Markdown / ZIP lecture viewers.
+   - Tab 3 ("Lịch"): Monthly assignment calendar and interactive weekly class timetable with session details and course syllabi.
+   - Tab 4 ("Bảng điểm"): Multi-semester transcript, 6-axis Academic Radar chart, credit progress, and target GPA planner.
+   - Tab 5 ("Cài đặt"): Theme presets, notification preferences, privacy controls, and account switching.
+4. Note: File submission mutations and live external `*.ut.edu.vn` LMS WebView/Quiz launches are intentionally read-only in Demo Mode and display a clear informational notice so reviewers and automated crawlers never modify live university records. No 2FA, VPN, or geographic IP allowlisting is required.
+```
 
 ### Data Safety Flow Review
 

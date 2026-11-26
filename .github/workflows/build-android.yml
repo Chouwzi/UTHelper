@@ -18,8 +18,33 @@ on:
       - 'src/core/distribution.py'
       - 'src/platform_utils/background_sync.py'
       - 'src/assets/office_viewer/**'
+      - 'src/assets/pdf_viewer/**'
   workflow_dispatch:
     inputs:
+      apk_arch:
+        description: APK architecture for apk_lts manual runs (arm64-v8a ~40 MB for modern phones; universal bundles 3 ABIs)
+        required: false
+        type: choice
+        default: arm64-v8a
+        options:
+          - arm64-v8a
+          - universal
+      apk_signing:
+        description: APK mode for apk_lts manual runs (debug-test is installable for QA; unsigned-diagnostic intentionally breaks signature)
+        required: false
+        type: choice
+        default: debug-test
+        options:
+          - debug-test
+          - unsigned-diagnostic
+      apk_namespace:
+        description: Package ID for debug-test APK (isolated=com.uthelper.qa installs side-by-side with Release; original=io.github.chouwzi.uthelper)
+        required: false
+        type: choice
+        default: isolated
+        options:
+          - isolated
+          - original
       sign_upload:
         description: Sign CH Play AAB with Play Upload Keystore (requires PLAY_UPLOAD_KEYSTORE_* secrets/vars)
         required: false
@@ -78,46 +103,51 @@ jobs:
           CHANNEL: ${{ matrix.channel }}
           BUILD_TARGET: ${{ matrix.target }}
           LEGACY_FLAG: ${{ matrix.legacy_flag }}
-          SIGN_UPLOAD_INPUT: ${{ inputs.sign_upload }}
-          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
-          PLAY_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
-          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
-          PLAY_UPLOAD_KEY_ALIAS: ${{ vars.PLAY_UPLOAD_KEY_ALIAS }}
-          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
+          APK_ARCH_INPUT: ${{ inputs.apk_arch }}
+          APK_SIGNING_INPUT: ${{ inputs.apk_signing }}
+          APK_NAMESPACE_INPUT: ${{ inputs.apk_namespace }}
         run: |
           set -euo pipefail
-          KEYSTORE=""
           cleanup() {
             rm -f -- src/assets/distribution-channel.json
-            if [ -n "$KEYSTORE" ]; then
-              rm -f -- "$KEYSTORE"
-            fi
           }
           trap cleanup EXIT
 
-          SIGN_UPLOAD="false"
-          if [ "$CHANNEL" = "chplay" ] && [ "${SIGN_UPLOAD_INPUT:-false}" = "true" ]; then
-            SIGN_UPLOAD="true"
-          elif [ "$CHANNEL" = "chplay" ] && [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ] && [ -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}" ]; then
-            SIGN_UPLOAD="true"
-          fi
+          APK_ARCH="universal"
+          APK_INSTALLABLE_TEST="false"
+          APK_NAMESPACE="original"
+          APK_PACKAGE_ID="io.github.chouwzi.uthelper"
 
-          if [ "$SIGN_UPLOAD" = "true" ]; then
-            test -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}"
-            test -n "${PLAY_UPLOAD_KEYSTORE_PASSWORD:-}"
-            test -n "${PLAY_UPLOAD_KEY_PASSWORD:-}"
-            test -n "${PLAY_UPLOAD_KEY_ALIAS:-}"
-            test -n "${PLAY_UPLOAD_CERT_SHA256:-}"
-            umask 077
-            KEYSTORE="$RUNNER_TEMP/play-upload.jks"
-            printf '%s' "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
-            unset PLAY_UPLOAD_KEYSTORE_BASE64
-            export FLET_ANDROID_SIGNING_KEY_STORE="$KEYSTORE"
-            export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$PLAY_UPLOAD_KEYSTORE_PASSWORD"
-            export FLET_ANDROID_SIGNING_KEY_PASSWORD="$PLAY_UPLOAD_KEY_PASSWORD"
-            export FLET_ANDROID_SIGNING_KEY_ALIAS="$PLAY_UPLOAD_KEY_ALIAS"
+          if [ "$CHANNEL" = "apk_lts" ] && [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ]; then
+            case "${APK_ARCH_INPUT:-arm64-v8a}" in
+              arm64-v8a|universal) APK_ARCH="${APK_ARCH_INPUT:-arm64-v8a}" ;;
+              *) echo "Unsupported apk_arch: ${APK_ARCH_INPUT:-}"; exit 1 ;;
+            esac
+            case "${APK_SIGNING_INPUT:-debug-test}" in
+              debug-test) APK_INSTALLABLE_TEST="true" ;;
+              unsigned-diagnostic) APK_INSTALLABLE_TEST="false" ;;
+              *) echo "Unsupported apk_signing: ${APK_SIGNING_INPUT:-}"; exit 1 ;;
+            esac
+            if [ "$APK_INSTALLABLE_TEST" = "true" ]; then
+              case "${APK_NAMESPACE_INPUT:-isolated}" in
+                isolated)
+                  APK_NAMESPACE="isolated"
+                  APK_PACKAGE_ID="com.uthelper.qa"
+                  ;;
+                original)
+                  APK_NAMESPACE="original"
+                  APK_PACKAGE_ID="io.github.chouwzi.uthelper"
+                  ;;
+                *) echo "Unsupported apk_namespace: ${APK_NAMESPACE_INPUT:-}"; exit 1 ;;
+              esac
+            fi
           fi
-          echo "CHPLAY_SIGNED_UPLOAD=$SIGN_UPLOAD" >> "$GITHUB_ENV"
+          {
+            echo "APK_ARCH=$APK_ARCH"
+            echo "APK_INSTALLABLE_TEST=$APK_INSTALLABLE_TEST"
+            echo "APK_NAMESPACE=$APK_NAMESPACE"
+            echo "APK_PACKAGE_ID=$APK_PACKAGE_ID"
+          } >> "$GITHUB_ENV"
 
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
@@ -126,7 +156,14 @@ jobs:
           export ORG_GRADLE_PROJECT_uthDistributionChannel="$CHANNEL"
 
           EXTRA_ARGS=("$LEGACY_FLAG")
-          if [ "$CHANNEL" = "chplay" ]; then
+          if [ "$CHANNEL" = "apk_lts" ]; then
+            if [ "$APK_ARCH" = "arm64-v8a" ]; then
+              EXTRA_ARGS+=(--arch arm64-v8a)
+            fi
+            if [ "$APK_PACKAGE_ID" != "io.github.chouwzi.uthelper" ]; then
+              EXTRA_ARGS+=(--bundle-id "$APK_PACKAGE_ID")
+            fi
+          elif [ "$CHANNEL" = "chplay" ]; then
             EXTRA_ARGS+=(
               --android-permissions android.permission.REQUEST_INSTALL_PACKAGES=false
               --android-permissions android.permission.FOREGROUND_SERVICE=false
@@ -139,13 +176,13 @@ jobs:
           # extension patcher and shared channel preparation then configure SDK 36,
           # manifest removals, and 16 KB packaging before the final build pass.
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
           flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel "$CHANNEL" --target-sdk 36
 
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
+          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
           flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose
 
       - name: Test native update and background sync contracts
@@ -155,10 +192,26 @@ jobs:
         run: |
           # Test the source library independently: configuring the full app here
           # would require Flet's transient serious_python packaging environment.
+          set -euo pipefail
           UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
-          ./gradlew -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
+          run_gradle_with_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if ./gradlew "$@" \
+                -Dorg.gradle.internal.http.retry.max.attempts=5 \
+                -Dorg.gradle.internal.http.retry.initial.backoff=2000; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "Gradle invocation failed on attempt $attempt; retrying in $((attempt * 10))s..." >&2
+                sleep "$((attempt * 10))"
+              fi
+            done
+            return 1
+          }
+          run_gradle_with_retry -p ../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android \
             testDebugUnitTest -Pandroid.useAndroidX=true -PuthDistributionChannel=apk_lts \
             -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
 
@@ -167,11 +220,27 @@ jobs:
         timeout-minutes: 15
         working-directory: build/flutter/android
         run: |
+          set -euo pipefail
           UTH_FLUTTER_SDK=$(python -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path("local.properties").read_text().splitlines() if line.startswith("flutter.sdk=")))')
           UTH_EMBEDDING_JAR=$(python -c 'import sys; from pathlib import Path; print(next((Path(sys.argv[1]) / "bin/cache/artifacts/engine").glob("android-*/flutter.jar")))' "$UTH_FLUTTER_SDK")
           test -f "$UTH_EMBEDDING_JAR"
           PLUGIN_DIR="../../../extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
-          ./gradlew -p "$PLUGIN_DIR" \
+          run_gradle_with_retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if ./gradlew "$@" \
+                -Dorg.gradle.internal.http.retry.max.attempts=5 \
+                -Dorg.gradle.internal.http.retry.initial.backoff=2000; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "Gradle invocation failed on attempt $attempt; retrying in $((attempt * 10))s..." >&2
+                sleep "$((attempt * 10))"
+              fi
+            done
+            return 1
+          }
+          run_gradle_with_retry -p "$PLUGIN_DIR" \
             testDebugUnitTest bundleReleaseAar -Pandroid.useAndroidX=true -PuthDistributionChannel=chplay \
             -PflutterEmbeddingJar="$UTH_EMBEDDING_JAR" --no-daemon
           python - "$PLUGIN_DIR" <<'PY'
@@ -210,21 +279,81 @@ jobs:
       - name: 🔎 Verify apk_lts notification manifest wiring
         if: matrix.channel == 'apk_lts'
         run: |
+          set -euo pipefail
           mapfile -t APK_CANDIDATES < <(find build/apk -maxdepth 1 -name '*.apk' -type f | sort)
           test "${#APK_CANDIDATES[@]}" -eq 1
           APK="${APK_CANDIDATES[0]}"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
+          if [ "${APK_PACKAGE_ID:-io.github.chouwzi.uthelper}" = "io.github.chouwzi.uthelper" ]; then
+            test "$($APKANALYZER manifest application-id "$APK")" = "io.github.chouwzi.uthelper"
+          else
+            test "$($APKANALYZER manifest application-id "$APK")" = "$APK_PACKAGE_ID"
+          fi
           "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
           grep -q "ScheduledNotificationReceiver" final-android-manifest.xml
           grep -q "ScheduledNotificationBootReceiver" final-android-manifest.xml
           grep -q "ActionBroadcastReceiver" final-android-manifest.xml
           grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
           grep -q "RescheduleReceiver" final-android-manifest.xml
-          DIAGNOSTIC_APK="UTHelper-${{ github.sha }}-unsigned-diagnostic.apk"
-          mv "$APK" "$DIAGNOSTIC_APK"
-          python - "$DIAGNOSTIC_APK" <<'PY'
+          grep -q "ClassScheduleAlarmReceiver" final-android-manifest.xml
+          python - "$APK" <<'PY'
+          import sys
+          import zipfile
+          from scripts.verify_android_release import (
+              _verify_office_viewer_assets_in_app_zip,
+              _verify_quiz_and_webview_packages,
+          )
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              _verify_office_viewer_assets_in_app_zip(archive, require=True)
+              _verify_quiz_and_webview_packages(archive, require=True)
+          PY
+          python - "$APK" "${APK_ARCH:-universal}" <<'PY'
+          import sys
+          import zipfile
+
+          apk_path, expected_arch = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(apk_path) as archive:
+              abis = {
+                  parts[1]
+                  for name in archive.namelist()
+                  if (parts := name.split("/")) and len(parts) >= 3 and parts[0] == "lib" and name.endswith(".so")
+              }
+          if expected_arch == "arm64-v8a":
+              if abis != {"arm64-v8a"}:
+                  raise SystemExit(f"Expected arm64-v8a-only APK, found ABIs: {sorted(abis)}")
+          elif expected_arch == "universal":
+              required = {"arm64-v8a", "armeabi-v7a", "x86_64"}
+              if not required.issubset(abis):
+                  raise SystemExit(f"Expected universal ABIs {sorted(required)}, found: {sorted(abis)}")
+          else:
+              raise SystemExit(f"Unsupported expected architecture: {expected_arch}")
+          print(f"Verified APK native ABIs for {expected_arch}: {sorted(abis)}")
+          PY
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          test -x "$APKSIGNER"
+          if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] && [ "${APK_INSTALLABLE_TEST:-false}" = "true" ]; then
+            TEST_APK="UTHelper-${{ github.sha }}-${APK_ARCH}-${APK_NAMESPACE}-debug-test.apk"
+            mv "$APK" "$TEST_APK"
+            "$APKSIGNER" verify --verbose --print-certs "$TEST_APK"
+            printf '%s\n' \
+              "DEBUG-SIGNED QA TEST APK ONLY." \
+              "Never distribute as a GitHub Release or Play Store update." \
+              "Commit: ${{ github.sha }}" \
+              "Architecture: ${APK_ARCH}" \
+              "Package ID: ${APK_PACKAGE_ID}" \
+              "Namespace mode: ${APK_NAMESPACE}" \
+              "Note: Signed with Gradle's ephemeral debug keystore. If package ID is io.github.chouwzi.uthelper, uninstall any production Release build before installing." \
+              > DEBUG_TEST_ONLY.txt
+            {
+              echo "APK_TEST_FILENAME=$TEST_APK"
+              echo "APK_TEST_ARTIFACT_NAME=android-debug-test-${APK_ARCH}-${APK_NAMESPACE}-${{ github.sha }}"
+            } >> "$GITHUB_ENV"
+          else
+            DIAGNOSTIC_APK="UTHelper-${{ github.sha }}-unsigned-diagnostic.apk"
+            mv "$APK" "$DIAGNOSTIC_APK"
+            python - "$DIAGNOSTIC_APK" <<'PY'
           import sys
           import zipfile
           with zipfile.ZipFile(sys.argv[1], "a") as archive:
@@ -233,18 +362,14 @@ jobs:
                   "Signature intentionally invalidated; never distribute as a release.",
               )
           PY
-          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
-          APKSIGNER="$BUILD_TOOLS/apksigner"
-          test -x "$APKSIGNER"
-          if "$APKSIGNER" verify "$DIAGNOSTIC_APK"; then
-            echo "Diagnostic APK unexpectedly retained a valid install signature"
-            exit 1
+            if "$APKSIGNER" verify "$DIAGNOSTIC_APK"; then
+              echo "Diagnostic APK unexpectedly retained a valid install signature"
+              exit 1
+            fi
           fi
 
       - name: 🔎 Verify CH Play AAB compliance (16 KB ELF, DEX, manifest)
         if: matrix.channel == 'chplay'
-        env:
-          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
         run: |
           set -euo pipefail
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
@@ -252,29 +377,24 @@ jobs:
           mapfile -t AAB_CANDIDATES < <(find build/aab -maxdepth 1 -name '*.aab' -type f | sort)
           test "${#AAB_CANDIDATES[@]}" -eq 1
 
-          VERIFY_ARGS=(
-            --channel chplay
-            --version "$PROJECT_VERSION"
-            --build-number "$BUILD_NUMBER"
-            --package-id com.uthelper.uthelper
-            --commit-sha "${{ github.sha }}"
-            --workflow-run-id "${{ github.run_id }}"
-            --architecture universal
-            --require-office-viewer
-            --output "chplay-diagnostic.verification.json"
-          )
-          if [ "${CHPLAY_SIGNED_UPLOAD:-false}" = "true" ]; then
-            TARGET_AAB="UTHelper-${PROJECT_VERSION}-chplay-upload-signed.aab"
-            VERIFY_ARGS+=(--certificate-sha256 "$PLAY_UPLOAD_CERT_SHA256")
-          else
-            TARGET_AAB="UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab"
-            VERIFY_ARGS+=(--allow-unsigned)
-          fi
+          TARGET_AAB="UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab"
           mv "${AAB_CANDIDATES[0]}" "$TARGET_AAB"
-          python scripts/verify_android_release.py --aab "$TARGET_AAB" "${VERIFY_ARGS[@]}"
+          python scripts/verify_android_release.py \
+            --aab "$TARGET_AAB" \
+            --channel chplay \
+            --allow-unsigned \
+            --version "$PROJECT_VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --package-id io.github.chouwzi.uthelper \
+            --commit-sha "${{ github.sha }}" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --architecture universal \
+            --require-office-viewer \
+            --require-quiz-webview \
+            --output "chplay-diagnostic.verification.json"
 
       - name: 📤 Upload unsigned diagnostic APK (apk_lts)
-        if: matrix.channel == 'apk_lts'
+        if: matrix.channel == 'apk_lts' && (github.event_name != 'workflow_dispatch' || env.APK_INSTALLABLE_TEST != 'true')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: android-unsigned-diagnostic-${{ github.sha }}
@@ -282,13 +402,149 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: 📤 Upload CH Play AAB (${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }})
+      - name: 📤 Upload installable debug-test APK (apk_lts)
+        if: matrix.channel == 'apk_lts' && github.event_name == 'workflow_dispatch' && env.APK_INSTALLABLE_TEST == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.APK_TEST_ARTIFACT_NAME }}
+          path: |
+            ${{ env.APK_TEST_FILENAME }}
+            DEBUG_TEST_ONLY.txt
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 📤 Upload CH Play unsigned diagnostic AAB
         if: matrix.channel == 'chplay'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-chplay-${{ env.CHPLAY_SIGNED_UPLOAD == 'true' && 'upload-signed' || 'unsigned-diagnostic' }}-${{ github.sha }}
+          name: android-chplay-unsigned-diagnostic-${{ github.sha }}
           path: |
-            UTHelper-*.aab
+            UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab
             chplay-diagnostic.verification.json
+          retention-days: 30
+          if-no-files-found: error
+
+  sign-chplay-upload:
+    name: Sign CH Play Upload AAB
+    needs: build
+    if: >-
+      github.event_name != 'pull_request' &&
+      (inputs.sign_upload == true || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: chplay-upload
+    permissions:
+      contents: read
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: ☕ Setup Java
+        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📥 Download unsigned CH Play AAB
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: android-chplay-unsigned-diagnostic-${{ github.sha }}
+          path: unsigned-aab
+
+      - name: 🔐 Sign and verify CH Play upload AAB
+        id: sign_aab
+        env:
+          SIGN_UPLOAD_INPUT: ${{ inputs.sign_upload }}
+          PLAY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+          PLAY_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+          PLAY_UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+          PLAY_UPLOAD_KEY_ALIAS: ${{ vars.PLAY_UPLOAD_KEY_ALIAS }}
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          KEYSTORE=""
+          cleanup() {
+            if [ -n "$KEYSTORE" ]; then
+              rm -f -- "$KEYSTORE"
+            fi
+          }
+          trap cleanup EXIT
+
+          if [ "${SIGN_UPLOAD_INPUT:-false}" != "true" ] && [ -z "${PLAY_UPLOAD_KEYSTORE_BASE64:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "Play upload keystore not configured on push; skipping upload-signed AAB."
+            exit 0
+          fi
+
+          test -n "${PLAY_UPLOAD_KEYSTORE_BASE64:-}"
+          test -n "${PLAY_UPLOAD_KEYSTORE_PASSWORD:-}"
+          test -n "${PLAY_UPLOAD_KEY_PASSWORD:-}"
+          test -n "${PLAY_UPLOAD_KEY_ALIAS:-}"
+          test -n "${PLAY_UPLOAD_CERT_SHA256:-}"
+
+          umask 077
+          KEYSTORE="$RUNNER_TEMP/play-upload.jks"
+          printf '%s' "$PLAY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          unset PLAY_UPLOAD_KEYSTORE_BASE64
+
+          PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
+          BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
+          UNSIGNED_AAB="unsigned-aab/UTHelper-${{ github.sha }}-chplay-unsigned-diagnostic.aab"
+          SIGNED_AAB="UTHelper-${PROJECT_VERSION}-chplay-upload-signed.aab"
+          python - "$UNSIGNED_AAB" "$SIGNED_AAB" <<'PY'
+          import sys
+          import zipfile
+
+          src_path, dst_path = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(src_path, "r") as src, zipfile.ZipFile(dst_path, "w") as dst:
+              for info in src.infolist():
+                  upper = info.filename.upper()
+                  if upper.startswith("META-INF/") and (
+                      upper == "META-INF/MANIFEST.MF"
+                      or upper.endswith((".SF", ".RSA", ".DSA", ".EC"))
+                  ):
+                      continue
+                  dst.writestr(info, src.read(info.filename))
+          PY
+
+          jarsigner \
+            -keystore "$KEYSTORE" \
+            -storepass:env PLAY_UPLOAD_KEYSTORE_PASSWORD \
+            -keypass:env PLAY_UPLOAD_KEY_PASSWORD \
+            -digestalg SHA-256 \
+            "$SIGNED_AAB" \
+            "$PLAY_UPLOAD_KEY_ALIAS"
+
+          python scripts/verify_android_release.py \
+            --aab "$SIGNED_AAB" \
+            --channel chplay \
+            --version "$PROJECT_VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --package-id io.github.chouwzi.uthelper \
+            --certificate-sha256 "$PLAY_UPLOAD_CERT_SHA256" \
+            --commit-sha "${{ github.sha }}" \
+            --workflow-run-id "${{ github.run_id }}" \
+            --architecture universal \
+            --require-office-viewer \
+            --require-quiz-webview \
+            --output "chplay-upload-signed.verification.json"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 📤 Upload CH Play upload-signed AAB
+        if: steps.sign_aab.outputs.signed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-chplay-upload-signed-${{ github.sha }}
+          path: |
+            UTHelper-*-chplay-upload-signed.aab
+            chplay-upload-signed.verification.json
           retention-days: 30
           if-no-files-found: error

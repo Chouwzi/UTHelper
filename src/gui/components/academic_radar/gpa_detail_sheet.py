@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any, Callable, Optional
 import flet as ft
 
 from core.academic_radar.models import RadarProfile
@@ -51,7 +52,12 @@ class GpaDetailSheet:
         )
 
     @staticmethod
-    def show(page: ft.Page, profile: RadarProfile) -> None:
+    def show(
+        page: ft.Page,
+        profile: RadarProfile,
+        *,
+        on_dismiss: Optional[Callable[[], Any]] = None,
+    ) -> None:
         row = GpaDetailSheet._row
         semester = GpaDetailSheet._section(
             "TRONG KỲ",
@@ -74,11 +80,21 @@ class GpaDetailSheet:
         )
 
         used_overlay = False
+        is_real_page = isinstance(page, ft.Page)
+
+        def _notify_dismiss(_=None) -> None:
+            if callable(on_dismiss):
+                try:
+                    on_dismiss()
+                except Exception:
+                    pass
 
         def _close(_=None):
             if not used_overlay:
                 try:
                     page.pop_dialog()
+                    if not is_real_page:
+                        _notify_dismiss()
                     return
                 except Exception:
                     pass
@@ -90,6 +106,7 @@ class GpaDetailSheet:
                     page.update()
                 except Exception:
                     pass
+            _notify_dismiss()
 
         def _on_key_down(event) -> None:
             if getattr(event, "key", "") == "Escape":
@@ -103,7 +120,8 @@ class GpaDetailSheet:
             page_h = float(getattr(page, "height", 0) or 0)
         except (TypeError, ValueError):
             page_h = 0.0
-        dialog_w = max(260.0, min(360.0, page_w - 64.0)) if page_w > 0 else 360.0
+        is_narrow = 0 < page_w < 600
+        dialog_w = max(240.0, min(360.0, page_w - 64.0)) if page_w > 0 else 360.0
         max_h = max(220.0, min(480.0, page_h * 0.65)) if page_h > 0 else None
 
         dialog = ft.AlertDialog(
@@ -117,7 +135,7 @@ class GpaDetailSheet:
                 semantics_label=profile.semester_name,
             ),
             content=ft.KeyboardListener(
-                autofocus=True,
+                autofocus=False,
                 on_key_down=_on_key_down,
                 content=ft.Container(
                     content=ft.Column(
@@ -131,6 +149,11 @@ class GpaDetailSheet:
                 ),
             ),
             actions=[ft.TextButton("Đóng", height=44, on_click=_close)],
+            on_dismiss=_notify_dismiss,
+            inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
+            title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
+            content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
+            actions_padding=ft.Padding.only(left=16, right=16, top=0, bottom=8),
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )

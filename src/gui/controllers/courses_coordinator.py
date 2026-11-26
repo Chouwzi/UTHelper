@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
+import os
 import re
+import sys
+import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -14,10 +19,16 @@ from typing import Any, Callable, Optional
 import flet as ft
 
 import platform_utils
+from config import settings
 from core.courses.activity_service import CourseActivityService
+from core.demo_sandbox import is_demo_account
 from core.courses.archive_service import ArchiveService
 from core.courses.catalog_service import CourseCatalogService
-from core.courses.document_converter import ConvertedDocument, convert_document_bytes
+from core.courses.document_converter import (
+    ConvertedDocument,
+    clear_converted_document_cache,
+    convert_document_bytes,
+)
 from core.courses.local_preview_server import LocalPreviewServer
 from core.courses.models import (
     CourseAttachment,
@@ -28,9 +39,73 @@ from core.courses.models import (
     PreviewKind,
     RecentMaterialEntry,
 )
-from core.courses.pdf_renderer import PdfDocumentSession
+from core.courses.pdf_renderer import PdfDocumentSession, clear_rendered_pdf_cache
+from core.courses.office_viewer_service import (
+    OfficeViewerDescriptor,
+    prepare_office_viewer,
+    prepare_office_viewer_from_file,
+    prepare_pdf_viewer,
+)
 from core.courses.preview_cache import PreviewFileCache
 from core.courses.windows_office_bridge import render_office_pdf
+from core.url_validation import validate_https_url
+
+try:
+    from core.webview_auth import (
+        classify_uth_webview_url as _core_classify_uth_webview_url,
+        normalize_uth_webview_target_url as _core_normalize_uth_webview_target_url,
+    )
+except ImportError:
+    _core_classify_uth_webview_url = None
+    _core_normalize_uth_webview_target_url = None
+
+
+def classify_uth_webview_url(url: str) -> str:
+    fn = _core_classify_uth_webview_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "classify_uth_webview_url", None)
+    if callable(fn):
+        return str(fn(url))
+    validated = validate_https_url(url)
+    if validated is None:
+        return "external"
+    parsed = urllib.parse.urlsplit(validated)
+    if parsed.port is not None:
+        return "external"
+    host = (parsed.hostname or "").casefold()
+    if host in ("courses.ut.edu.vn", "elearning.ut.edu.vn"):
+        return "courses"
+    if host == "thnn.ut.edu.vn":
+        return "thnn"
+    if host == "portal.ut.edu.vn":
+        return "portal"
+    return "external"
+
+
+def normalize_uth_webview_target_url(url: str, *, has_credentials: bool = True) -> str:
+    fn = _core_normalize_uth_webview_target_url
+    if fn is None:
+        wv_mod = sys.modules.get("core.webview_auth")
+        fn = getattr(wv_mod, "normalize_uth_webview_target_url", None)
+    if callable(fn):
+        return str(fn(url, has_credentials=has_credentials))
+    if not isinstance(url, str) or not url:
+        return ""
+    validated = validate_https_url(url)
+    if validated is None:
+        return url
+    parsed = urllib.parse.urlsplit(validated)
+    if parsed.port is not None:
+        return url
+    host = (parsed.hostname or "").casefold()
+    if host == "elearning.ut.edu.vn":
+        return urllib.parse.urlunsplit(
+            ("https", "courses.ut.edu.vn", parsed.path, parsed.query, parsed.fragment)
+        )
+    if host == "portal.ut.edu.vn" and parsed.path in ("", "/", "/login") and has_credentials:
+        return "https://portal.ut.edu.vn/dashboard"
+    return validated
 from gui.components.courses._shared import (
     PaneErrorOverlay,
     PaneLoadingOverlay,
@@ -54,17 +129,54 @@ from gui.components.courses.document_reader_view import DocumentReaderView
 from gui.components.courses.embedded_webview_host import (
     EmbeddedWebViewHost,
     build_embedded_webview_host,
+    is_embedded_webview_supported,
 )
 from gui.components.courses.webview_pane import CoursesWebViewPane
 from gui.components.detail_view import DetailView
 from gui.core.theme import C
+from gui.core.utils import DEMO_LMS_WEBVIEW_GUARD_MESSAGE, is_uth_lms_url
 from gui.view_models.courses_state import format_file_size, safe_http_url
 
 logger = logging.getLogger(__name__)
 _SAFE_TMP_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_DANGEROUS_EXTERNAL_EXTS = frozenset(
-    {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi", ".scr", ".com", ".pif"}
+_SAFE_EXTERNAL_OPEN_EXTS = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".pptx",
+        ".ppt",
+        ".xlsx",
+        ".xls",
+        ".csv",
+        ".txt",
+        ".md",
+        ".rtf",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".zip",
+        ".rar",
+        ".7z",
+    }
 )
+
+
+def _supports_kwarg(fn: Callable[..., Any], kwarg: str) -> bool:
+    """Return True when ``fn`` accepts keyword argument ``kwarg`` (directly or via **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return kwarg in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 def _try_build_embedded_webview(
@@ -171,9 +283,15 @@ class CoursesCoordinator:
         submission_workflow_factory: Optional[Callable[..., Any]] = None,
         all_assignments_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
         on_start_quiz: Optional[Callable[[CourseSummary, CourseModuleItem], Any]] = None,
+        account_namespace: Optional[str] = None,
+        webview_auth_service: Any = None,
+        account_epoch_getter: Optional[Callable[[], int]] = None,
     ) -> None:
         self._page = page
         self._on_start_quiz = on_start_quiz
+        self._account_namespace = account_namespace
+        self._webview_auth_service = webview_auth_service
+        self._account_epoch_getter = account_epoch_getter
         self.catalog_service = catalog_service
         self.preview_cache = preview_cache
         self.archive_service = archive_service
@@ -189,6 +307,8 @@ class CoursesCoordinator:
         self._all_assignments_provider = all_assignments_provider
         self._initial_loaded = False
         self._attachment_load_seq = 0
+        self._account_epoch = 0
+        self._preview_register_lock = threading.RLock()
 
         if hasattr(self.preview_server, "register_session_provider"):
             if courses_client is not None:
@@ -239,8 +359,12 @@ class CoursesCoordinator:
 
     def _launch_url_safe(self, url: str) -> None:
         safe_url = safe_http_url(url)
-        if safe_url:
-            self._dispatch_cb(self._on_launch_url, safe_url)
+        if not safe_url:
+            return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe_url):
+            self._show_snack(DEMO_LMS_WEBVIEW_GUARD_MESSAGE)
+            return
+        self._dispatch_cb(self._on_launch_url, safe_url)
 
     async def ensure_loaded_async(self, *, background_sync_hours: int = 6) -> None:
         """Load cached courses on first visit; reset flag on failure for retry."""
@@ -266,16 +390,92 @@ class CoursesCoordinator:
             raise
 
     def reset_for_account_switch(self, namespace: Optional[str] = None) -> None:
-        """Reset catalog load state, cache namespace, and overlays on account change."""
-        self._attachment_load_seq += 1
+        """Reset catalog load state, cache namespace, preview caches, and overlays on account change."""
+        self._attachment_load_seq = getattr(self, "_attachment_load_seq", 0) + 1
+        self._account_epoch = getattr(self, "_account_epoch", 0) + 1
         self._initial_loaded = False
-        if namespace:
-            cache_store = getattr(self.catalog_service, "_cache_store", None)
-            set_ns = getattr(cache_store, "set_namespace", None)
-            if callable(set_ns):
-                set_ns(namespace)
+        self._account_namespace = namespace
+        effective_ns = namespace if namespace else "__logged_out__"
+        cache_store = getattr(self.catalog_service, "_cache", None) or getattr(
+            self.catalog_service, "_cache_store", None
+        )
+        set_ns = getattr(cache_store, "set_namespace", None)
+        if callable(set_ns):
+            set_ns(effective_ns)
+        try:
+            clear_converted_document_cache()
+        except Exception:
+            pass
+        try:
+            from gui.core.utils import clear_cached_description_images
+
+            clear_cached_description_images()
+        except Exception:
+            pass
+        preview_cache = getattr(self, "preview_cache", None)
+        if preview_cache is not None:
+            clear_pc = getattr(preview_cache, "clear", None)
+            if callable(clear_pc):
+                try:
+                    clear_pc()
+                except Exception:
+                    pass
+            cache_dir = getattr(preview_cache, "cache_dir", None)
+            if isinstance(cache_dir, Path):
+                try:
+                    clear_rendered_pdf_cache(cache_dir)
+                except Exception:
+                    pass
+                ext_dir = cache_dir / "external"
+                if ext_dir.is_dir():
+                    for entry in ext_dir.iterdir():
+                        if entry.is_file():
+                            try:
+                                entry.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+        reset_srv = getattr(self.preview_server, "reset_for_account_switch", None)
+        if callable(reset_srv):
+            reg_lock = getattr(self, "_preview_register_lock", None)
+            ctx = reg_lock if reg_lock is not None else contextlib.nullcontext()
+            with ctx:
+                try:
+                    reset_srv()
+                except Exception:
+                    pass
+        overlays = getattr(getattr(self, "courses_view", None), "_overlays", None)
+        if isinstance(overlays, list):
+            for ov in list(overlays):
+                dispose_fn = getattr(ov, "dispose", None)
+                if callable(dispose_fn) and _supports_kwarg(
+                    dispose_fn, "clear_browser_storage"
+                ):
+                    try:
+                        dispose_fn(clear_browser_storage=True)
+                    except Exception:
+                        pass
         if hasattr(self.courses_view, "reset_for_account_switch"):
             self.courses_view.reset_for_account_switch()
+
+    def _resolve_account_epoch(self) -> int:
+        getter = getattr(self, "_account_epoch_getter", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if val is not None:
+                    return int(val)
+            except Exception:
+                pass
+        svc = getattr(self, "_webview_auth_service", None)
+        svc_getter = getattr(svc, "_account_epoch_getter", None)
+        if callable(svc_getter):
+            try:
+                val = svc_getter()
+                if val is not None:
+                    return int(val)
+            except Exception:
+                pass
+        return int(getattr(self, "_account_epoch", 0))
 
     def _client_for(self, source: CourseSource) -> Any:
         return self._thnn_client if source == "thnn" else self._courses_client
@@ -286,6 +486,8 @@ class CoursesCoordinator:
         url = safe_http_url(mod.web_url) or safe_http_url(mod.url)
         if not url:
             return None
+        if classify_uth_webview_url(url) == "courses":
+            url = normalize_uth_webview_target_url(url, has_credentials=False)
         if callable(self._all_assignments_provider):
             try:
                 for item in self._all_assignments_provider() or []:
@@ -358,21 +560,37 @@ class CoursesCoordinator:
         fetcher = self._assignment_detail_fetcher
         if fetcher is None:
             return
+        start_epoch = getattr(self, "_account_epoch", 0)
         try:
             full_data = await asyncio.to_thread(fetcher, payload)
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             if full_data and "details" in full_data:
                 desc_html = full_data["details"].get("description_html", "")
                 if desc_html:
-                    from gui.core.utils import pre_cache_description_images
+                    from gui.core.utils import (
+                        clear_cached_description_images,
+                        pre_cache_description_images,
+                    )
 
                     cached_html = await asyncio.to_thread(
                         pre_cache_description_images, desc_html
                     )
+                    if getattr(self, "_account_epoch", 0) != start_epoch:
+                        try:
+                            clear_cached_description_images()
+                        except Exception:
+                            pass
+                        return
                     full_data = dict(full_data)
                     full_data["details"] = dict(full_data["details"])
                     full_data["details"]["description_html"] = cached_html
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             pane_assign.update_detail(full_data)
         except Exception:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             logger.exception("Failed to load Pane-3 assignment details")
             pane_assign.show_error_banner()
 
@@ -395,6 +613,7 @@ class CoursesCoordinator:
             html=html,
             page=self._page,
             bgcolor=C.BG,
+            account_namespace=self._account_namespace,
             on_ready=on_ready,
             on_error=on_error,
             on_message=on_message,
@@ -403,6 +622,45 @@ class CoursesCoordinator:
             on_loading_changed=on_loading_changed,
             on_history_changed=on_history_changed,
         )
+
+    def ensure_preview_server(self) -> LocalPreviewServer:
+        """Return the active LocalPreviewServer, ensuring Moodle session providers are registered."""
+        register_fn = getattr(self.preview_server, "register_session_provider", None)
+        if callable(register_fn):
+            reg_lock = getattr(self, "_preview_register_lock", None)
+            ctx = reg_lock if reg_lock is not None else contextlib.nullcontext()
+            with ctx:
+                providers = getattr(self.preview_server, "_session_providers", None)
+                if self._courses_client is not None and (
+                    not isinstance(providers, dict) or "courses" not in providers
+                ):
+                    register_fn("courses", self._courses_client)
+                if self._thnn_client is not None and (
+                    not isinstance(providers, dict) or "thnn" not in providers
+                ):
+                    register_fn("thnn", self._thnn_client)
+        return self.preview_server
+
+    def _has_webview_credentials(self, site_kind: str) -> bool:
+        if is_demo_account(settings.UTH_USERNAME):
+            return False
+        svc = getattr(self, "_webview_auth_service", None)
+        if svc is not None:
+            public_has_fn = getattr(svc, "has_credentials", None)
+            if callable(public_has_fn):
+                try:
+                    return bool(public_has_fn(site_kind))
+                except TypeError:
+                    return bool(public_has_fn())
+            client_for_site = getattr(svc, "client_for_site", None)
+            if callable(client_for_site) and client_for_site(site_kind) is None:
+                return False
+            return True
+        if site_kind == "thnn":
+            return getattr(self, "_thnn_client", None) is not None
+        if site_kind == "courses":
+            return getattr(self, "_courses_client", None) is not None
+        return False
 
     def open_in_app_webview(
         self,
@@ -416,6 +674,20 @@ class CoursesCoordinator:
         safe_url = safe_http_url(url)
         if not safe_url:
             return
+        if is_demo_account(settings.UTH_USERNAME) and is_uth_lms_url(safe_url):
+            self._show_snack(DEMO_LMS_WEBVIEW_GUARD_MESSAGE)
+            return
+        site_kind = classify_uth_webview_url(safe_url)
+        resolved_source: CourseSource = (
+            "thnn"
+            if site_kind == "thnn"
+            else ("courses" if site_kind == "courses" else source)
+        )
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         initial_pane_w: Optional[float] = None
         bounds_fn = getattr(self.courses_view, "_compute_pane3_bounds", None)
         if callable(bounds_fn):
@@ -423,18 +695,23 @@ class CoursesCoordinator:
                 initial_pane_w = float(bounds_fn()[2])
             except Exception:
                 initial_pane_w = None
-        pane = CoursesWebViewPane(
-            page=self._page,
-            source=source,
-            title=title or "Trình duyệt trong ứng dụng",
-            url=safe_url,
-            preview_server=self.preview_server,
-            session_client=self._client_for(source),
-            on_back=self.courses_view.pop_overlay,
-            on_open_external=self._launch_url_safe,
-            on_toggle_expand=self.courses_view.toggle_pane3_expanded,
-            pane_width=initial_pane_w,
-        )
+        pane_kwargs: dict[str, Any] = {
+            "page": getattr(self, "_page", None),
+            "source": resolved_source,
+            "title": title or "Trình duyệt trong ứng dụng",
+            "url": safe_url,
+            "preview_server": getattr(self, "preview_server", None),
+            "session_client": self._client_for(resolved_source),
+            "webview_auth_service": getattr(self, "_webview_auth_service", None),
+            "on_back": self.courses_view.pop_overlay,
+            "on_open_external": self._launch_url_safe,
+            "on_toggle_expand": self.courses_view.toggle_pane3_expanded,
+            "pane_width": initial_pane_w,
+            "account_namespace": getattr(self, "_account_namespace", None),
+        }
+        if _supports_kwarg(CoursesWebViewPane, "account_epoch_getter"):
+            pane_kwargs["account_epoch_getter"] = self._resolve_account_epoch
+        pane = CoursesWebViewPane(**pane_kwargs)
         self.courses_view.push_overlay(pane, tag=tag or f"webview:{abs(hash(safe_url))}")
 
     def _handle_course_url_action(self, url: str, title: str = "") -> None:
@@ -444,11 +721,18 @@ class CoursesCoordinator:
         selected = None
         if hasattr(self.courses_view, "_state"):
             selected = self.courses_view._state.selected_course()
-        source: CourseSource = (
-            "thnn"
-            if "thnn.ut.edu.vn" in safe_url.lower()
-            else (selected.source if selected is not None else "courses")
-        )
+        site_kind = classify_uth_webview_url(safe_url)
+        if site_kind == "thnn":
+            source: CourseSource = "thnn"
+        elif site_kind == "courses":
+            source = "courses"
+        else:
+            source = selected.source if selected is not None else "courses"
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         pane_title = str(title or "").strip() or (
             (selected.display_name or selected.fullname) if selected is not None else "Moodle Web"
         )
@@ -568,13 +852,19 @@ class CoursesCoordinator:
             if not safe_url:
                 return
 
-        source: CourseSource = "thnn" if "thnn.ut.edu.vn" in safe_url.lower() else "courses"
+        site_kind = classify_uth_webview_url(safe_url)
+        source: CourseSource = "thnn" if site_kind == "thnn" else "courses"
+        if site_kind in {"courses", "thnn", "portal"}:
+            safe_url = normalize_uth_webview_target_url(
+                safe_url,
+                has_credentials=self._has_webview_credentials(site_kind),
+            )
         self.open_in_app_webview(source, mod.name, safe_url, tag=f"webview:{mod.cmid}")
 
     async def _prefetch_course_attachments_async(
         self, course: CourseSummary, sections: list[CourseSection]
     ) -> None:
-        """Politely prefetch up to 2 small uncached previewable documents in idle background."""
+        """Concurrently prefetch up to 4 uncached previewable documents (<= 5 MiB) in background."""
         if course.source != "courses":
             return
         fetch_cache_fn = getattr(self.catalog_service, "fetch_or_cache_preview_file", None)
@@ -588,7 +878,7 @@ class CoursesCoordinator:
                         continue
                     if (
                         att.preview_kind in {"pdf", "docx", "pptx", "xlsx", "csv", "text"}
-                        and 0 < int(att.file_size or 0) <= 1_572_864
+                        and 0 < int(att.file_size or 0) <= 5 * 1024 * 1024
                         and att.file_url
                     ):
                         prio = 0 if mod.is_new else 1
@@ -596,9 +886,9 @@ class CoursesCoordinator:
         if not candidates:
             return
         candidates.sort(key=lambda item: (item[0], item[1].file_size))
-        prefetched = 0
+        to_fetch: list[CourseAttachment] = []
         for _, att in candidates:
-            if prefetched >= 2:
+            if len(to_fetch) >= 4:
                 break
             if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
                 return
@@ -611,26 +901,43 @@ class CoursesCoordinator:
                 )
                 if existing is not None:
                     continue
-                await asyncio.sleep(0.15)
-                if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
-                    return
-                await asyncio.to_thread(
-                    fetch_cache_fn,
-                    "courses",
-                    att.file_url,
-                    att.time_modified,
-                    att.file_name,
-                )
-                prefetched += 1
+                to_fetch.append(att)
             except Exception:
                 logger.debug("Idle attachment prefetch skipped for %s", att.file_name)
 
-    async def _fetch_attachment_bytes_async(
+        if not to_fetch:
+            return
+        await asyncio.sleep(0.05)
+        if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
+            return
+
+        is_mobile = bool(platform_utils.IS_ANDROID or platform_utils.IS_IOS)
+        sem = asyncio.Semaphore(2 if is_mobile else 3)
+
+        async def _prefetch_one(att: CourseAttachment) -> None:
+            async with sem:
+                if getattr(self.courses_view._state, "selected_course_key", None) != course.course_key:
+                    return
+                try:
+                    await asyncio.to_thread(
+                        fetch_cache_fn,
+                        "courses",
+                        att.file_url,
+                        att.time_modified,
+                        att.file_name,
+                    )
+                except Exception:
+                    logger.debug("Idle attachment prefetch skipped for %s", att.file_name)
+
+        await asyncio.gather(*(_prefetch_one(att) for att in to_fetch), return_exceptions=True)
+
+    async def _fetch_attachment_payload_async(
         self,
         source: str,
         att: CourseAttachment,
         progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> bytes:
+        should_commit: Optional[Callable[[], bool]] = None,
+    ) -> tuple[bytes, Optional[Path]]:
         try:
             cached_path = await asyncio.to_thread(
                 self.preview_cache.get_cached_path,
@@ -645,7 +952,7 @@ class CoursesCoordinator:
                         progress_callback(len(data_cached), len(data_cached))
                     except Exception:
                         pass
-                return data_cached
+                return data_cached, cached_path
         except OSError as exc:
             logger.debug("Preview cache read failed for %s: %s", att.file_name, exc)
 
@@ -665,18 +972,52 @@ class CoursesCoordinator:
             )
 
         raw = await asyncio.to_thread(_invoke_fetch)
+        if should_commit is not None and not should_commit():
+            return raw, None
+        saved_path: Optional[Path] = None
         try:
-            await asyncio.to_thread(
-                self.preview_cache.put_bytes,
-                att.file_url,
-                att.time_modified,
-                att.file_name,
-                raw,
-            )
+            put_bytes = self.preview_cache.put_bytes
+            if should_commit is not None and _supports_kwarg(put_bytes, "should_commit"):
+                saved_path = await asyncio.to_thread(
+                    put_bytes,
+                    att.file_url,
+                    att.time_modified,
+                    att.file_name,
+                    raw,
+                    should_commit=should_commit,
+                )
+            else:
+                saved_path = await asyncio.to_thread(
+                    put_bytes,
+                    att.file_url,
+                    att.time_modified,
+                    att.file_name,
+                    raw,
+                )
         except OSError as exc:
             logger.warning(
                 "Failed to persist preview cache for %s: %s", att.file_name, exc
             )
+        return raw, saved_path
+
+    async def _fetch_attachment_bytes_async(
+        self,
+        source: str,
+        att: CourseAttachment,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bytes:
+        start_epoch = getattr(self, "_account_epoch", 0)
+        if _supports_kwarg(self._fetch_attachment_payload_async, "should_commit"):
+            raw, _ = await self._fetch_attachment_payload_async(
+                source,
+                att,
+                progress_callback=progress_callback,
+                should_commit=lambda: getattr(self, "_account_epoch", 0) == start_epoch,
+            )
+            return raw
+        raw, _ = await self._fetch_attachment_payload_async(
+            source, att, progress_callback=progress_callback
+        )
         return raw
 
     def open_attachment_bytes_in_overlay(
@@ -689,6 +1030,8 @@ class CoursesCoordinator:
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
         rendered_pdf_bytes: Optional[bytes] = None,
+        preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None,
+        cached_file_path: Optional[Path] = None,
     ) -> None:
         """Record recent access and open ArchiveExplorerView or DocumentReaderView overlay."""
         try:
@@ -737,6 +1080,8 @@ class CoursesCoordinator:
             preconverted=preconverted,
             preopened_pdf=preopened_pdf,
             rendered_pdf_bytes=rendered_pdf_bytes,
+            preprepared_office_viewer=preprepared_office_viewer,
+            cached_file_path=cached_file_path,
         )
 
     def _open_entry_reader(
@@ -748,6 +1093,8 @@ class CoursesCoordinator:
         preconverted: Optional[ConvertedDocument] = None,
         preopened_pdf: Optional[PdfDocumentSession] = None,
         rendered_pdf_bytes: Optional[bytes] = None,
+        preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None,
+        cached_file_path: Optional[Path] = None,
     ) -> None:
         if kind == "archive":
             nested = ArchiveExplorerView(
@@ -768,6 +1115,11 @@ class CoursesCoordinator:
                 initial_pane_w = float(bounds_fn()[2])
             except Exception:
                 initial_pane_w = 700.0
+        plat_val = getattr(self._page, "platform", None)
+        is_windows_native_pdf = (
+            (plat_val == ft.PagePlatform.WINDOWS or str(plat_val or "").lower() == "windows")
+            and not bool(getattr(self._page, "web", False))
+        )
         reader = DocumentReaderView(
             file_name=name,
             data=data,
@@ -785,8 +1137,10 @@ class CoursesCoordinator:
             preopened_pdf=preopened_pdf,
             rendered_pdf_bytes=rendered_pdf_bytes,
             pane_width=initial_pane_w,
-            pdf_in_webview=isinstance(self._page, ft.Page) and self._page.platform == ft.PagePlatform.WINDOWS and not self._page.web,
+            pdf_in_webview=is_windows_native_pdf,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            preprepared_office_viewer=preprepared_office_viewer,
+            cached_file_path=cached_file_path,
         )
         self.courses_view.push_overlay(reader, tag=f"reader:{name}")
 
@@ -803,9 +1157,15 @@ class CoursesCoordinator:
         self, course: CourseSummary, mod: CourseModuleItem, att: CourseAttachment
     ) -> None:
         """Show live progress in Pane 3, fetch attachment, pre-render off-thread, and open viewer."""
-        self._attachment_load_seq += 1
+        self._attachment_load_seq = getattr(self, "_attachment_load_seq", 0) + 1
         req_seq = self._attachment_load_seq
-        expected_total = max(0, int(att.file_size or 0))
+        start_epoch = getattr(self, "_account_epoch", 0)
+        raw_size = getattr(att, "file_size", 0)
+        expected_total = (
+            max(0, int(raw_size))
+            if isinstance(raw_size, (int, float)) and not isinstance(raw_size, bool)
+            else 0
+        )
         size_hint = format_file_size(expected_total)
         subtitle = f"Đang tải xuống · {size_hint}" if size_hint else "Đang tải tài liệu từ Moodle..."
         loading_overlay = PaneLoadingOverlay(
@@ -815,15 +1175,30 @@ class CoursesCoordinator:
             preset="archive" if (att.is_archive or att.preview_kind == "archive") else "document",
             on_back=self.courses_view.pop_overlay,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
+            page=self._page,
         )
         self.courses_view.push_overlay(loading_overlay, tag=f"viewer:load:{req_seq}")
         preopened_pdf: Optional[PdfDocumentSession] = None
+
+        def _is_still_current() -> bool:
+            return (
+                req_seq == self._attachment_load_seq
+                and not loading_overlay._disposed
+                and getattr(self, "_account_epoch", 0) == start_epoch
+            )
+
+        def _should_commit_seq() -> bool:
+            return (
+                req_seq == self._attachment_load_seq
+                and getattr(self, "_account_epoch", 0) == start_epoch
+            )
+
         try:
             await asyncio.sleep(0)
             t0 = time.monotonic()
 
             def _on_dl_progress(done_b: int, total_b: int) -> None:
-                if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+                if not _is_still_current():
                     return
                 eff_total = total_b if total_b > 0 else expected_total
                 elapsed = max(0.001, time.monotonic() - t0)
@@ -846,10 +1221,18 @@ class CoursesCoordinator:
                         subtitle=f"Đã nhận {done_txt}{speed_txt}",
                     )
 
-            raw = await self._fetch_attachment_bytes_async(
-                course.source, att, progress_callback=_on_dl_progress
-            )
-            if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+            if _supports_kwarg(self._fetch_attachment_payload_async, "should_commit"):
+                raw, cached_file_path = await self._fetch_attachment_payload_async(
+                    course.source,
+                    att,
+                    progress_callback=_on_dl_progress,
+                    should_commit=_should_commit_seq,
+                )
+            else:
+                raw, cached_file_path = await self._fetch_attachment_payload_async(
+                    course.source, att, progress_callback=_on_dl_progress
+                )
+            if not _is_still_current():
                 return
             loading_overlay.set_progress(
                 1.0,
@@ -859,15 +1242,124 @@ class CoursesCoordinator:
 
             preconverted: Optional[ConvertedDocument] = None
             rendered_pdf_bytes: Optional[bytes] = None
+            preprepared_office_viewer: Optional[OfficeViewerDescriptor] = None
+            plat_val = getattr(self._page, "platform", None)
+            is_windows_desktop = (
+                (plat_val == ft.PagePlatform.WINDOWS or str(plat_val or "").lower() == "windows")
+                and not bool(getattr(self._page, "web", False))
+            )
+            webview_supported = is_embedded_webview_supported(self._page)
+            if not _is_still_current():
+                return
+            reg_lock = getattr(self, "_preview_register_lock", None)
             if not (att.is_archive or att.preview_kind == "archive"):
-                if att.preview_kind in {"docx", "pptx"} and isinstance(self._page, ft.Page) and self._page.platform == ft.PagePlatform.WINDOWS and not self._page.web:
-                    rendered_pdf_bytes = await asyncio.to_thread(render_office_pdf, raw, att.file_name)
-                if rendered_pdf_bytes is not None:
-                    preopened_pdf = await asyncio.to_thread(
-                        PdfDocumentSession, rendered_pdf_bytes,
-                        cache_dir=getattr(self.preview_cache, "cache_dir", None),
-                    )
-                elif att.preview_kind in {"docx", "xlsx", "csv", "pptx", "text"}:
+                if att.preview_kind in {"docx", "pptx"}:
+                    if is_windows_desktop:
+                        get_cached_pdf = getattr(
+                            self.preview_cache, "get_cached_converted_pdf", None
+                        )
+                        put_cached_pdf = getattr(
+                            self.preview_cache, "put_converted_pdf", None
+                        )
+                        if callable(get_cached_pdf):
+                            rendered_pdf_bytes = await asyncio.to_thread(
+                                get_cached_pdf, raw, att.file_name
+                            )
+                            if not _is_still_current():
+                                return
+                        if rendered_pdf_bytes is None:
+                            rendered_pdf_bytes = await asyncio.to_thread(
+                                render_office_pdf, raw, att.file_name
+                            )
+                            if not _is_still_current():
+                                return
+                            if rendered_pdf_bytes is not None and callable(put_cached_pdf):
+                                if _supports_kwarg(put_cached_pdf, "should_commit"):
+                                    await asyncio.to_thread(
+                                        put_cached_pdf,
+                                        raw,
+                                        att.file_name,
+                                        rendered_pdf_bytes,
+                                        should_commit=_should_commit_seq,
+                                    )
+                                else:
+                                    await asyncio.to_thread(
+                                        put_cached_pdf,
+                                        raw,
+                                        att.file_name,
+                                        rendered_pdf_bytes,
+                                    )
+                                if not _is_still_current():
+                                    return
+                    if rendered_pdf_bytes is not None:
+                        if not is_windows_desktop:
+                            if not _is_still_current():
+                                return
+                            preopened_pdf = await asyncio.to_thread(
+                                PdfDocumentSession,
+                                rendered_pdf_bytes,
+                                cache_dir=getattr(self.preview_cache, "cache_dir", None),
+                            )
+                    else:
+                        is_ooxml_office = att.file_name.lower().endswith(
+                            (".docx", ".pptx")
+                        )
+                        if is_ooxml_office and webview_supported:
+                            if not _is_still_current():
+                                return
+
+                            def _prepare_office() -> Optional[OfficeViewerDescriptor]:
+                                ctx = (
+                                    reg_lock
+                                    if reg_lock is not None
+                                    else contextlib.nullcontext()
+                                )
+                                with ctx:
+                                    if not _is_still_current():
+                                        return None
+                                    if (
+                                        cached_file_path is not None
+                                        and cached_file_path.is_file()
+                                    ):
+                                        desc = prepare_office_viewer_from_file(
+                                            cached_file_path,
+                                            att.file_name,
+                                            self.preview_server,
+                                            theme="light",
+                                        )
+                                        if desc is not None:
+                                            return desc
+                                    return prepare_office_viewer(
+                                        raw,
+                                        att.file_name,
+                                        self.preview_server,
+                                        theme="light",
+                                    )
+
+                            preprepared_office_viewer = await asyncio.to_thread(
+                                _prepare_office
+                            )
+                            if not _is_still_current():
+                                return
+                        if preprepared_office_viewer is None:
+                            if not _is_still_current():
+                                return
+                            preconverted = await asyncio.to_thread(
+                                convert_document_bytes,
+                                att.file_name,
+                                raw,
+                                att.preview_kind,
+                                dark_mode=False,
+                            )
+                            if getattr(self, "_account_epoch", 0) != start_epoch:
+                                try:
+                                    clear_converted_document_cache()
+                                except Exception:
+                                    pass
+                                return
+                elif att.preview_kind in {"xlsx", "csv", "text"}:
+                    if not _is_still_current():
+                        return
                     preconverted = await asyncio.to_thread(
                         convert_document_bytes,
                         att.file_name,
@@ -875,24 +1367,82 @@ class CoursesCoordinator:
                         att.preview_kind,
                         dark_mode=False,
                     )
+                    if getattr(self, "_account_epoch", 0) != start_epoch:
+                        try:
+                            clear_converted_document_cache()
+                        except Exception:
+                            pass
+                        return
                 elif att.preview_kind == "pdf":
-                    pdf_in_webview = (
-                        isinstance(self._page, ft.Page)
-                        and self._page.platform == ft.PagePlatform.WINDOWS
-                        and not self._page.web
+                    is_mobile = bool(
+                        platform_utils.IS_ANDROID
+                        or platform_utils.IS_IOS
+                        or plat_val in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
+                        or str(plat_val or "").lower() in ("android", "ios")
                     )
-                    if not pdf_in_webview:
+                    if is_mobile and webview_supported:
+                        if not _is_still_current():
+                            return
+
+                        def _prepare_pdf() -> Optional[OfficeViewerDescriptor]:
+                            ctx = (
+                                reg_lock
+                                if reg_lock is not None
+                                else contextlib.nullcontext()
+                            )
+                            with ctx:
+                                if not _is_still_current():
+                                    return None
+                                return prepare_pdf_viewer(
+                                    raw,
+                                    self.preview_server,
+                                    theme="light",
+                                    file_path=cached_file_path,
+                                )
+
+                        preprepared_office_viewer = await asyncio.to_thread(
+                            _prepare_pdf
+                        )
+                        if not _is_still_current():
+                            return
+                    elif not is_windows_desktop:
+                        if not _is_still_current():
+                            return
                         pdf_dir = getattr(self.preview_cache, "cache_dir", None)
 
-                        def _warm_pdf() -> PdfDocumentSession:
+                        def _warm_pdf() -> Optional[PdfDocumentSession]:
+                            if not _is_still_current():
+                                return None
                             sess = PdfDocumentSession(raw, cache_dir=pdf_dir)
-                            if sess.supported and sess.can_render_images and sess.page_count > 0:
+                            if not _is_still_current():
+                                sess.close()
+                                return None
+                            pcount = getattr(sess, "page_count", 0)
+                            if (
+                                bool(getattr(sess, "supported", False))
+                                and bool(getattr(sess, "can_render_images", False))
+                                and isinstance(pcount, int)
+                                and not isinstance(pcount, bool)
+                                and pcount > 0
+                            ):
                                 sess.render_page_png(0, scale=1.6, dark_mode=False)
+                                if getattr(self, "_account_epoch", 0) != start_epoch:
+                                    doc_hash = getattr(sess, "doc_hash", "")
+                                    sess.close()
+                                    if isinstance(pdf_dir, Path) and doc_hash:
+                                        rdir = pdf_dir / "rendered_pdf"
+                                        if rdir.is_dir():
+                                            for entry in rdir.glob(f"{doc_hash}_*"):
+                                                try:
+                                                    entry.unlink(missing_ok=True)
+                                                except OSError:
+                                                    pass
+                                    return None
                             return sess
 
                         preopened_pdf = await asyncio.to_thread(_warm_pdf)
 
-            if req_seq != self._attachment_load_seq or loading_overlay._disposed:
+            if not _is_still_current():
                 if preopened_pdf is not None:
                     preopened_pdf.close()
                 return
@@ -905,13 +1455,18 @@ class CoursesCoordinator:
                 preconverted=preconverted,
                 preopened_pdf=preopened_pdf,
                 rendered_pdf_bytes=rendered_pdf_bytes,
+                preprepared_office_viewer=preprepared_office_viewer,
+                cached_file_path=cached_file_path,
             )
             preopened_pdf = None
         except Exception as exc:
             if preopened_pdf is not None:
                 preopened_pdf.close()
+            was_current = _is_still_current()
             logger.warning("Open attachment failed for %s: %s", att.file_name, exc)
             self._dismiss_overlay_instance(loading_overlay)
+            if not was_current:
+                return
             safe_fallback = safe_http_url(mod.web_url) or safe_http_url(att.file_url)
             err_holder: dict[str, PaneErrorOverlay] = {}
             err_overlay = PaneErrorOverlay(
@@ -936,11 +1491,16 @@ class CoursesCoordinator:
         self, att: CourseAttachment, source: str = "courses"
     ) -> None:
         """Fetch an attachment with user feedback and prompt to save it locally."""
+        start_epoch = getattr(self, "_account_epoch", 0)
         self._show_snack(f"Đang tải xuống «{att.file_name}»...")
         try:
             raw = await self._fetch_attachment_bytes_async(source, att)
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             await self._save_bytes_async(att.file_name, raw)
         except Exception as exc:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             logger.warning("Save attachment failed for %s: %s", att.file_name, exc)
             self._show_snack(f"Lỗi tải file «{att.file_name}»: {exc}")
 
@@ -973,19 +1533,38 @@ class CoursesCoordinator:
         if saved:
             self._show_snack(f"Đã lưu: {safe_name}")
 
+    @staticmethod
+    def _write_external_file_with_motw(out: Path, data: bytes) -> None:
+        out.write_bytes(data)
+        if os.name == "nt" or platform_utils.IS_WINDOWS:
+            try:
+                with open(f"{out}:Zone.Identifier", "wb") as ads:
+                    ads.write(b"[ZoneTransfer]\r\nZoneId=3\r\n")
+            except OSError:
+                pass
+
     async def _open_external_async(self, file_name: str, data: bytes) -> None:
-        raw_leaf = Path(file_name or "document").name.strip()
+        raw_input = str(file_name or "").strip()
+        effective_input = raw_input if raw_input else "document.txt"
+        raw_leaf = Path(effective_input).name.strip()
         stripped_leaf = raw_leaf.rstrip(". ")
+        if not stripped_leaf:
+            stripped_leaf = "document.txt"
+            raw_leaf = "document.txt"
         raw_ext = Path(raw_leaf).suffix.lower()
         clean_ext = Path(stripped_leaf).suffix.lower()
-        if raw_ext in _DANGEROUS_EXTERNAL_EXTS or clean_ext in _DANGEROUS_EXTERNAL_EXTS:
+        if (
+            not clean_ext
+            or raw_ext != clean_ext
+            or clean_ext not in _SAFE_EXTERNAL_OPEN_EXTS
+        ):
             await self._save_bytes_async(file_name, data)
             return
 
-        safe_leaf = _SAFE_TMP_RE.sub("_", stripped_leaf).strip("._") or "document"
+        safe_leaf = _SAFE_TMP_RE.sub("_", stripped_leaf).strip("._") or f"document{clean_ext}"
         stem = Path(safe_leaf).stem or "document"
-        ext = Path(safe_leaf).suffix
-        if ext.lower() in _DANGEROUS_EXTERNAL_EXTS:
+        ext = Path(safe_leaf).suffix.lower()
+        if ext not in _SAFE_EXTERNAL_OPEN_EXTS:
             await self._save_bytes_async(file_name, data)
             return
 
@@ -993,14 +1572,44 @@ class CoursesCoordinator:
             await self._save_bytes_async(safe_leaf, data)
             return
 
+        start_epoch = getattr(self, "_account_epoch", 0)
         unique_name = f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
+        out: Optional[Path] = None
         try:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                return
             tmp_dir = self.preview_cache.cache_dir / "external"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             out = tmp_dir / unique_name
-            await asyncio.to_thread(out.write_bytes, data)
+
+            def _write_if_current() -> bool:
+                if getattr(self, "_account_epoch", 0) != start_epoch:
+                    return False
+                self._write_external_file_with_motw(out, data)
+                if getattr(self, "_account_epoch", 0) != start_epoch:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return False
+                return True
+
+            wrote = await asyncio.to_thread(_write_if_current)
+            if not wrote or getattr(self, "_account_epoch", 0) != start_epoch:
+                try:
+                    out.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
             await ft.UrlLauncher().launch_url(out.as_uri())
         except Exception:
+            if getattr(self, "_account_epoch", 0) != start_epoch:
+                if out is not None:
+                    try:
+                        out.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                return
             await self._save_bytes_async(file_name, data)
 
     def _show_snack(self, text: str) -> None:
@@ -1009,15 +1618,8 @@ class CoursesCoordinator:
             bgcolor=C.SURFACE,
             duration=3000,
         )
-        show_dlg = getattr(self._page, "show_dialog", None)
-        if callable(show_dlg):
-            try:
-                show_dlg(sb)
-                return
-            except (AttributeError, TypeError):
-                pass
         overlay = getattr(self._page, "overlay", None)
-        if overlay is not None:
+        if isinstance(overlay, list):
             overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
             overlay.append(sb)
             sb.open = True
@@ -1027,6 +1629,13 @@ class CoursesCoordinator:
                     update()
                 except Exception:
                     pass
+            return
+        show_dlg = getattr(self._page, "show_dialog", None)
+        if callable(show_dlg):
+            try:
+                show_dlg(sb)
+            except (AttributeError, TypeError):
+                pass
 
     def update_theme(self) -> None:
         """Propagate semantic theme changes to CoursesTabView and active overlays."""

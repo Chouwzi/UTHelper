@@ -247,7 +247,7 @@ def test_f2_mobile_dispatch_constructs_flet_webview(
     platform_profile: Any,
 ) -> None:
     """F2: Android and iOS build_embedded_webview_host wrap a flet_webview.WebView."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
 
     host_mod = importlib.import_module("gui.components.courses.embedded_webview_host")
     platform_profile(profile, page=fake_page)
@@ -316,7 +316,7 @@ def test_f2_host_lifecycle_eval_js_navigate_suspend_resume_dispose(
     platform_profile: Any,
 ) -> None:
     """F2: Lifecycle methods eval_js, navigate, suspend, resume, sync_bounds, dispose work cleanly."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
 
     host_mod = importlib.import_module("gui.components.courses.embedded_webview_host")
     platform_profile("android", page=fake_page)
@@ -355,7 +355,7 @@ def test_f2_courses_coordinator_uses_unified_host_instead_of_flet_uth_quiz(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F2: CoursesCoordinator mounts unified EmbeddedWebViewHost via public workflows on Android and Windows."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
     from gui.components.courses.webview_pane import CoursesWebViewPane
 
     host_mod = importlib.import_module("gui.components.courses.embedded_webview_host")
@@ -603,7 +603,7 @@ def test_f4_flet_webview_back_forward_reload_wired_on_android(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F4: Back, forward, and reload controls invoke flet_webview.WebView navigation methods on Android."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
     from gui.components.courses.webview_pane import CoursesWebViewPane
 
     calls: list[str] = []

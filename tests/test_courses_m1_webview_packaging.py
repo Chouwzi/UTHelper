@@ -428,7 +428,7 @@ def test_f2_build_embedded_webview_host_rejects_unsafe_and_headless_platforms(
 
 
 def test_f2_embedded_webview_host_flet_webview_backend(monkeypatch: pytest.MonkeyPatch):
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
 
     ran_tasks: list[str] = []
 
@@ -798,7 +798,11 @@ def test_f3_local_preview_server_viewer_assets_and_security(
             assert st == 200, rel
             assert hdrs["content-type"] == mime
             assert hdrs["cross-origin-resource-policy"] == "same-origin"
-            assert hdrs["cache-control"] == "no-store, private"
+            if rel.endswith(".html"):
+                assert hdrs["cache-control"] == "no-store, private"
+            else:
+                assert hdrs["cache-control"] == "public, max-age=3600"
+                assert hdrs.get("etag")
             assert hdrs["x-content-type-options"] == "nosniff"
             assert hdrs["referrer-policy"] == "no-referrer"
             if rel.endswith(".html"):

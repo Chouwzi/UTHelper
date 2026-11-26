@@ -354,7 +354,7 @@ def test_scenario2_pptx_16_9_deck_slides_notes_android_save_and_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Scenario 2 (F2, F3, F5, F7, F8, F9, F11): 16:9 PPTX review + Android save without file://."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
     from core.courses.office_viewer_service import prepare_office_viewer
     from gui.components.courses import embedded_webview_host as ewh_mod
     from gui.controllers import courses_coordinator as coord_mod
@@ -549,6 +549,9 @@ def test_scenario3_nested_zip_archive_pdf_outlines_bottomsheet_and_back(
         on_open_assignment_fallback=lambda _m: None,
         on_launch_url=lambda u: fake_page.launch_url(u),
     )
+    # Force native Flet PDF outline BottomSheet path even on runtimes without pypdfium2
+    # (e.g., Linux CI) where DocumentReaderView otherwise routes to pdf.js WebView.
+    monkeypatch.setattr(coord, "build_webview_host", lambda *_a, **_kw: None)
     courses_view = coord.courses_view
     courses_view.set_viewport_size(360, 780)
     asyncio.run(coord.ensure_loaded_async())

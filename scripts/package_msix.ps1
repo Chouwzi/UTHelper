@@ -185,7 +185,7 @@ try {
         schema_version     = 1
         channel            = $Channel
         store_product_id   = $normalizedProductId
-        android_package_id = "com.uthelper.uthelper"
+        android_package_id = "io.github.chouwzi.uthelper"
     }
     $channelJson = ($channelPayload | ConvertTo-Json -Depth 4) + "`n"
 

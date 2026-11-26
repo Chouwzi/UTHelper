@@ -27,5 +27,12 @@ InAppWebViewSettings createQuizWebViewSettings({bool allowPopups = true}) {
     // and use a non-persistent iOS store separate from CookieManager.
     incognito: false,
     saveFormData: false,
+    useHybridComposition: true,
+    cacheEnabled: true,
+    cacheMode: CacheMode.LOAD_DEFAULT,
+    hardwareAcceleration: true,
+    domStorageEnabled: true,
+    databaseEnabled: true,
+    offscreenPreRaster: false,
   );
 }

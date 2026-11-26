@@ -341,6 +341,60 @@ class TodayScheduleCache:
         return bool(SafeFileIO.write_json_atomic(self._path, payload))
 
 
+UPCOMING_SCHEDULE_CACHE_TTL_SECONDS = 3 * 60 * 60
+
+
+@dataclass(frozen=True)
+class UpcomingScheduleSnapshot:
+    sessions: tuple[ClassSession, ...]
+    fetched_at: datetime
+
+
+class UpcomingScheduleCache:
+    """Short-lived disk cache for the forward class-reminder window."""
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, cache_dir: Path | None = None, namespace: str = "") -> None:
+        if cache_dir is None:
+            from config import _USER_DATA_DIR
+
+            cache_dir = _USER_DATA_DIR
+        digest = hashlib.sha256(namespace.strip().casefold().encode("utf-8")).hexdigest()[:12]
+        self._path = cache_dir / f"upcoming_schedule_{digest}.json"
+
+    def load_fresh(self, *, now: datetime | None = None) -> UpcomingScheduleSnapshot | None:
+        payload = SafeFileIO.read_json_safe(self._path, dict)
+        if not isinstance(payload, dict) or payload.get("version") != self.SCHEMA_VERSION:
+            return None
+        rows = payload.get("sessions")
+        if not isinstance(rows, list):
+            return None
+        try:
+            fetched_at = datetime.fromisoformat(str(payload["fetched_at"]))
+            current = now or datetime.now(tz=fetched_at.tzinfo)
+            age = (current - fetched_at).total_seconds()
+            if not 0 <= age < UPCOMING_SCHEDULE_CACHE_TTL_SECONDS:
+                return None
+            sessions = tuple(
+                ClassSession.from_dict(row) for row in rows if isinstance(row, dict)
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            logger.warning("Upcoming schedule cache is invalid")
+            return None
+        return UpcomingScheduleSnapshot(sessions, fetched_at)
+
+    def save(
+        self, sessions: tuple[ClassSession, ...] | list[ClassSession], *, fetched_at: datetime | None = None
+    ) -> bool:
+        payload = {
+            "version": self.SCHEMA_VERSION,
+            "fetched_at": (fetched_at or datetime.now()).isoformat(),
+            "sessions": [session.to_dict() for session in sessions],
+        }
+        return bool(SafeFileIO.write_json_atomic(self._path, payload))
+
+
 WEEK_CACHE_RADIUS = 4  # weeks kept before and after the current week
 
 
@@ -473,12 +527,39 @@ class TodayScheduleCoordinator:
         self._now_provider = now_provider
         self._guard = asyncio.Lock()
         self._wake_event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
         # Bumped by replace_cache(): an in-flight refresh started under a
         # previous account must discard its result instead of publishing a
         # stale READY into the new account's view.
         self._generation = 0
         self.state = TodayScheduleViewState(ScheduleLoadStatus.IDLE)
+
+    def _capture_loop(self) -> None:
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+    def _signal_wake(self) -> None:
+        loop = self._loop
+        if loop is not None:
+            if loop.is_closed():
+                return
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is not loop:
+                try:
+                    loop.call_soon_threadsafe(self._wake_event.set)
+                except RuntimeError:
+                    pass
+                return
+        try:
+            self._wake_event.set()
+        except RuntimeError:
+            pass
 
     def _publish(self, state: TodayScheduleViewState) -> None:
         self.state = state
@@ -495,16 +576,22 @@ class TodayScheduleCoordinator:
         )
 
     async def ensure_today(self) -> TodayScheduleViewState:
+        self._capture_loop()
         # The cache is only a valid stand-in for a live fetch while the same
         # account can still authenticate. With missing/blank credentials the
         # cached snapshot belongs to nobody, so fall through to refresh(),
         # which reports AUTH_REQUIRED instead of publishing a stale READY.
+        generation = self._generation
+        cache = self._cache
+        target_date = self._now_provider().date()
         username, password = self._credentials_provider()
         cached = (
-            self._cache.load_for(self._now_provider().date())
+            await asyncio.to_thread(cache.load_for, target_date)
             if username and password
             else None
         )
+        if self._generation != generation:
+            return self.state
         if cached is not None:
             state = TodayScheduleViewState(
                 ScheduleLoadStatus.READY,
@@ -516,10 +603,14 @@ class TodayScheduleCoordinator:
         return await self.refresh("startup")
 
     async def refresh(self, trigger: str = "manual") -> TodayScheduleViewState:
+        self._capture_loop()
         async with self._guard:
             generation = self._generation
+            cache = self._cache
             target_date = self._now_provider().date()
-            existing = self._cache.load_for(target_date)
+            existing = await asyncio.to_thread(cache.load_for, target_date)
+            if self._generation != generation:
+                return self.state
             # Credentials are validated BEFORE the startup cache shortcut: with
             # an absent/expired identity a cached snapshot can never be
             # refreshed, so serving it as READY would mask the login prompt.
@@ -571,7 +662,9 @@ class TodayScheduleCoordinator:
                     tuple(sessions),
                     self._now_provider(),
                 )
-                self._cache.save(snapshot)
+                await asyncio.to_thread(cache.save, snapshot)
+                if self._generation != generation:
+                    return self.state
                 state = TodayScheduleViewState(
                     ScheduleLoadStatus.READY,
                     snapshot=snapshot,
@@ -600,13 +693,14 @@ class TodayScheduleCoordinator:
     def replace_cache(self, cache: TodayScheduleCache) -> None:
         self._cache = cache
         self._generation += 1
-        self._wake_event.set()
+        self._signal_wake()
 
     def close(self) -> None:
         self._closed = True
-        self._wake_event.set()
+        self._signal_wake()
 
     async def run(self) -> None:
+        self._capture_loop()
         try:
             await self.ensure_today()
             while not self._closed:

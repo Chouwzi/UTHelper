@@ -22,6 +22,7 @@ dependencies = [
     "pypdf>=7.1.1",
     "pillow>=13.0.0",
     "xlrd>=2.0.2",
+    "filelock>=3.25.0",
 ]
 
 [project.optional-dependencies]
@@ -47,7 +48,7 @@ uth-alert = "main:main"
 packages = ["src"]
 
 [tool.flet]
-org = "com.uthelper"
+org = "io.github.chouwzi"
 product = "UTHelper"
 artifact = "UTHelper"
 company = "UTHelper"
@@ -66,10 +67,13 @@ packages = true
 app = true
 
 [tool.flet.flutter.pubspec.dependency_overrides]
-# Flet 0.86.5's template pins 1.0.0; jni_flutter >=1.1.0 (published
-# 2026-11-18) requires jni ^1.2.0 for JReference.nonNullPointer.
+# Flet 0.86.5's template pins jni 1.0.0; jni_flutter >=1.1.0 requires jni ^1.2.0
+# for JReference.nonNullPointer. jni 1.2.0 was retracted on 2026-11-19 because
+# Jni.findClass stopped stripping L...; descriptors, crashing older bindings
+# like path_provider_android 2.3.1 (ClassNotFoundException: "Landroid/content/Context;").
+# jni 1.2.1 retains nonNullPointer and restores descriptor stripping.
 # https://github.com/flet-dev/flet/issues/6919
-jni = "1.2.0"
+jni = "1.2.1"
 
 # ── Windows-specific configuration ──
 [tool.flet.windows]
@@ -82,6 +86,7 @@ dependencies = [
     "keyring>=25.0.0",
     "lxml>=6.1.0",
     "pypdfium2>=5.9.0",
+    "filelock>=3.25.0",
     "flet-uth-quiz==0.1.0",
 ]
 
@@ -95,7 +100,7 @@ package_files = ["**.chm"]
 # ── Android-specific configuration ──
 [tool.flet.android]
 legacy_packaging = true
-bundle_id = "com.uthelper.uthelper"
+bundle_id = "io.github.chouwzi.uthelper"
 adaptive_icon_background = "#0F172A"
 target_sdk_version = 36
 dependencies = [
@@ -103,6 +108,7 @@ dependencies = [
     "flet-uth-background-sync==0.1.0",
     "flet-uth-quiz==0.1.0",
     "flet-webview==0.86.5",
+    "filelock>=3.25.0",
 ]
 
 [tool.flet.android.dev_packages]
@@ -130,11 +136,12 @@ flet-uth-quiz = "extensions/flet_uth_quiz"
 
 # ── iOS-specific configuration ──
 [tool.flet.ios]
-bundle_id = "com.uthelper.UTHelper"
+bundle_id = "io.github.chouwzi.uthelper"
 dependencies = [
     "flet-uth-background-sync==0.1.0",
     "flet-uth-quiz==0.1.0",
     "flet-webview==0.86.5",
+    "filelock>=3.25.0",
 ]
 
 [tool.flet.ios.dev_packages]
@@ -149,11 +156,19 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 
 [dependency-groups]
 dev = [
+    "flet-webview==0.86.5",
+    "filelock>=3.25.0",
     "pytest>=9.0.3",
     "pytest-timeout>=2.3,<3",
+    "ruff>=0.9.0",
 ]
 
 [tool.pytest.ini_options]
+pythonpath = [
+    "src",
+    "extensions/flet_uth_quiz/src",
+    "extensions/flet_uth_background_sync/src",
+]
 testpaths = ["tests"]
 markers = [
     "windows_integration: isolated tests against real Windows user APIs",

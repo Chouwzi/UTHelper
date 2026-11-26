@@ -175,7 +175,9 @@ def test_moodle_client_and_service_grade_report_isolation_and_lock(monkeypatch):
 
     html = client.fetch_grade_report_html(5)
     assert html == "<html></html>"
-    assert lock_states == [True]
+    # _session_lock is intentionally released during blocking HTTP I/O so
+    # clear_session() cannot stall waiting on a slow network request.
+    assert lock_states == [False]
 
     service = MoodleService(
         lambda *args, **kwargs: None,

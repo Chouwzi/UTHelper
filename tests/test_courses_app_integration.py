@@ -293,6 +293,9 @@ def test_adaptive_nav_shell_switches_bar_and_rail_and_handles_theme():
     nav.set_active("courses")
     assert nav.rail.selected_index == 1
     assert nav.bar.selected_index == 1
+    assert nav.bar.height == 64
+    assert nav.bar.label_behavior == ft.NavigationBarLabelBehavior.ALWAYS_SHOW
+    assert nav.bar.label_padding == ft.Padding.symmetric(horizontal=1, vertical=0)
 
     # Unknown key is ignored without resetting selection
     nav.set_active("nonexistent")
@@ -445,18 +448,23 @@ def test_courses_coordinator_save_bytes_only_notifies_when_saved(tmp_path: Path,
         # Cancelled save must NOT show "Đã lưu"
         asyncio.run(coord._save_bytes_async("notes.pdf", b"pdf-bytes"))
         assert page.dialogs == []
+        assert [c for c in page.overlay if isinstance(c, ft.SnackBar)] == []
 
-        # Confirmed save shows "Đã lưu: notes.pdf"
+        # Confirmed save shows "Đã lưu: notes.pdf" via page.overlay (without popping dialogs)
         save_mock.return_value = str(tmp_path / "notes.pdf")
         asyncio.run(coord._save_bytes_async("notes.pdf", b"pdf-bytes"))
-        assert len(page.dialogs) == 1
-        assert "Đã lưu: notes.pdf" in page.dialogs[0].content.value
+        assert page.dialogs == []
+        snacks = [c for c in page.overlay if isinstance(c, ft.SnackBar)]
+        assert len(snacks) == 1
+        assert "Đã lưu: notes.pdf" in snacks[-1].content.value
 
         # Exception handled cleanly via snack
         save_mock.side_effect = RuntimeError("picker failed")
         asyncio.run(coord._save_bytes_async("notes.pdf", b"pdf-bytes"))
-        assert len(page.dialogs) == 2
-        assert "Không thể lưu" in page.dialogs[1].content.value
+        assert page.dialogs == []
+        snacks = [c for c in page.overlay if isinstance(c, ft.SnackBar)]
+        assert len(snacks) >= 1
+        assert "Không thể lưu" in snacks[-1].content.value
     finally:
         coord.close()
 
@@ -1156,3 +1164,161 @@ def test_start_course_quiz_missing_account_reauth_callback_succeeds(monkeypatch)
         assert sync_called == [True]
 
     asyncio.run(_run())
+
+
+def test_open_external_strict_allowlist_routes_dangerous_exts_to_save_and_writes_motw(
+    tmp_path: Path, monkeypatch
+):
+    import sys
+
+    coord, _server, pcache, _launched, _assigned = _build_coordinator(tmp_path)
+    launch_mock = AsyncMock()
+    monkeypatch.setattr(ft.UrlLauncher, "launch_url", launch_mock)
+    saved_calls: list[tuple[str, bytes]] = []
+
+    async def _fake_save(fname: str, payload: bytes) -> None:
+        saved_calls.append((fname, payload))
+
+    monkeypatch.setattr(coord, "_save_bytes_async", _fake_save)
+    try:
+        for bad_name in (
+            "payload.hta",
+            "script.js",
+            "shortcut.lnk",
+            "help.chm",
+            "applet.jar",
+            "import.reg",
+            "spoof.url",
+            "phish.html",
+        ):
+            asyncio.run(coord._open_external_async(bad_name, b"unsafe"))
+        assert launch_mock.await_count == 0
+        assert [n for n, _ in saved_calls] == [
+            "payload.hta",
+            "script.js",
+            "shortcut.lnk",
+            "help.chm",
+            "applet.jar",
+            "import.reg",
+            "spoof.url",
+            "phish.html",
+        ]
+
+        # Empty filename defaults safely to .txt allowlisted preview
+        asyncio.run(coord._open_external_async("", b"hello"))
+        assert launch_mock.await_count == 1
+        assert launch_mock.await_args.args[0].endswith(".txt")
+
+        # Safe .pdf writes Zone.Identifier MOTW on Windows NTFS before launch
+        asyncio.run(coord._open_external_async("handout.pdf", b"%PDF-1.4\n"))
+        assert launch_mock.await_count == 2
+        ext_files = list((pcache.cache_dir / "external").glob("*.pdf"))
+        assert len(ext_files) == 1
+        if sys.platform == "win32":
+            ads_path = f"{ext_files[0]}:Zone.Identifier"
+            try:
+                with open(ads_path, "rb") as ads_f:
+                    assert b"ZoneId=3" in ads_f.read()
+            except OSError:
+                pass
+    finally:
+        coord.close()
+
+
+def test_reset_for_account_switch_clears_preview_external_rendered_pdf_and_server_state(
+    tmp_path: Path,
+):
+    from core.courses.catalog_service import CourseCatalogService
+
+    store = CourseCacheStore(cache_dir=tmp_path / "reset_store", namespace="acct-1")
+    real_cat = CourseCatalogService(
+        cache_store=store,
+        preview_cache=PreviewFileCache(tmp_path / "preview"),
+    )
+    coord, server, pcache, _launched, _assigned = _build_coordinator(
+        tmp_path, catalog=real_cat
+    )
+    try:
+        att = CourseAttachment(
+            file_name="secret.pdf",
+            file_url="https://courses.ut.edu.vn/secret.pdf",
+            time_modified=1,
+            preview_kind="pdf",
+        )
+        pcache.put_bytes(att.file_url, att.time_modified, att.file_name, b"%PDF-1.4")
+        ext_dir = pcache.cache_dir / "external"
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        (ext_dir / "old.pdf").write_bytes(b"%PDF-1.4")
+        rendered_dir = pcache.cache_dir / "rendered_pdf"
+        rendered_dir.mkdir(parents=True, exist_ok=True)
+        (rendered_dir / "page0.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        blob_url = server.register_html("<html>acct1</html>")
+        store.set_pinned("courses:42", True)
+        prev_catalog_path = store._catalog_path
+
+        coord.reset_for_account_switch(None)
+
+        assert pcache.get_cached_path(att.file_url, att.time_modified, att.file_name) is None
+        assert list(ext_dir.iterdir()) == []
+        assert list(rendered_dir.iterdir()) == []
+        assert server.has_active_url(blob_url) is False
+        assert store._catalog_path != prev_catalog_path
+    finally:
+        coord.close()
+
+
+def test_cache_store_mem_details_lru_cap_and_singleflight_preview_coalescing(tmp_path: Path):
+    import threading
+    import time
+
+    from core.courses.catalog_service import CourseCatalogService
+
+    store = CourseCacheStore(cache_dir=tmp_path / "cstore", namespace="acct-a")
+    for cid in range(1, 25):
+        store.save_course_detail("courses", cid, [], [], synced_at=1000)
+        _ = store.load_course_detail("courses", cid)
+    assert len(store._mem_details) <= 16
+
+    pcache = PreviewFileCache(tmp_path / "pcache_sf")
+    download_calls = 0
+    call_lock = threading.Lock()
+
+    def _slow_download(_url: str) -> bytes:
+        nonlocal download_calls
+        with call_lock:
+            download_calls += 1
+        time.sleep(0.06)
+        return b"%PDF-1.4 coalesced"
+
+    cat = CourseCatalogService(
+        cache_store=store,
+        preview_cache=pcache,
+        courses_provider=SimpleNamespace(download_file=_slow_download),  # type: ignore[arg-type]
+    )
+    att = CourseAttachment(
+        file_name="shared.pdf",
+        file_url="https://courses.ut.edu.vn/pluginfile.php/99/shared.pdf",
+        time_modified=77,
+        preview_kind="pdf",
+    )
+    results: list[Path] = []
+    res_lock = threading.Lock()
+
+    def _worker() -> None:
+        p = cat.fetch_or_cache_preview_file(
+            "courses", att.file_url, att.time_modified, att.file_name
+        )
+        if p is not None:
+            with res_lock:
+                results.append(p)
+
+    threads = [threading.Thread(target=_worker) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert len(results) == 5
+    assert download_calls == 1
+    assert all(p.read_bytes() == b"%PDF-1.4 coalesced" for p in results)
+

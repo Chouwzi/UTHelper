@@ -328,7 +328,7 @@ def test_f8_docx_and_pptx_mount_tier_a_embedded_webview_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F8: DocumentReaderView mounts Tier A EmbeddedWebViewHost for .docx and .pptx when available."""
-    import flet_webview as fwv
+    fwv = pytest.importorskip("flet_webview")
 
     host_mod = importlib.import_module("gui.components.courses.embedded_webview_host")
     platform_profile("android", page=fake_page)

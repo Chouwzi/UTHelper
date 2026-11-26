@@ -16,6 +16,8 @@ import 'quiz_profile_storage.dart';
 import 'quiz_web_storage.dart';
 import 'quiz_webview_settings.dart';
 
+export 'quiz_profile_storage.dart' show activeQuizWindowsProfilePaths;
+
 const _loadTimeout = Duration(seconds: 45);
 const _mobileAcquireTimeout = Duration(seconds: 30);
 const _mobileCleanupTimeout = Duration(seconds: 5);
@@ -24,7 +26,6 @@ const _cookiePayloadTimeout = Duration(seconds: 10);
 const _cookiePayloadLimit = 16 * 1024;
 const _maxSessionCookies = 32;
 final _sessionKeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
-final Set<String> activeQuizWindowsProfilePaths = <String>{};
 
 Uri? parseQuizBaseUri(String? value, {bool requireHttps = false}) {
   if (value == null ||
@@ -93,6 +94,21 @@ Uri? validateQuizLaunchUrl(String? value, Uri? trustedOrigin) {
   return target;
 }
 
+/// Keeps the primary quiz WebView mounted at constant layout bounds while a
+/// popup is active, blocking pointer and keyboard focus instead of `Offstage`.
+Widget buildQuizMainWebViewLayer({
+  required bool obscuredByPopup,
+  required Widget child,
+}) {
+  return IgnorePointer(
+    ignoring: obscuredByPopup,
+    child: ExcludeFocus(
+      excluding: obscuredByPopup,
+      child: child,
+    ),
+  );
+}
+
 class UthQuizPlayerControl extends StatefulWidget {
   const UthQuizPlayerControl({super.key, required this.control});
 
@@ -117,10 +133,12 @@ class _BlockedPopupWindow {
 }
 
 class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
+  final GlobalKey _mainWebViewKey = GlobalKey();
   InAppWebViewController? _controller;
   WebViewEnvironment? _environment;
-  Future<WebViewEnvironment>? _environmentCreation;
-  Directory? _profileDirectory;
+  bool _hasActiveEnvironmentMount = false;
+  String? _acquiredEnvironmentKey;
+  int? _acquiredEnvironmentEpoch;
   Uri? _trustedOrigin;
   String? _initialUrl;
   String? _sessionKey;
@@ -202,48 +220,43 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
         final profilesRoot = Directory(
           path.join(supportDirectory.path, 'uthhelper', 'quiz-webview'),
         );
-        await profilesRoot.create(recursive: true);
-        if (_disposed) return;
 
-        var profileDirectory = Directory(
-          path.join(profilesRoot.path, _sessionKey!.toLowerCase()),
-        );
-        final deleted = await deleteQuizProfileDirectoryWithRetry(
-          profileDirectory,
-        );
-        if (_disposed) return;
-        if (!deleted) {
-          profileDirectory = Directory(
-            path.join(
-              profilesRoot.path,
-              buildFallbackQuizProfileDirectoryName(_sessionKey!),
-            ),
-          );
-        }
-        await profileDirectory.create(recursive: true);
-        activeQuizWindowsProfilePaths.add(
-          normalizeProfilePath(profileDirectory.path),
-        );
-        _profileDirectory = profileDirectory;
-        unawaited(
-          sweepQuizProfileDirectories(
+        final sessionKey = _sessionKey!;
+        _acquiredEnvironmentKey = sessionKey.toLowerCase();
+        _hasActiveEnvironmentMount = true;
+        late final ({
+          WebViewEnvironment environment,
+          Directory profileDirectory,
+          int sessionEpoch,
+        }) acquired;
+        try {
+          acquired = await sharedQuizWindowsEnvironmentCache.acquire(
+            sessionKey,
             profilesRoot,
-            activePaths: activeQuizWindowsProfilePaths,
-          ),
-        );
+            createEnvironment: (profileDir) => WebViewEnvironment.create(
+              settings: WebViewEnvironmentSettings(
+                userDataFolder: profileDir.path,
+              ),
+            ),
+            disposeEnvironment: (env) => env.dispose(),
+            markActiveMount: true,
+            sweepStale: true,
+          );
+        } catch (_) {
+          _hasActiveEnvironmentMount = false;
+          rethrow;
+        }
         if (_disposed) {
-          await _deleteProfileDirectory();
+          if (_hasActiveEnvironmentMount && _acquiredEnvironmentKey != null) {
+            sharedQuizWindowsEnvironmentCache.releaseMount(
+              _acquiredEnvironmentKey!,
+            );
+            _hasActiveEnvironmentMount = false;
+          }
           return;
         }
-        final creation = WebViewEnvironment.create(
-          settings: WebViewEnvironmentSettings(
-            userDataFolder: profileDirectory.path,
-          ),
-        );
-        _environmentCreation = creation;
-        final environment = await creation;
-        if (_disposed) return;
-        _environment = environment;
+        _environment = acquired.environment;
+        _acquiredEnvironmentEpoch = acquired.sessionEpoch;
       } else if (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
               defaultTargetPlatform == TargetPlatform.iOS)) {
@@ -289,7 +302,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     if (_disposed) return;
     _controller = controller;
     try {
-      final purge = _purgeSessionStore();
+      final purge = _purgeQuizOriginStore();
       _initialStorePurge = purge;
       await purge.timeout(_mobileCleanupTimeout);
       if (_disposed) return;
@@ -334,14 +347,46 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     return CookieManager.instance();
   }
 
-  Future<void> _purgeSessionStore() async {
-    await _cookieManager().deleteAllCookies();
-    if (!kIsWeb && defaultTargetPlatform != TargetPlatform.windows) {
-      await purgeQuizWebStorage(
+  Future<void> _purgeQuizOriginStore() async {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      if (_acquiredEnvironmentKey != null) {
+        final bumped = sharedQuizWindowsEnvironmentCache.bumpSessionEpoch(
+          _acquiredEnvironmentKey!,
+        );
+        if (bumped > 0) {
+          _acquiredEnvironmentEpoch = bumped;
+        }
+      }
+      await _cookieManager().deleteAllCookies();
+      final controller = _controller;
+      final origin = _trustedOrigin?.origin;
+      if (controller != null && origin != null && origin.isNotEmpty) {
+        try {
+          await controller
+              .callDevToolsProtocolMethod(
+                methodName: 'Storage.clearDataForOrigin',
+                parameters: <String, dynamic>{
+                  'origin': origin,
+                  'storageTypes':
+                      'local_storage,indexeddb,websql,service_workers',
+                },
+              )
+              .timeout(const Duration(seconds: 2));
+        } catch (_) {
+          // Best-effort: older WebView2 runtimes or test fakes may not support CDP.
+        }
+      }
+      return;
+    }
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      await purgeQuizOriginCookies(_cookieManager(), _trustedOrigin);
+      await purgeQuizOriginWebStorage(
         defaultTargetPlatform,
         WebStorageManager.instance(),
+        _trustedOrigin,
       );
-      await InAppWebViewController.clearAllCache();
     }
   }
 
@@ -694,9 +739,10 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Offstage(
-            offstage: _popups.isNotEmpty,
+          buildQuizMainWebViewLayer(
+            obscuredByPopup: _popups.isNotEmpty,
             child: InAppWebView(
+              key: _mainWebViewKey,
               webViewEnvironment: _environment,
               initialSettings: createQuizWebViewSettings(),
               onWebViewCreated: _initializeController,
@@ -753,11 +799,20 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     if (lease != null) {
       unawaited(_releaseMobileSession(lease));
     }
-    if (_environment != null ||
-        _environmentCreation != null ||
-        _profileDirectory != null) {
-      final disposal = _disposeWindowsResources();
-      unawaited(disposal);
+    if (_hasActiveEnvironmentMount && _acquiredEnvironmentKey != null) {
+      sharedQuizWindowsEnvironmentCache.releaseMount(_acquiredEnvironmentKey!);
+      _hasActiveEnvironmentMount = false;
+    }
+    if (_environment != null &&
+        _acquiredEnvironmentKey != null &&
+        _acquiredEnvironmentEpoch != null) {
+      unawaited(
+        _cleanupWindowsSessionOnClose(
+          _environment!,
+          sessionKey: _acquiredEnvironmentKey!,
+          sessionEpoch: _acquiredEnvironmentEpoch!,
+        ),
+      );
     }
     super.dispose();
   }
@@ -788,46 +843,26 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     }
   }
 
-  Future<void> _disposeWindowsResources() async {
-    if (!await _waitForSessionWork()) {
-      // Keep the profile intact while a cookie operation may still use it,
-      // then retry disposal once the native operation has actually settled.
-      unawaited(
-        _settleSessionWork().then((_) => _disposeWindowsResources()),
-      );
-      return;
-    }
-    var environment = _environment;
-    final creation = _environmentCreation;
-    if (environment == null && creation != null) {
-      try {
-        environment = await creation;
-      } catch (_) {
-        // A failed creation still leaves a profile directory to remove.
-      }
-    }
-    if (environment != null) {
-      try {
-        await environment.dispose();
-      } catch (_) {
-        // Keep the profile intact if native WebView2 may still own it.
-        return;
-      }
-    }
-    await _deleteProfileDirectory();
-  }
-
-  Future<void> _deleteProfileDirectory() async {
-    final directory = _profileDirectory;
-    if (directory == null) return;
-    try {
-      await deleteQuizProfileDirectoryWithRetry(directory);
-    } finally {
-      activeQuizWindowsProfilePaths.remove(
-        normalizeProfilePath(directory.path),
-      );
-      _profileDirectory = null;
-    }
+  Future<void> _cleanupWindowsSessionOnClose(
+    WebViewEnvironment environment, {
+    required String sessionKey,
+    required int sessionEpoch,
+  }) async {
+    await sharedQuizWindowsEnvironmentCache.runCloseCleanup(
+      sessionKey,
+      expectedEpoch: sessionEpoch,
+      beforeCleanup: _waitForSessionWork,
+      cleanup: () async {
+        try {
+          await CookieManager.instance(webViewEnvironment: environment)
+              .deleteAllCookies()
+              .timeout(_mobileCleanupTimeout);
+        } catch (_) {
+          // Keep cached environment & HTTP disk cache intact; cookies are also
+          // cleared on next quiz open before bootstrap.
+        }
+      },
+    );
   }
 
   Future<void> _releaseMobileSession(MobileSessionLease lease) async {
@@ -839,14 +874,14 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
         unawaited(
           _settleSessionWork().then((_) async {
             try {
-              await _purgeSessionStore().timeout(_mobileCleanupTimeout);
+              await _purgeQuizOriginStore().timeout(_mobileCleanupTimeout);
             } catch (_) {
               // The queue stays disabled if the final purge also fails.
             }
           }),
         );
       }
-      await _purgeSessionStore().timeout(_mobileCleanupTimeout);
+      await _purgeQuizOriginStore().timeout(_mobileCleanupTimeout);
     } catch (_) {
       // Cleanup failures are deliberately not surfaced with native details.
       sharedMobileSessionQueue.disable();

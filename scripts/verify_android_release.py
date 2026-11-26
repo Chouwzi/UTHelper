@@ -75,9 +75,17 @@ _REQUIRED_OFFICE_VIEWER_ASSETS = (
     "jszip.min.js",
     "pptx_host.html",
     "pptx_host.js",
+    "pptx_worker.js",
     "pptx_engine.js",
     "viewer.css",
     "viewer_common.js",
+)
+_REQUIRED_PDF_VIEWER_ASSETS = (
+    "pdf_host.html",
+    "pdf_host.js",
+    "pdf_viewer.css",
+    "pdf.min.mjs",
+    "pdf.worker.min.mjs",
 )
 
 
@@ -140,6 +148,7 @@ def _run(command: Sequence[str | Path]) -> str:
             [str(part) for part in command],
             timeout=60,
             check=True,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
         )
@@ -545,6 +554,20 @@ def _verify_office_viewer_assets_in_app_zip(
                         raise AndroidVerificationError(
                             f"Nested app.zip ({nested_name}) has empty office_viewer asset: {asset_name}"
                         )
+                for asset_name in _REQUIRED_PDF_VIEWER_ASSETS:
+                    candidates = (
+                        f"assets/pdf_viewer/{asset_name}",
+                        f"app/assets/pdf_viewer/{asset_name}",
+                    )
+                    matched = next((c for c in candidates if c in names), None)
+                    if matched is None:
+                        raise AndroidVerificationError(
+                            f"Nested app.zip ({nested_name}) is missing pdf_viewer asset: {asset_name}"
+                        )
+                    if nested.getinfo(matched).file_size <= 0:
+                        raise AndroidVerificationError(
+                            f"Nested app.zip ({nested_name}) has empty pdf_viewer asset: {asset_name}"
+                        )
                 verified_any = True
         except zipfile.BadZipFile as exc:
             raise AndroidVerificationError(
@@ -556,6 +579,74 @@ def _verify_office_viewer_assets_in_app_zip(
             "Android artifact is missing office_viewer assets inside nested app.zip"
         )
     return verified_any
+
+
+def _verify_quiz_and_webview_packages(
+    archive: zipfile.ZipFile,
+    *,
+    require: bool,
+) -> bool:
+    """Verify ``flutter_inappwebview`` DEX classes plus ``flet_uth_quiz`` & ``flet_webview`` Python packages."""
+    archive_names = archive.namelist()
+    has_sitepackages_archive = any(
+        name.rsplit("/", 1)[-1] in {"sitepackages.zip", "site-packages.zip"}
+        for name in archive_names
+    )
+    if not require and not has_sitepackages_archive:
+        return False
+
+    dex_entries = [name for name in archive_names if name.endswith(".dex")]
+    has_inappwebview_dex = False
+    for dex_name in sorted(dex_entries):
+        dex_strings = extract_dex_strings(archive.read(dex_name), dex_name=dex_name)
+        if any("flutter_inappwebview" in item.lower() for item in dex_strings):
+            has_inappwebview_dex = True
+            break
+    if not has_inappwebview_dex:
+        raise AndroidVerificationError(
+            "Android artifact DEX is missing flutter_inappwebview plugin classes"
+        )
+
+    has_flet_uth_quiz = False
+    has_flet_webview = False
+
+    def _scan_paths(paths: Sequence[str]) -> None:
+        nonlocal has_flet_uth_quiz, has_flet_webview
+        for raw_name in paths:
+            if not raw_name.endswith((".py", ".pyc")):
+                continue
+            parts = raw_name.replace("\\", "/").split("/")
+            parents = parts[:-1]
+            if "flet_uth_quiz" in parents:
+                has_flet_uth_quiz = True
+            if "flet_webview" in parents:
+                has_flet_webview = True
+
+    _scan_paths(archive_names)
+    nested_zips = [name for name in archive_names if name.endswith(".zip")]
+    for nested_name in sorted(nested_zips):
+        info = archive.getinfo(nested_name)
+        if info.file_size > 256 * 1024 * 1024:
+            raise AndroidVerificationError(
+                f"Nested Python archive exceeds size limit: {nested_name}"
+            )
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive.read(nested_name))) as nested:
+                _scan_paths(nested.namelist())
+        except zipfile.BadZipFile as exc:
+            raise AndroidVerificationError(
+                f"Failed to inspect nested Python archive {nested_name}"
+            ) from exc
+
+    if not has_flet_uth_quiz:
+        raise AndroidVerificationError(
+            "Android artifact is missing packaged flet_uth_quiz Python extension"
+        )
+    if not has_flet_webview:
+        raise AndroidVerificationError(
+            "Android artifact is missing packaged flet_webview Python extension"
+        )
+    return True
 
 
 def _verify_chplay_manifest_policy(manifest_root: ET.Element) -> None:
@@ -752,6 +843,131 @@ def _verify_chplay_archive_contents(
         )
 
 
+_STRONG_MANIFEST_DIGEST_HEADERS = frozenset(
+    {
+        "sha-256-digest",
+        "sha-384-digest",
+        "sha-512-digest",
+    }
+)
+_JARSIGNER_FATAL_SUBSTRINGS = (
+    "unsigned entries",
+    "jar is unsigned",
+    "not signed by",
+    "has expired",
+    "not yet valid",
+    "considered a security risk",
+    "algorithm constraints check failed",
+)
+
+
+def _resolve_jdk_tool(tool_name: str) -> str | None:
+    java_home = os.environ.get("JAVA_HOME", "").strip()
+    if java_home:
+        bin_dir = Path(java_home) / "bin"
+        for suffix in ((".exe", "") if os.name == "nt" else ("",)):
+            candidate = bin_dir / f"{tool_name}{suffix}"
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which(tool_name)
+
+
+def _is_jar_signing_metadata_entry(entry_name: str) -> bool:
+    normalized = entry_name.lstrip("/").upper()
+    if not normalized.startswith("META-INF/"):
+        return False
+    rest = normalized[len("META-INF/") :]
+    if not rest or "/" in rest:
+        return False
+    return (
+        rest in {"MANIFEST.MF", "INDEX.LIST"}
+        or rest.endswith((".SF", ".DSA", ".RSA", ".EC"))
+        or rest.startswith("SIG-")
+    )
+
+
+def _verify_aab_jar_manifest_coverage(artifact: Path) -> None:
+    """Ensure every non-signing AAB entry is covered by a strong digest in MANIFEST.MF."""
+    try:
+        with zipfile.ZipFile(artifact) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise AndroidVerificationError("AAB archive contains duplicate ZIP entries")
+            if "META-INF/MANIFEST.MF" not in names:
+                raise AndroidVerificationError("AAB is missing META-INF/MANIFEST.MF signature manifest")
+
+            sf_bases: set[str] = set()
+            block_bases: set[str] = set()
+            for name in names:
+                upper = name.lstrip("/").upper()
+                if not upper.startswith("META-INF/"):
+                    continue
+                rest = upper[len("META-INF/") :]
+                if "/" in rest:
+                    continue
+                if rest.endswith(".SF") and len(rest) > 3:
+                    sf_bases.add(rest[:-3])
+                elif rest.endswith((".RSA", ".DSA", ".EC")):
+                    stem = rest.rsplit(".", 1)[0]
+                    if stem:
+                        block_bases.add(stem)
+            if not (sf_bases & block_bases):
+                raise AndroidVerificationError("AAB is missing META-INF signature block files")
+
+            raw_manifest = archive.read("META-INF/MANIFEST.MF")
+    except zipfile.BadZipFile as exc:
+        raise AndroidVerificationError("Android AAB archive is invalid") from exc
+
+    normalized = raw_manifest.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    sections = normalized.split(b"\n\n")
+    signed_entries: set[str] = set()
+    for raw_section in sections[1:]:
+        if not raw_section.strip():
+            continue
+        unfolded_lines: list[bytes] = []
+        for raw_line in raw_section.split(b"\n"):
+            if raw_line.startswith(b" "):
+                if not unfolded_lines:
+                    raise AndroidVerificationError("AAB MANIFEST.MF has invalid continuation line")
+                unfolded_lines[-1] += raw_line[1:]
+            elif raw_line:
+                unfolded_lines.append(raw_line)
+
+        entry_name: str | None = None
+        has_strong_digest = False
+        for header_bytes in unfolded_lines:
+            if b":" not in header_bytes:
+                raise AndroidVerificationError("AAB MANIFEST.MF contains malformed header")
+            raw_key, raw_val = header_bytes.split(b":", 1)
+            if raw_val.startswith(b" "):
+                raw_val = raw_val[1:]
+            try:
+                key = raw_key.decode("ascii").strip().lower()
+                val = raw_val.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise AndroidVerificationError("AAB MANIFEST.MF is not valid UTF-8") from exc
+            if key == "name":
+                entry_name = val
+            elif key in _STRONG_MANIFEST_DIGEST_HEADERS and val.strip():
+                has_strong_digest = True
+
+        if entry_name is not None:
+            if not has_strong_digest:
+                raise AndroidVerificationError(
+                    f"AAB MANIFEST.MF entry lacks strong SHA-2 Digest: {entry_name!r}"
+                )
+            signed_entries.add(entry_name)
+
+    for info in infos:
+        if info.is_dir() or _is_jar_signing_metadata_entry(info.filename):
+            continue
+        if info.filename not in signed_entries:
+            raise AndroidVerificationError(
+                f"AAB contains unsigned entry outside signed manifest: {info.filename!r}"
+            )
+
+
 def _verify_aab_signature(
     artifact: Path,
     *,
@@ -777,11 +993,22 @@ def _verify_aab_signature(
             if "does not match pinned identity" in str(exc):
                 raise
 
-    jarsigner = shutil.which("jarsigner")
-    keytool = shutil.which("keytool")
+    jarsigner = _resolve_jdk_tool("jarsigner")
+    keytool = _resolve_jdk_tool("keytool")
     if jarsigner and keytool:
-        _run((jarsigner, "-verify", "-strict", artifact))
-        cert_output = _run((keytool, "-printcert", "-jarfile", artifact))
+        _verify_aab_jar_manifest_coverage(artifact)
+        verify_output = _run(
+            (jarsigner, "-J-Duser.language=en", "-J-Duser.country=US", "-verify", artifact)
+        )
+        verify_lines = {line.strip() for line in verify_output.splitlines() if line.strip()}
+        lowered_output = verify_output.lower()
+        if "jar verified." not in verify_lines or any(
+            marker in lowered_output for marker in _JARSIGNER_FATAL_SUBSTRINGS
+        ):
+            raise AndroidVerificationError("AAB JAR signature verification failed")
+        cert_output = _run(
+            (keytool, "-J-Duser.language=en", "-J-Duser.country=US", "-printcert", "-jarfile", artifact)
+        )
         fingerprints = [
             _normalize_fingerprint(match.group(1))
             for match in _KEYTOOL_SHA256_LINE.finditer(cert_output)
@@ -835,6 +1062,7 @@ def verify_android_release(
     architecture: str = "universal",
     allow_unsigned: bool = False,
     require_office_viewer: bool = False,
+    require_quiz_webview: bool = False,
 ) -> dict[str, object]:
     if (apk is None) == (aab is None):
         raise AndroidVerificationError("Provide exactly one of apk or aab")
@@ -868,7 +1096,7 @@ def verify_android_release(
         raise AndroidVerificationError("Android release version metadata is invalid") from exc
     if build_number != canonical_build_number:
         raise AndroidVerificationError("Android build number is not canonical for version")
-    if package_id != "com.uthelper.uthelper":
+    if package_id != "io.github.chouwzi.uthelper":
         raise AndroidVerificationError("Android package ID is not canonical")
     if not _COMMIT.fullmatch(commit_sha) or not workflow_run_id.strip():
         raise AndroidVerificationError("Android provenance metadata is invalid")
@@ -1002,6 +1230,10 @@ def verify_android_release(
                 archive,
                 require=require_office_viewer,
             )
+            quiz_webview_verified = _verify_quiz_and_webview_packages(
+                archive,
+                require=require_quiz_webview,
+            )
     except zipfile.BadZipFile as exc:
         raise AndroidVerificationError(
             f"{'AAB' if is_aab else 'APK'} native library archive is invalid"
@@ -1059,6 +1291,8 @@ def verify_android_release(
             checks.append("aab_signature" if is_aab else "apk_signature")
         if office_viewer_verified:
             checks.append("office_viewer_assets")
+        if quiz_webview_verified:
+            checks.append("quiz_webview_packages")
         evidence = {
             "schema_version": 2,
             "platform": "android",
@@ -1120,6 +1354,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Require office_viewer static assets inside nested Flet app.zip",
     )
+    parser.add_argument(
+        "--require-quiz-webview",
+        action="store_true",
+        help="Require flutter_inappwebview DEX classes plus flet_uth_quiz and flet_webview packages",
+    )
     return parser
 
 
@@ -1139,6 +1378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         architecture=args.architecture,
         allow_unsigned=args.allow_unsigned,
         require_office_viewer=args.require_office_viewer,
+        require_quiz_webview=args.require_quiz_webview,
     )
     return 0
 

@@ -38,7 +38,7 @@ jobs:
           cache: pip
       - name: Install validation dependencies
         timeout-minutes: 10
-        run: pip install -e . -e extensions/flet_uth_quiz "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
+        run: pip install -e . -e extensions/flet_uth_quiz -e extensions/flet_uth_background_sync "flet-webview==0.86.5" "keyring>=25.0.0" "pytest>=9.0.3" "pytest-timeout>=2.3,<3"
       - name: Run complete Python suite
         timeout-minutes: 15
         run: python -m pytest tests extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/tests -q --tb=short
@@ -167,12 +167,12 @@ jobs:
           if [ "$ARCHITECTURE" = arm64 ]; then set -- "$@" --arch arm64-v8a; fi
 
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id io.github.chouwzi.uthelper
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel apk_lts --target-sdk 36
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id com.uthelper.uthelper
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json --android-package-id io.github.chouwzi.uthelper
           flet build apk --build-version "$VERSION" --build-number "$BUILD_NUMBER" "$@" --yes --verbose
 
           grep -R -q "androidx.work:work-runtime-ktx:2.11.2" build/flutter-packages/flet_uth_background_sync/android/build.gradle
@@ -189,7 +189,7 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          test "$("$APKANALYZER" manifest application-id "$APK")" = "com.uthelper.uthelper"
+          test "$("$APKANALYZER" manifest application-id "$APK")" = "io.github.chouwzi.uthelper"
           test "$("$APKANALYZER" manifest version-name "$APK")" = "$VERSION"
           test "$("$APKANALYZER" manifest version-code "$APK")" = "$BUILD_NUMBER"
           "$APKANALYZER" manifest print "$APK" > final-android-manifest.xml
@@ -198,6 +198,7 @@ jobs:
           grep -q "ActionBroadcastReceiver" final-android-manifest.xml
           grep -q "DeadlineAlarmReceiver" final-android-manifest.xml
           grep -q "RescheduleReceiver" final-android-manifest.xml
+          grep -q "ClassScheduleAlarmReceiver" final-android-manifest.xml
 
           mkdir -p release evidence
           FINAL_APK="release/UTHelper-$VERSION$APK_SUFFIX.apk"
@@ -207,12 +208,13 @@ jobs:
             --channel apk_lts \
             --version "$VERSION" \
             --build-number "$BUILD_NUMBER" \
-            --package-id com.uthelper.uthelper \
+            --package-id io.github.chouwzi.uthelper \
             --certificate-sha256 "$ANDROID_SIGNING_CERT_SHA256" \
             --commit-sha "$GITHUB_SHA" \
             --workflow-run-id "$GITHUB_RUN_ID" \
             --architecture "$ARCHITECTURE" \
             --require-office-viewer \
+            --require-quiz-webview \
             --output "evidence/UTHelper-$VERSION$APK_SUFFIX.apk.verification.json"
       - name: Attest signed APK
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
@@ -279,7 +281,7 @@ jobs:
             --evidence "evidence/UTHelper-$VERSION.ipa.verification.json" \
             --version "$VERSION" \
             --build-number "$BUILD_NUMBER" \
-            --bundle-id com.uthelper.UTHelper \
+            --bundle-id io.github.chouwzi.uthelper \
             --commit-sha "$GITHUB_SHA" \
             --workflow-run-id "$GITHUB_RUN_ID" \
             --require-office-viewer
@@ -387,7 +389,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
           python scripts/prepare_windows_bundle.py build/windows
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
-          python scripts/verify_windows_bundle.py build/windows --expected-version "$env:VERSION"
+          python scripts/verify_windows_bundle.py build/windows --expected-version "$env:VERSION" --strict-site-packages
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
           powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test_windows_bundle_e2e.ps1 -BundleDir build/windows -ObservationSeconds 8
           if ($LASTEXITCODE -ne 0) { throw "Windows bundle E2E failed" }

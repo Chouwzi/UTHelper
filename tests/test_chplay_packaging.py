@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -41,7 +42,7 @@ PLUGIN = (
 )
 VERSION = "2.5.1"
 BUILD_NUMBER = 2_005_001
-PACKAGE_ID = "com.uthelper.uthelper"
+PACKAGE_ID = "io.github.chouwzi.uthelper"
 FINGERPRINT = "AB" * 32
 COMMIT_SHA = "1" * 40
 
@@ -212,6 +213,9 @@ def test_pyproject_is_https_only_backup_disabled_and_play_targeted():
     gradle_props = android["gradle_properties"]
 
     assert any(dep.startswith("httpx>=") for dep in dependencies)
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert android["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
     assert android["target_sdk_version"] >= 35
     assert application["usesCleartextTraffic"] == "false"
     assert application["allowBackup"] == "false"
@@ -266,6 +270,7 @@ def test_distribution_channel_asset_is_never_tracked():
         capture_output=True,
         text=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     assert tracked.stdout.strip() == ""
 
@@ -388,6 +393,7 @@ def test_runtime_config_cli_writes_channel_and_requires_pair(tmp_path):
             "--distribution-output", str(channel),
         ],
         capture_output=True, text=True, timeout=30, cwd=ROOT,
+        stdin=subprocess.DEVNULL,
     )
     assert ok.returncode == 0, ok.stderr
     assert json.loads(channel.read_text(encoding="utf-8"))["channel"] == "chplay"
@@ -398,6 +404,7 @@ def test_runtime_config_cli_writes_channel_and_requires_pair(tmp_path):
             str(tmp_path / "diag2.json"), "--distribution-channel", "chplay",
         ],
         capture_output=True, text=True, timeout=30, cwd=ROOT,
+        stdin=subprocess.DEVNULL,
     )
     assert missing_output.returncode != 0
 
@@ -435,7 +442,7 @@ def test_verifier_accepts_compliant_chplay_aab(tmp_path):
         _manifest(application_attrs='android:allowBackup="false" android:extractNativeLibs="true"'),
         _manifest(
             extra_application='<provider android:name=".update.UthUpdateFileProvider" '
-            'android:authorities="com.uthelper.uthelper.uthupdates" />'
+            'android:authorities="io.github.chouwzi.uthelper.uthupdates" />'
         ),
         _manifest(
             extra_application='<service android:name="com.dexterous.flutterlocalnotifications.ForegroundService" '
@@ -760,7 +767,8 @@ def test_unsigned_diagnostics_are_chplay_only(tmp_path):
 def test_verifier_cli_exposes_aab_channel_and_diagnostic_flags(tmp_path):
     script = ROOT / "scripts" / "verify_android_release.py"
     help_text = subprocess.run(
-        [sys.executable, str(script), "--help"], capture_output=True, text=True, timeout=30, cwd=ROOT
+        [sys.executable, str(script), "--help"], capture_output=True, text=True, timeout=30, cwd=ROOT,
+        stdin=subprocess.DEVNULL
     ).stdout
     for flag in ("--aab", "--apk", "--channel", "--allow-unsigned", "--certificate-sha256"):
         assert flag in help_text
@@ -774,6 +782,7 @@ def test_verifier_cli_exposes_aab_channel_and_diagnostic_flags(tmp_path):
             "--output", str(tmp_path / "cli.json"),
         ],
         capture_output=True, text=True, timeout=30, cwd=ROOT, env=env,
+        stdin=subprocess.DEVNULL,
     )
     assert done.returncode == 0, done.stderr
     assert json.loads((tmp_path / "cli.json").read_text(encoding="utf-8"))["channel"] == "chplay"
@@ -910,3 +919,281 @@ def test_verifier_requires_office_viewer_assets_when_app_zip_present(tmp_path):
             android_home=sdk_dir,
             require_office_viewer=True,
         )
+
+
+def test_background_sync_gradle_and_android_workflow_guard_against_maven_central_429():
+    mirror_url = "https://maven-central.storage-download.googleapis.com/maven2/"
+    settings_gradle = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/settings.gradle"
+    )
+    build_gradle = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/build.gradle"
+    )
+    workflow = _read(".github/workflows/build-android.yml")
+
+    assert settings_gradle.count(mirror_url) >= 2
+    assert settings_gradle.index(mirror_url) < settings_gradle.index("mavenCentral()")
+    assert mirror_url in build_gradle
+    assert build_gradle.index(mirror_url) < build_gradle.index("mavenCentral()")
+    assert "-Dorg.gradle.internal.http.retry.max.attempts=" in workflow
+    assert workflow.count("run_gradle_with_retry") >= 2
+    assert "~/.gradle/init.d" not in workflow
+
+
+def test_verifier_enforces_quiz_and_webview_packages_when_required(tmp_path):
+    # 1. Missing flutter_inappwebview in DEX -> rejected
+    no_dex_plugin = _aab(tmp_path / "no-inappwebview.aab")
+    with pytest.raises(AndroidVerificationError, match="flutter_inappwebview"):
+        _verify(
+            no_dex_plugin,
+            tmp_path,
+            output=tmp_path / "out-no-dex.json",
+            require_quiz_webview=True,
+        )
+
+    # 2. DEX present, missing flet_webview in sitepackages.zip -> rejected
+    sp_missing_wv = io.BytesIO()
+    with zipfile.ZipFile(sp_missing_wv, "w") as inner:
+        inner.writestr("flet_uth_quiz/__init__.pyc", b"pyc")
+    partial_aab = _aab(
+        tmp_path / "missing-flet-webview.aab",
+        dex_strings=(
+            "Lcom/uthelper/MainActivity;",
+            "Lcom/pichillilorenzo/flutter_inappwebview_android/InAppWebViewFlutterPlugin;",
+        ),
+        extra={"base/assets/flutter_assets/app/sitepackages.zip": sp_missing_wv.getvalue()},
+    )
+    with pytest.raises(AndroidVerificationError, match="flet_webview"):
+        _verify(partial_aab, tmp_path, output=tmp_path / "out-no-wv.json")
+
+    # 3. Complete DEX + sitepackages.zip -> accepted and recorded in chplay checks
+    sp_complete = io.BytesIO()
+    with zipfile.ZipFile(sp_complete, "w") as inner:
+        inner.writestr("flet_uth_quiz/__pycache__/__init__.cpython-312.pyc", b"pyc")
+        inner.writestr("flet_webview/__init__.pyc", b"pyc")
+    valid_aab = _aab(
+        tmp_path / "complete-quiz-webview.aab",
+        dex_strings=(
+            "Lcom/uthelper/MainActivity;",
+            "Lcom/pichillilorenzo/flutter_inappwebview_android/InAppWebViewFlutterPlugin;",
+        ),
+        extra={"base/assets/flutter_assets/app/sitepackages.zip": sp_complete.getvalue()},
+    )
+    evidence = _verify(
+        valid_aab,
+        tmp_path,
+        output=tmp_path / "out-complete.json",
+        require_quiz_webview=True,
+    )
+    assert "quiz_webview_packages" in evidence["checks"]
+
+
+def test_verifier_accepts_real_self_signed_play_upload_key_aab_and_rejects_tampering(
+    tmp_path, monkeypatch
+):
+    keytool = shutil.which("keytool")
+    jarsigner = shutil.which("jarsigner")
+    if not keytool or not jarsigner:
+        pytest.skip("JDK keytool/jarsigner not installed")
+
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+
+    def gen_keystore(name: str, cn: str) -> tuple[Path, str]:
+        ks = tmp_path / f"{name}.jks"
+        subprocess.run(
+            [
+                keytool,
+                "-J-Duser.language=en",
+                "-J-Duser.country=US",
+                "-genkeypair",
+                "-keystore",
+                str(ks),
+                "-storepass",
+                "uploadpass123",
+                "-keypass",
+                "uploadpass123",
+                "-alias",
+                "upload",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "3650",
+                "-dname",
+                f"CN={cn}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+        listed = subprocess.run(
+            [
+                keytool,
+                "-J-Duser.language=en",
+                "-J-Duser.country=US",
+                "-list",
+                "-v",
+                "-keystore",
+                str(ks),
+                "-storepass",
+                "uploadpass123",
+                "-alias",
+                "upload",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+        match = re.search(r"SHA256:\s*([0-9A-Fa-f:]+)", listed)
+        assert match is not None, listed
+        fp = re.sub(r"[^0-9A-Fa-f]", "", match.group(1)).upper()
+        return ks, fp
+
+    def sign_aab(aab_path: Path, ks: Path) -> None:
+        subprocess.run(
+            [
+                jarsigner,
+                "-keystore",
+                str(ks),
+                "-storepass",
+                "uploadpass123",
+                "-keypass",
+                "uploadpass123",
+                "-digestalg",
+                "SHA-256",
+                str(aab_path),
+                "upload",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+
+    trusted_ks, trusted_fp = gen_keystore("trusted_upload", "UTH Play Upload")
+    rogue_ks, _rogue_fp = gen_keystore("rogue_upload", "Rogue Signer")
+
+    # 1. Valid self-signed Play Upload Key AAB (no apksigner, no TSA) -> accepted
+    signed_aab = _aab(tmp_path / "UTHelper-2.5.1-chplay-upload-signed.aab")
+    sign_aab(signed_aab, trusted_ks)
+    evidence = _verify(
+        signed_aab,
+        tmp_path,
+        allow_unsigned=False,
+        certificate_sha256=trusted_fp,
+        output=tmp_path / "signed-evidence.json",
+    )
+    assert evidence["signature_valid"] is True
+    assert evidence["signature_kind"] == "aab-upload-pinned"
+    assert evidence["certificate_fingerprint"] == trusted_fp
+
+    # 2. Unsigned AAB -> rejected when allow_unsigned=False
+    unsigned_aab = _aab(tmp_path / "UTHelper-2.5.1-unsigned.aab")
+    with pytest.raises(AndroidVerificationError):
+        _verify(
+            unsigned_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "unsigned-evidence.json",
+        )
+
+    # 3. Wrong self-signed Play Upload Key -> rejected
+    wrong_key_aab = _aab(tmp_path / "UTHelper-2.5.1-wrong-key.aab")
+    sign_aab(wrong_key_aab, rogue_ks)
+    with pytest.raises(AndroidVerificationError, match="certificate"):
+        _verify(
+            wrong_key_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "wrong-key-evidence.json",
+        )
+
+    # 4. Appended unsigned entry after signing -> rejected
+    appended_aab = tmp_path / "UTHelper-2.5.1-appended.aab"
+    shutil.copyfile(signed_aab, appended_aab)
+    with zipfile.ZipFile(appended_aab, "a") as zf:
+        zf.writestr("base/assets/unsigned_payload.txt", b"injected")
+    with pytest.raises(AndroidVerificationError, match="unsigned|manifest"):
+        _verify(
+            appended_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "appended-evidence.json",
+        )
+
+    # 5. Tampered signed entry bytes -> rejected
+    tampered_aab = tmp_path / "UTHelper-2.5.1-tampered.aab"
+    with zipfile.ZipFile(signed_aab, "r") as src, zipfile.ZipFile(tampered_aab, "w") as dst:
+        for info in src.infolist():
+            payload = src.read(info.filename)
+            if info.filename == "base/dex/classes.dex":
+                payload = _dex(("Lcom/uthelper/Tampered;",))
+            dst.writestr(info, payload)
+    with pytest.raises(AndroidVerificationError):
+        _verify(
+            tampered_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "tampered-evidence.json",
+        )
+
+    # 6. Multi-signer AAB (trusted + rogue signature blocks) -> rejected
+    dual_signed_aab = tmp_path / "UTHelper-2.5.1-dual.aab"
+    shutil.copyfile(signed_aab, dual_signed_aab)
+    subprocess.run(
+        [
+            jarsigner,
+            "-keystore",
+            str(rogue_ks),
+            "-storepass",
+            "uploadpass123",
+            "-keypass",
+            "uploadpass123",
+            "-sigfile",
+            "ROGUE",
+            "-digestalg",
+            "SHA-256",
+            str(dual_signed_aab),
+            "upload",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    with pytest.raises(AndroidVerificationError, match="certificate"):
+        _verify(
+            dual_signed_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "dual-evidence.json",
+        )
+
+    # 7. Duplicate ZIP entry shadowing a signed file -> rejected
+    dup_aab = tmp_path / "UTHelper-2.5.1-dup.aab"
+    shutil.copyfile(signed_aab, dup_aab)
+    with zipfile.ZipFile(dup_aab, "a") as zf:
+        zf.writestr("BundleConfig.pb", b"shadowed")
+    with pytest.raises(AndroidVerificationError, match="duplicate|signature|verifier"):
+        _verify(
+            dup_aab,
+            tmp_path,
+            allow_unsigned=False,
+            certificate_sha256=trusted_fp,
+            output=tmp_path / "dup-evidence.json",
+        )
+
+

@@ -910,3 +910,52 @@ def test_system_section_keeps_autostart_status_visible_when_disabled(monkeypatch
     )
     assert view._sw_start_minimized_container.visible is True
     assert view._autostart_status.visible is False
+
+
+def test_settings_load_skips_redundant_refresh_when_palette_unchanged():
+    from gui.core.theme import semantic_palette
+
+    async def scenario():
+        view = _make_loading_view(None)
+        view._rendered_palette = semantic_palette()
+        await SettingsView.load_current_settings(view)
+        view._refresh_section_colors.assert_not_called()
+
+        view._rendered_palette = ("stale",)
+        await SettingsView.load_current_settings(view)
+        view._refresh_section_colors.assert_called_once()
+
+    asyncio.run(scenario())
+
+
+def test_settings_view_marshal_ui_handles_destroyed_flet_session_and_closed_loop():
+    import threading
+
+    class _DestroyedSessionPage:
+        @property
+        def loop(self):
+            raise RuntimeError("An attempt to fetch destroyed session.")
+
+    view = SimpleNamespace(_page=_DestroyedSessionPage())
+    called = []
+    errors = []
+
+    def _worker():
+        try:
+            SettingsView._marshal_ui(view, lambda: called.append("ran"))
+        except Exception as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=_worker)
+    t.start()
+    t.join(timeout=2.0)
+    assert errors == []
+    assert called == []
+
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    closed_view = SimpleNamespace(_page=SimpleNamespace(loop=closed_loop))
+    closed_called = []
+    SettingsView._marshal_ui(closed_view, lambda: closed_called.append("ran"))
+    assert closed_called == []
+

@@ -11,6 +11,7 @@ import 'quiz_profile_storage.dart';
 import 'quiz_web_storage.dart';
 
 const _cleanerTimeout = Duration(seconds: 5);
+final _sessionKeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
 
 /// Purges persisted quiz WebView profiles (Windows) and shared WebView stores
 /// (Android/iOS) when the user logs out or switches accounts.
@@ -31,11 +32,20 @@ class UthQuizSessionCleanerService extends FletService {
   }
 
   Future<dynamic> _invokeMethod(String name, dynamic args) async {
-    if (_disposed || name != 'clear_sessions') return false;
-    return await clearPersistedQuizSessions(
-      activeWindowsProfilePaths: _activeWindowsProfilePaths,
-      cancelled: _disposeSignal.future,
-    );
+    if (_disposed) return false;
+    if (name == 'clear_sessions') {
+      return await clearPersistedQuizSessions(
+        activeWindowsProfilePaths: _activeWindowsProfilePaths,
+        cancelled: _disposeSignal.future,
+      );
+    }
+    if (name == 'prewarm') {
+      final sessionKey = args is Map ? args['session_key'] : null;
+      return await prewarmQuizWebView(
+        sessionKey: sessionKey is String ? sessionKey : null,
+      );
+    }
+    return false;
   }
 
   @override
@@ -47,13 +57,83 @@ class UthQuizSessionCleanerService extends FletService {
   }
 }
 
-Future<bool> clearPersistedQuizSessions({
-  Set<String> activeWindowsProfilePaths = const <String>{},
-  Future<void>? cancelled,
+Future<bool> prewarmQuizWebView({
+  required String? sessionKey,
+  Future<String?> Function()? getWindowsRuntimeVersion,
+  Future<Directory> Function()? getSupportDirectory,
+  Future<WebViewEnvironment> Function(Directory profileDir)?
+      createWindowsEnvironment,
+  Future<void> Function(WebViewEnvironment environment)?
+      disposeWindowsEnvironment,
+  QuizWindowsEnvironmentCache<WebViewEnvironment>? windowsCache,
 }) async {
+  if (sessionKey == null || !_sessionKeyPattern.hasMatch(sessionKey)) {
+    return false;
+  }
   if (kIsWeb) return true;
   if (defaultTargetPlatform == TargetPlatform.windows) {
     try {
+      final runtimeVersion = await (getWindowsRuntimeVersion != null
+          ? getWindowsRuntimeVersion()
+          : WebViewEnvironment.getAvailableVersion());
+      if (runtimeVersion == null || runtimeVersion.isEmpty) {
+        return false;
+      }
+      final supportDirectory = await (getSupportDirectory != null
+          ? getSupportDirectory()
+          : getApplicationSupportDirectory());
+      final profilesRoot = Directory(
+        path.join(supportDirectory.path, 'uthhelper', 'quiz-webview'),
+      );
+      final cache = windowsCache ?? sharedQuizWindowsEnvironmentCache;
+      await cache.acquire(
+        sessionKey,
+        profilesRoot,
+        createEnvironment: createWindowsEnvironment ??
+            (profileDir) => WebViewEnvironment.create(
+                  settings: WebViewEnvironmentSettings(
+                    userDataFolder: profileDir.path,
+                  ),
+                ),
+        disposeEnvironment:
+            disposeWindowsEnvironment ?? (environment) => environment.dispose(),
+        markActiveMount: false,
+        sweepStale: true,
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  if (defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS) {
+    try {
+      CookieManager.instance();
+      await InAppWebViewController.getDefaultUserAgent()
+          .timeout(const Duration(seconds: 3));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Future<bool> clearPersistedQuizSessions({
+  Set<String> activeWindowsProfilePaths = const <String>{},
+  Future<void>? cancelled,
+  TargetPlatform? platformOverride,
+  MobileSessionQueue? sessionQueue,
+  Future<void> Function()? deleteAllCookiesFn,
+  Future<void> Function(TargetPlatform platform)? purgeWebStorageFn,
+  Future<void> Function()? clearAllCacheFn,
+}) async {
+  if (kIsWeb) return true;
+  final platform = platformOverride ?? defaultTargetPlatform;
+  if (platform == TargetPlatform.windows) {
+    try {
+      await disposeCachedQuizWebViewEnvironments();
       final supportDirectory = await getApplicationSupportDirectory();
       final profilesRoot = Directory(
         path.join(supportDirectory.path, 'uthhelper', 'quiz-webview'),
@@ -67,25 +147,39 @@ Future<bool> clearPersistedQuizSessions({
       return false;
     }
   }
-  if (defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS) {
+  if (platform == TargetPlatform.android ||
+      platform == TargetPlatform.iOS ||
+      platform == TargetPlatform.macOS) {
     final cancelSignal = cancelled ?? Completer<void>().future;
     final timeout = Completer<void>();
     final timer = Timer(_cleanerTimeout, timeout.complete);
+    final queue = sessionQueue ?? sharedMobileSessionQueue;
     MobileSessionLease? lease;
     try {
-      lease = await sharedMobileSessionQueue.acquire(
+      lease = await queue.acquire(
         cancelled: Future.any<void>([cancelSignal, timeout.future]),
       );
       if (lease == null) return false;
-      await CookieManager.instance()
-          .deleteAllCookies()
-          .timeout(_cleanerTimeout);
-      await purgeQuizWebStorage(
-        defaultTargetPlatform,
-        WebStorageManager.instance(),
-      ).timeout(_cleanerTimeout);
-      await InAppWebViewController.clearAllCache().timeout(_cleanerTimeout);
+      final deleteCookies = deleteAllCookiesFn ??
+          () => CookieManager.instance().deleteAllCookies();
+      await deleteCookies().timeout(_cleanerTimeout);
+
+      final purgeStorage = purgeWebStorageFn ??
+          (TargetPlatform activePlatform) {
+            final manager = WebStorageManager.instance();
+            if (activePlatform == TargetPlatform.macOS) {
+              return manager.removeDataModifiedSince(
+                dataTypes: WebsiteDataType.ALL,
+                date: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+              );
+            }
+            return purgeQuizWebStorage(activePlatform, manager);
+          };
+      await purgeStorage(platform).timeout(_cleanerTimeout);
+
+      final clearCache =
+          clearAllCacheFn ?? () => InAppWebViewController.clearAllCache();
+      await clearCache().timeout(_cleanerTimeout);
       return true;
     } catch (_) {
       return false;

@@ -12,6 +12,7 @@ from platform_utils.android_updates import (
     AndroidPackageDownloader,
     AndroidPackageLauncher,
     AndroidPackageVerifier,
+    PACKAGE_ID,
 )
 
 
@@ -25,7 +26,7 @@ def package():
         "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
         "a" * 64,
         100,
-        "com.uthelper.uthelper",
+        "io.github.chouwzi.uthelper",
         "b" * 64,
         {"kind": "android_package_installer"},
     )
@@ -62,9 +63,10 @@ def test_launcher_only_acknowledges_native_installer_opened(package, status, ack
         lambda: "2.5.1",
     )
     result = launcher.launch(Path("UTHelper.apk"), package)
+    assert PACKAGE_ID == "io.github.chouwzi.uthelper"
     assert result.acknowledged is acknowledged
     assert result.status == status
-    assert calls == [("UTHelper.apk", package.sha256, 100, "com.uthelper.uthelper", 2_005_001, package.certificate_fingerprint)]
+    assert calls == [("UTHelper.apk", package.sha256, 100, "io.github.chouwzi.uthelper", 2_005_001, package.certificate_fingerprint)]
 
 
 def test_scheduling_is_not_installation_acknowledgement(package):
@@ -278,7 +280,7 @@ def test_android_package_verifier_checks_metadata_without_full_sha256_pass(tmp_p
         "https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/UTHelper.apk",
         "f" * 64,
         len(payload),
-        "com.uthelper.uthelper",
+        "io.github.chouwzi.uthelper",
         "b" * 64,
         {"kind": "android_package_installer"},
     )

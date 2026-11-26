@@ -8,9 +8,11 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import inspect
 import logging
 from dataclasses import replace
 from urllib.parse import urlsplit
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
 from gui.core.theme import (
     C,
@@ -27,7 +29,11 @@ import platform_utils as _pu  # live runtime capability and UI-profile detection
 from gui.components.color_picker import open_color_picker
 
 # Import settings section helpers
-from gui.components.settings.account_section import init_account_controls, build_account_section
+from gui.components.settings.account_section import (
+    build_account_section,
+    init_account_controls,
+    refresh_demo_account_banner,
+)
 from gui.components.settings.display_section import init_display_controls, build_display_section
 from gui.components.settings.system_section import init_system_controls, build_system_section
 from gui.components.settings.privacy_section import init_privacy_controls, build_privacy_section
@@ -43,9 +49,9 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import ClassScheduleLeadHoursError, SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None, on_logout=None, on_account_login=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url, on_logout, on_account_login)
         self._init_controls()
         self._init_layout()
         self._rendered_palette = semantic_palette()
@@ -56,11 +62,14 @@ class SettingsView(ft.Container):
             return profile
         return resolve_distribution_channel()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None, on_logout=None, on_account_login=None):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
         self._on_saved = on_saved
+        self.on_save = on_saved
+        self.on_logout = on_logout
+        self.on_account_login = on_account_login
         self._on_test_tray = on_test_tray
         self._on_test_mobile = on_test_mobile
         self._on_test_tele = on_test_tele
@@ -716,7 +725,6 @@ class SettingsView(ft.Container):
             title=ft.Text(title, size=14, weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
             subtitle=ft.Text(subtitle, size=12, color=C.TEXT_SECONDARY) if subtitle else None,
             leading=leading_icon,
-            affinity=ft.Theme.color_scheme,
             controls=[body] if default_open else [],
             collapsed_text_color=C.TEXT_PRIMARY,
             text_color=C.ACCENT,
@@ -771,6 +779,7 @@ class SettingsView(ft.Container):
             if hasattr(self, "_on_form_field_change"):
                 self._on_form_field_change()
         tb.on_change = _on_change
+        tb._swatch_box = box
         label_txt = ft.Text(label_text, size=13, color=C.TEXT_PRIMARY, expand=True)
         self._themed_texts.append(label_txt)
         return tb, ft.Row([label_txt, box_click, tb], spacing=10, tight=True)
@@ -1093,9 +1102,14 @@ class SettingsView(ft.Container):
             # after every external theme callback so no broader repaint can tint
             # the swatches with the active application palette.
             self._rebuild_theme_cards()
-            # Show unsaved indicator
+            # Sync dirty indicator and unlock/lock Save button based on baseline diff
+            changed = self.has_changes()
             if hasattr(self, '_unsaved_dot'):
-                self._unsaved_dot.visible = True
+                self._unsaved_dot.visible = changed
+            if hasattr(self, "_update_save_button_state") and callable(
+                getattr(self, "_update_save_button_state")
+            ):
+                self._update_save_button_state()
             # Force full page repaint
             self._page.update()
             log.info("[THEME] page.update() completed successfully")
@@ -1249,6 +1263,7 @@ class SettingsView(ft.Container):
         if hasattr(self, '_test_loading_bar'):
             self._test_loading_bar.color = C.ACCENT
             self._test_loading_bar.bgcolor = C.SURFACE
+        refresh_demo_account_banner(self)
 
         # Reset button
         if hasattr(self, 'btn_reset'):
@@ -1408,6 +1423,23 @@ class SettingsView(ft.Container):
         except Exception:
             pass
 
+    def _sync_color_swatch_boxes(self) -> None:
+        """Keep color preview squares aligned with programmatic TextField updates."""
+        for attr in (
+            "_c_tb_critical",
+            "_c_tb_warning",
+            "_c_tb_safe",
+            "_c_tb_quiz",
+            "_c_tb_ass",
+            "_c_tb_att",
+            "_c_tb_open",
+            "_c_tb_other",
+        ):
+            tb = getattr(self, attr, None)
+            box = getattr(tb, "_swatch_box", None) if tb is not None else None
+            if box is not None:
+                box.bgcolor = tb.value
+
     def _apply_theme_colors(self, theme_key: str):
         """Fill color text fields from preset values."""
         preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["midnight_blue"])
@@ -1419,6 +1451,7 @@ class SettingsView(ft.Container):
         self._c_tb_att.value = preset["attendance"]
         self._c_tb_open.value = preset["open"]
         self._c_tb_other.value = preset["other"]
+        SettingsView._sync_color_swatch_boxes(self)
 
     def _rebuild_theme_cards(self):
         """Restore preset previews and update selection state in place."""
@@ -1547,23 +1580,36 @@ class SettingsView(ft.Container):
         self._dnd_end_field.value = "7"
         self._update_profile_summary()
         self._update_dnd_summary()
-        
+        if hasattr(self, "_unsaved_dot"):
+            self._unsaved_dot.visible = self.has_changes()
+        if hasattr(self, "_update_save_button_state") and callable(
+            getattr(self, "_update_save_button_state")
+        ):
+            self._update_save_button_state()
+
         self.update()
 
     async def _handle_test_login(self, e):
-        user = self._username_field.value.strip()
-        pwd = self._password_field.value.strip()
-        if not user or not pwd:
+        raw_user = self._username_field.value or ""
+        user = (
+            normalize_demo_username(raw_user)
+            if is_demo_account(raw_user)
+            else raw_user.strip()
+        )
+        pwd = self._password_field.value or ""
+        if not user or not pwd.strip():
             self._test_login_status.value = "Vui lòng nhập đủ MSSV và Mật khẩu!"
             self._test_login_status.color = C.CRITICAL
             if hasattr(self, "_test_login_status_icon"):
                 self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
                 self._test_login_status_icon.color = C.CRITICAL
                 self._test_login_status_icon.visible = True
-            self.update()
+            self._safe_update(self)
             return
 
         self._test_login_btn.disabled = True
+        if hasattr(self, "_logout_btn"):
+            self._logout_btn.disabled = True
         self._username_field.disabled = True
         self._password_field.disabled = True
         self._test_login_btn.text = "Đang kiểm tra..."
@@ -1572,11 +1618,82 @@ class SettingsView(ft.Container):
         self._test_login_status.value = ""
         if hasattr(self, "_test_login_status_icon"):
             self._test_login_status_icon.visible = False
-        self.update()
+        self._safe_update(self)
 
         try:
-            success = await asyncio.to_thread(self._orchestrator.client.login, username=user, password=pwd, force=True)
+            login_fn = self._orchestrator.client.login
+            supports_persist = False
+            try:
+                sig = inspect.signature(login_fn)
+                supports_persist = "persist" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+            except (TypeError, ValueError):
+                supports_persist = False
+
+            if supports_persist:
+                success = await asyncio.to_thread(
+                    login_fn,
+                    username=user,
+                    password=pwd,
+                    force=True,
+                    persist=False,
+                )
+            else:
+                success = await asyncio.to_thread(
+                    login_fn,
+                    username=user,
+                    password=pwd,
+                    force=True,
+                )
+
             if success:
+                self._username_field.value = user
+                self._password_field.value = pwd
+                if self._baseline_snapshot is not None:
+                    self._baseline_snapshot = replace(
+                        self._baseline_snapshot,
+                        uth_username=user,
+                        uth_password=pwd,
+                    )
+                refresh_demo_account_banner(self, user)
+                account_cb = getattr(self, "on_account_login", None)
+                if callable(account_cb):
+                    cb_res = account_cb(user, pwd)
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
+                else:
+                    settings.UTH_USERNAME = user
+                    settings.UTH_PASSWORD = pwd
+                    if is_demo_account(user):
+                        settings.MOODLE_WS_TOKEN = ""
+                        settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                    elif supports_persist:
+                        settings.UTH_CREDENTIALS_ORIGIN = ""
+                    has_persisted_auth = (
+                        is_demo_account(user)
+                        or not supports_persist
+                        or bool(str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip())
+                    )
+                    if self._orchestrator is not None:
+                        self._orchestrator.is_logged_in = has_persisted_auth
+                    await asyncio.to_thread(save_settings)
+                    legacy_cb = getattr(self, "on_save", None) or getattr(
+                        self, "_on_saved", None
+                    )
+                    if callable(legacy_cb):
+                        cb_res = legacy_cb()
+                        if inspect.isawaitable(cb_res):
+                            await cb_res
+                    if self._orchestrator is not None and has_persisted_auth:
+                        self._orchestrator.is_logged_in = True
+                if hasattr(self, "_unsaved_dot"):
+                    self._unsaved_dot.visible = self.has_changes()
+                if hasattr(self, "_update_save_button_state") and callable(
+                    getattr(self, "_update_save_button_state")
+                ):
+                    self._update_save_button_state()
                 self._test_login_status.value = "Đã kết nối với hệ thống UTH"
                 self._test_login_status.color = C.SAFE
                 if hasattr(self, "_test_login_status_icon"):
@@ -1599,12 +1716,106 @@ class SettingsView(ft.Container):
                 self._test_login_status_icon.visible = True
         finally:
             self._test_login_btn.disabled = False
+            if hasattr(self, "_logout_btn"):
+                self._logout_btn.disabled = False
             self._username_field.disabled = False
             self._password_field.disabled = False
             self._test_login_btn.text = "Kiểm tra kết nối"
             self._test_login_btn.icon = ft.Icons.WIFI_FIND_ROUNDED
             self._test_loading_bar.visible = False
-            self.update()
+            self._safe_update(self)
+
+    async def _handle_logout(self, _e=None):
+        if hasattr(self, "_logout_btn"):
+            self._logout_btn.disabled = True
+        self._test_login_btn.disabled = True
+        try:
+            self._username_field.value = ""
+            self._password_field.value = ""
+            if self._baseline_snapshot is not None:
+                self._baseline_snapshot = replace(
+                    self._baseline_snapshot,
+                    uth_username="",
+                    uth_password="",
+                )
+            refresh_demo_account_banner(self, "")
+            logout_cb = getattr(self, "on_logout", None)
+            if callable(logout_cb):
+                cb_res = logout_cb()
+                if inspect.isawaitable(cb_res):
+                    await cb_res
+            else:
+                settings.UTH_USERNAME = ""
+                settings.UTH_PASSWORD = ""
+                settings.UTH_CREDENTIALS_ORIGIN = ""
+                settings.MOODLE_WS_TOKEN = ""
+                settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                settings.MOODLE_SESSION = ""
+                client = getattr(self._orchestrator, "client", None)
+                clear_fn = getattr(client, "clear_session", None)
+                if callable(clear_fn):
+                    clear_fn()
+                if self._orchestrator is not None:
+                    self._orchestrator.is_logged_in = False
+                await asyncio.to_thread(save_settings)
+                legacy_cb = getattr(self, "on_save", None) or getattr(
+                    self, "_on_saved", None
+                )
+                if callable(legacy_cb):
+                    cb_res = legacy_cb()
+                    if inspect.isawaitable(cb_res):
+                        await cb_res
+            if hasattr(self, "_unsaved_dot"):
+                self._unsaved_dot.visible = self.has_changes()
+            self._test_login_status.value = "Đã đăng xuất và xóa thông tin đăng nhập."
+            self._test_login_status.color = C.SAFE
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.name = ft.Icons.CHECK_CIRCLE_ROUNDED
+                self._test_login_status_icon.color = C.SAFE
+                self._test_login_status_icon.visible = True
+        except Exception as ex:
+            self._test_login_status.value = f"Lỗi đăng xuất: {ex}"
+            self._test_login_status.color = C.CRITICAL
+            if hasattr(self, "_test_login_status_icon"):
+                self._test_login_status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+                self._test_login_status_icon.color = C.CRITICAL
+                self._test_login_status_icon.visible = True
+        finally:
+            if hasattr(self, "_logout_btn"):
+                self._logout_btn.disabled = False
+            self._test_login_btn.disabled = False
+            self._safe_update(self)
+
+    def _marshal_ui(self, fn):
+        """Marshal worker-thread control mutations onto the Flet event loop when active."""
+        page = getattr(self, "_page", None)
+        if page is None:
+            try:
+                page = self.page
+            except Exception:
+                page = None
+        if page is not None:
+            try:
+                loop = getattr(page, "loop", None)
+            except Exception:
+                return
+            if isinstance(loop, asyncio.AbstractEventLoop):
+                if loop.is_closed():
+                    return
+                try:
+                    running_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    running_loop = None
+                if running_loop is loop:
+                    fn()
+                    return
+                if loop.is_running():
+                    try:
+                        loop.call_soon_threadsafe(fn)
+                    except RuntimeError:
+                        pass
+                return
+        fn()
 
 
 
@@ -1645,15 +1856,34 @@ class SettingsView(ft.Container):
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mobile') and self._on_test_mobile: self._on_test_mobile(t)
 
+    def _block_external_test_in_demo_mode(self) -> bool:
+        if not is_demo_account(getattr(settings, "UTH_USERNAME", "")):
+            return False
+        debug_text = getattr(self, "_debug_info_text", None)
+        if debug_text is not None:
+            debug_text.value = (
+                "Phiên xem thử (Demo) đang hoạt động ngoại tuyến (Sandbox) · "
+                "Không gửi thông báo thử nghiệm ra kênh ngoài."
+            )
+            debug_text.color = C.WARNING
+            self._safe_update(debug_text)
+        return True
+
     def _do_test_tele(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_tele') and self._on_test_tele: self._on_test_tele(t)
 
     def _do_test_discord(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_discord') and self._on_test_discord: self._on_test_discord(t)
 
     def _do_test_mail(self):
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         if hasattr(self, '_on_test_mail') and self._on_test_mail: self._on_test_mail(t)
 
@@ -1711,18 +1941,35 @@ class SettingsView(ft.Container):
 
     def _do_test_moodle_connection(self):
         """Quick Moodle API connectivity test."""
+        if is_demo_account(settings.UTH_USERNAME):
+            self._debug_info_text.value = (
+                "Phiên xem thử (Demo) đang hoạt động ngoại tuyến (Sandbox) · "
+                "Không gửi yêu cầu mạng tới máy chủ Moodle."
+            )
+            self._debug_info_text.color = C.SAFE
+            self._safe_update(self._debug_info_text)
+            return
         import threading
         self._debug_info_text.value = "Đang kiểm tra kết nối Moodle..."
         self._debug_info_text.color = C.TEXT_SECONDARY
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
         def _worker():
             try:
                 ok = self._orchestrator.client.login(force=True)
                 if ok:
-                    token = self._orchestrator.client.token or "?"
+                    token = (
+                        getattr(self._orchestrator.client, "token", None)
+                        or settings.MOODLE_WS_TOKEN
+                        or "?"
+                    )
                     masked = token[:6] + "..." + token[-4:] if len(token) > 10 else token
-                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {self._orchestrator.client.user_id}"
+                    uid = (
+                        getattr(self._orchestrator.client, "user_id", None)
+                        or getattr(self._orchestrator, "_userid_cache", None)
+                        or "?"
+                    )
+                    result = f"Kết nối Moodle OK\nToken: {masked}\nUser ID: {uid}"
                     color = C.SAFE
                 else:
                     result = "Đăng nhập Moodle thất bại!"
@@ -1731,13 +1978,16 @@ class SettingsView(ft.Container):
                 result = f"Lỗi kết nối: {ex}"
                 color = C.CRITICAL
 
-            self._debug_info_text.value = result
-            self._debug_info_text.color = color
-            try:
-                self._debug_info_text.update()
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            def _apply():
+                self._debug_info_text.value = result
+                self._debug_info_text.color = color
+                try:
+                    self._debug_info_text.update()
+                except Exception:
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+            self._marshal_ui(_apply)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2147,19 +2397,24 @@ class SettingsView(ft.Container):
                 result = f"Lỗi kiểm tra: {ex}"
                 color = C.CRITICAL
 
-            self._debug_update_text.value = result
-            self._debug_update_text.color = color
-            try:
-                self._debug_update_text.update()
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            def _apply_upd():
+                self._debug_update_text.value = result
+                self._debug_update_text.color = color
+                try:
+                    self._debug_update_text.update()
+                except Exception:
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+
+            self._marshal_ui(_apply_upd)
 
         threading.Thread(target=_worker, daemon=True, name="debug-update").start()
 
     # Broadcast all channels
     def _do_test_broadcast(self):
         """Send mock notification to ALL registered channels simultaneously."""
+        if self._block_external_test_in_demo_mode():
+            return
         t = getattr(self, '_mock_type_drp', ft.Dropdown(value='critical')).value
         sent = []
         if self._on_test_tray and not _pu.IS_MOBILE:
@@ -2184,15 +2439,23 @@ class SettingsView(ft.Container):
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         self._debug_info_text.value = f"Broadcast [{t}] tới: {', '.join(sent) or 'Không có kênh nào'}"
         self._debug_info_text.color = C.SAFE if sent else C.WARNING
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
     # Network latency test
     def _do_test_latency(self):
         """Ping Moodle server and measure response time."""
+        if is_demo_account(settings.UTH_USERNAME):
+            self._debug_info_text.value = (
+                "Phiên xem thử (Demo) sử dụng dữ liệu mẫu ngoại tuyến · "
+                "Bỏ qua ping máy chủ Moodle."
+            )
+            self._debug_info_text.color = C.SAFE
+            self._safe_update(self._debug_info_text)
+            return
         import threading
         self._debug_info_text.value = "Đang ping Moodle..."
         self._debug_info_text.color = C.TEXT_SECONDARY
-        self._debug_info_text.update()
+        self._safe_update(self._debug_info_text)
 
         def _ping():
             import time, urllib.request
@@ -2217,10 +2480,15 @@ class SettingsView(ft.Container):
             else:
                 result = f"Không thể kết nối {url}"
                 color = C.CRITICAL
-            self._debug_info_text.value = result
-            self._debug_info_text.color = color
-            try: self._debug_info_text.update()
-            except Exception: pass
+            def _apply_ping():
+                self._debug_info_text.value = result
+                self._debug_info_text.color = color
+                try:
+                    self._debug_info_text.update()
+                except Exception:
+                    pass
+
+            self._marshal_ui(_apply_ping)
 
         threading.Thread(target=_ping, daemon=True, name="debug-ping").start()
 
@@ -2486,6 +2754,12 @@ class SettingsView(ft.Container):
 
     def _capture_form_snapshot(self) -> SettingsFormSnapshot:
         """Map controls to the canonical form model in exactly one place."""
+        raw_username = self._username_field.value
+        normalized_username = (
+            normalize_demo_username(raw_username)
+            if is_demo_account(raw_username)
+            else raw_username
+        )
         return SettingsFormSnapshot.from_form_values(
             {
                 "theme": self._selected_theme,
@@ -2497,7 +2771,7 @@ class SettingsView(ft.Container):
                 "color_attendance": self._c_tb_att.value,
                 "color_open": self._c_tb_open.value,
                 "color_other": self._c_tb_other.value,
-                "uth_username": self._username_field.value,
+                "uth_username": normalized_username,
                 "uth_password": self._password_field.value,
                 "always_on_top": self._sw_always_on_top.value,
                 "include_submitted": self._sw_submitted.value,
@@ -2550,8 +2824,10 @@ class SettingsView(ft.Container):
         self._c_tb_att.value = snapshot.color_attendance
         self._c_tb_open.value = snapshot.color_open
         self._c_tb_other.value = snapshot.color_other
+        SettingsView._sync_color_swatch_boxes(self)
         self._username_field.value = snapshot.uth_username
         self._password_field.value = snapshot.uth_password
+        refresh_demo_account_banner(self, snapshot.uth_username)
         self._sw_always_on_top.value = snapshot.always_on_top
         self._sw_submitted.value = snapshot.include_submitted
         self._sw_graded.value = snapshot.include_graded
@@ -2559,6 +2835,15 @@ class SettingsView(ft.Container):
         self._sw_start_minimized.value = snapshot.start_minimized
         self._sw_minimize_to_tray.value = snapshot.minimize_to_tray
         self._sw_auto_update.value = snapshot.auto_update_enabled
+        if snapshot.crash_reporting_consent == "not_asked":
+            dd_options = getattr(self._dd_crash_reporting_consent, "options", None)
+            if isinstance(dd_options, list) and not any(
+                getattr(opt, "key", None) == "not_asked" for opt in dd_options
+            ):
+                dd_options.insert(
+                    0,
+                    ft.dropdown.Option("not_asked", "Chưa chọn (đang tắt)"),
+                )
         self._dd_crash_reporting_consent.value = snapshot.crash_reporting_consent
         self._sw_bg_check.value = snapshot.background_check_android
         self._sw_email.value = snapshot.enable_gmail
@@ -2697,7 +2982,8 @@ class SettingsView(ft.Container):
 
             self._original_theme = snapshot.theme
             self._apply_snapshot_to_controls(snapshot)
-            self._refresh_section_colors()
+            if getattr(self, "_rendered_palette", None) != semantic_palette():
+                self._refresh_section_colors()
 
             self._known_courses = set()
             if hasattr(self, '_orchestrator'):
@@ -2765,7 +3051,7 @@ class SettingsView(ft.Container):
             # values in diagnostics; Back must still offer the safe discard path.
             return True
 
-    def _discard_and_close(self) -> None:
+    def _discard_and_close(self, on_closed=None) -> None:
         """Restore the complete persisted baseline before closing Settings."""
         if self._baseline_snapshot is not None:
             baseline = self._baseline_snapshot
@@ -2781,16 +3067,33 @@ class SettingsView(ft.Container):
                 self._unsaved_dot.visible = False
             if hasattr(self, "_save_status"):
                 self._save_status.value = ""
+            if hasattr(self, "_update_save_button_state") and callable(
+                getattr(self, "_update_save_button_state")
+            ):
+                self._update_save_button_state()
             self.update()
-        self._on_close_cb()
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
+        close_cb()
 
-    async def _handle_back(self, e):
+    async def request_close(self, on_closed=None) -> None:
+        """Guard leaving Settings (Back button or tab switch) when unsaved edits exist."""
+        await SettingsView._handle_back(self, None, on_closed=on_closed)
+
+    async def _handle_back(self, e, on_closed=None):
         import logging
         _log = logging.getLogger("settings.dialog")
-        _log.debug("Settings Back requested; has_changes=%s", self.has_changes())
+        _log.debug(
+            "Settings Back requested; screen=%s has_changes=%s",
+            getattr(self, "_current_screen", "hub"),
+            self.has_changes(),
+        )
+        if on_closed is None and getattr(self, "_current_screen", "hub") != "hub":
+            self._navigate_to_hub()
+            return
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
         if self._loading and not self.has_changes():
             self.cancel_pending_load()
-            self._on_close_cb()
+            close_cb()
             return
         if self.has_changes():
             def close_dlg(e):
@@ -2801,12 +3104,23 @@ class SettingsView(ft.Container):
             def discard_and_close(e):
                 _log.debug("Settings changes discarded")
                 self._page.pop_dialog()
-                self._discard_and_close()
+                if on_closed is None:
+                    self._discard_and_close()
+                else:
+                    SettingsView._discard_and_close(self, on_closed=on_closed)
 
             def save_and_close(e):
                 _log.debug("Settings save requested from Back dialog")
                 self._page.pop_dialog()
-                self._page.run_task(self._save_and_close_if_valid, e)
+                if on_closed is None:
+                    self._page.run_task(self._save_and_close_if_valid, e)
+                else:
+                    self._page.run_task(
+                        SettingsView._save_and_close_if_valid,
+                        self,
+                        e,
+                        on_closed,
+                    )
 
             confirm_dlg = ft.AlertDialog(
                 title=ft.Row(controls=[
@@ -2830,13 +3144,14 @@ class SettingsView(ft.Container):
             self._page.show_dialog(confirm_dlg)
             _log.debug("Settings discard dialog opened")
         else:
-            self._on_close_cb()
+            close_cb()
 
-    async def _save_and_close_if_valid(self, e) -> bool:
+    async def _save_and_close_if_valid(self, e, on_closed=None) -> bool:
         """Close Settings only after validation and persistence succeed."""
         if not await self._save(e):
             return False
-        self._on_close_cb()
+        close_cb = on_closed if callable(on_closed) else self._on_close_cb
+        close_cb()
         return True
 
     async def _save(self, e) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import importlib.util
 import os
@@ -9,14 +10,24 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 _QUIZ_PACKAGE = "flet_uth_quiz"
 _QUIZ_CLIENT_STAMP = ".flet-quiz-client.sha256"
 _QUIZ_EXTENSION_MARKER = "flet_uth_quiz.Extension()"
-_QUIZ_CLIENT_BUILD_TIMEOUT_SECONDS = 600
+_QUIZ_CLIENT_BUILD_TIMEOUT_SECONDS = 1800
 _MIN_BUILD_FREE_BYTES = 1_500_000_000
+_NUGET_VERSION = "7.3.1"
+_NUGET_DOWNLOAD_URL = (
+    f"https://dist.nuget.org/win-x86-commandline/v{_NUGET_VERSION}/nuget.exe"
+)
+_NUGET_SHA256 = "08ec6563b4a1ddd113d42531067539ffcd0c2d9632d839ad4eb58a0d5ddf1919"
+_NUGET_DOWNLOAD_TIMEOUT_SECONDS = 60
+_NUGET_MAX_BYTES = 20 * 1024 * 1024
 _MSVC_COROUTINE_SILENCE_DEFINE = "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
 _MSVC_COROUTINE_SILENCE_CL_FLAG = f"/D{_MSVC_COROUTINE_SILENCE_DEFINE}"
 _MSVC_COROUTINE_SILENCE_PATTERN = re.compile(
@@ -185,6 +196,193 @@ def _is_current_custom_client(project_root: Path, fingerprint: str) -> bool:
         return False
 
 
+class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject any non-HTTPS redirect while downloading build tooling."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme.lower() != "https":
+            raise urllib.error.URLError("Refusing non-HTTPS redirect for NuGet CLI.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(65536):
+                digest.update(chunk)
+        return digest.hexdigest().lower()
+    except OSError:
+        return None
+
+
+def _prepend_path_dir(env: dict[str, str], directory: Path) -> None:
+    dir_text = str(directory.resolve())
+    existing = env.get("PATH", "")
+    parts = [entry for entry in existing.split(os.pathsep) if entry]
+    if parts and os.path.normcase(parts[0]) == os.path.normcase(dir_text):
+        return
+    filtered = [
+        entry for entry in parts if os.path.normcase(entry) != os.path.normcase(dir_text)
+    ]
+    env["PATH"] = os.pathsep.join([dir_text, *filtered])
+
+
+def _nuget_cache_candidates(project_root: Path, env: Mapping[str, str]) -> list[Path]:
+    candidates: list[Path] = []
+    local_app_data = env.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        candidates.append(
+            Path(local_app_data)
+            / "UTHelper"
+            / "build-tools"
+            / "nuget"
+            / f"v{_NUGET_VERSION}"
+            / "nuget.exe"
+        )
+    candidates.append(
+        project_root
+        / "build"
+        / ".tools"
+        / "nuget"
+        / f"v{_NUGET_VERSION}"
+        / "nuget.exe"
+    )
+    return candidates
+
+
+def _download_verified_nuget_bytes() -> bytes:
+    parsed = urlsplit(_NUGET_DOWNLOAD_URL)
+    if parsed.scheme.lower() != "https" or parsed.hostname != "dist.nuget.org":
+        raise QuizClientBootstrapError("Invalid NuGet download endpoint configuration.")
+    opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
+    request = urllib.request.Request(
+        _NUGET_DOWNLOAD_URL,
+        headers={"User-Agent": "UTHelper-QuizClientBootstrap/1.0"},
+    )
+    try:
+        with opener.open(request, timeout=_NUGET_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _NUGET_MAX_BYTES:
+                    raise QuizClientBootstrapError(
+                        "Downloaded NuGet CLI exceeded maximum allowed size."
+                    )
+                chunks.append(chunk)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise QuizClientBootstrapError(
+            "NuGet CLI (`nuget.exe`) is required by `flutter_inappwebview_windows` and "
+            "could not be downloaded automatically from `https://dist.nuget.org`."
+        ) from exc
+
+    payload = b"".join(chunks)
+    actual_sha256 = hashlib.sha256(payload).hexdigest().lower()
+    if payload[:2] != b"MZ" or actual_sha256 != _NUGET_SHA256:
+        raise QuizClientBootstrapError(
+            "Downloaded NuGet CLI failed SHA-256 or PE header verification."
+        )
+    return payload
+
+
+def _ensure_windows_nuget_executable(
+    project_root: Path, env: dict[str, str]
+) -> Path:
+    """Ensure ``nuget.exe`` is available on ``env['PATH']`` for Windows CMake."""
+    override = env.get("UTHELPER_NUGET_EXE", "").strip()
+    if override:
+        override_path = Path(override)
+        if not override_path.is_file():
+            raise QuizClientBootstrapError(
+                f"UTHELPER_NUGET_EXE does not point to an existing file: {override_path}"
+            )
+        resolved = override_path.resolve()
+        _prepend_path_dir(env, resolved.parent)
+        return resolved
+
+    search_path = env.get("PATH")
+    found = shutil.which("nuget.exe", path=search_path) or shutil.which(
+        "nuget", path=search_path
+    )
+    if found:
+        found_path = Path(found)
+        if found_path.is_file():
+            return found_path.resolve()
+
+    known_locations: list[Path] = []
+    program_data = env.get("ProgramData", "").strip()
+    if program_data:
+        known_locations.append(Path(program_data) / "Chocolatey" / "bin" / "nuget.exe")
+    local_app_data = env.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        known_locations.append(
+            Path(local_app_data) / "Microsoft" / "WinGet" / "Links" / "nuget.exe"
+        )
+    user_profile = env.get("USERPROFILE", "").strip()
+    if user_profile:
+        known_locations.append(Path(user_profile) / "scoop" / "shims" / "nuget.exe")
+    for candidate in known_locations:
+        if candidate.is_file():
+            resolved = candidate.resolve()
+            _prepend_path_dir(env, resolved.parent)
+            return resolved
+
+    cache_candidates = _nuget_cache_candidates(project_root, env)
+    for candidate in cache_candidates:
+        if candidate.is_file():
+            if _sha256_file(candidate) == _NUGET_SHA256:
+                resolved = candidate.resolve()
+                _prepend_path_dir(env, resolved.parent)
+                return resolved
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+
+    print(f"Downloading verified NuGet CLI v{_NUGET_VERSION} for Windows WebView build...")
+    payload = _download_verified_nuget_bytes()
+    last_error: OSError | None = None
+    for candidate in cache_candidates:
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = candidate.with_name(f"nuget.{os.getpid()}.tmp")
+            temp_file.write_bytes(payload)
+            temp_file.replace(candidate)
+            resolved = candidate.resolve()
+            _prepend_path_dir(env, resolved.parent)
+            return resolved
+        except OSError as exc:
+            last_error = exc
+    raise QuizClientBootstrapError(
+        "Could not persist verified NuGet CLI into local build-tools cache."
+    ) from last_error
+
+
+def _clear_stale_windows_cmake_nuget_cache(project_root: Path) -> bool:
+    """Clear CMake's Windows build dir if a prior run cached ``NUGET-NOTFOUND``."""
+    cmake_windows_dir = project_root / "build" / "flutter" / "build" / "windows"
+    if not cmake_windows_dir.is_dir():
+        return False
+    stale_found = False
+    for cache_file in cmake_windows_dir.rglob("CMakeCache.txt"):
+        try:
+            if "NUGET-NOTFOUND" in cache_file.read_text(
+                encoding="utf-8", errors="ignore"
+            ):
+                stale_found = True
+                break
+        except OSError:
+            continue
+    if not stale_found:
+        return False
+    shutil.rmtree(cmake_windows_dir, ignore_errors=True)
+    return True
+
+
 def ensure_windows_quiz_client(project_root: Path) -> Path:
     """Build the custom Flet client when its extension source has changed.
 
@@ -239,6 +437,9 @@ def ensure_windows_quiz_client(project_root: Path) -> Path:
     build_env.pop("PYTHONPATH", None)
     build_env.pop("PYTHONHOME", None)
     build_env.pop("UV_INTERNAL__PYTHONHOME", None)
+    _clear_stale_windows_cmake_nuget_cache(project_root)
+    if sys.platform == "win32" and not _is_truthy_env("UTH_TEST_MODE"):
+        _ensure_windows_nuget_executable(project_root, build_env)
     flet_launcher = (
         "import os, sys; "
         "os.environ.pop('PYTHONHOME', None); "
