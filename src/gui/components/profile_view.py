@@ -93,20 +93,20 @@ def _info_row(icon, label: str, value: str, *, desktop: bool = False) -> ft.Row:
         controls=[
             ft.Icon(
                 icon,
-                size=18 if desktop else 15,
+                size=23 if desktop else 15,
                 color=C.ACCENT if desktop else C.TEXT_SECONDARY,
             ),
             ft.Text(
                 f"{label}:",
-                size=16 if desktop else 12.5,
+                size=18 if desktop else 12.5,
                 weight=ft.FontWeight.W_700 if desktop else ft.FontWeight.W_400,
                 color=C.TEXT_PRIMARY if desktop else C.TEXT_SECONDARY,
-                width=170 if desktop else 112,
+                width=188 if desktop else 112,
                 selectable=True,
             ),
             ft.Text(
                 value or "—",
-                size=16 if desktop else 12.5,
+                size=18 if desktop else 12.5,
                 color=C.TEXT_PRIMARY,
                 expand=True,
                 max_lines=1,
@@ -295,8 +295,13 @@ class ProfileView(ft.Container):
             visible=False,
         )
 
-        # ---- Data host (rebuilt from the snapshot) ------------------------
-        # Scrollable column: the header stays pinned while the data scrolls.
+        # ---- Student card + scrollable data host --------------------------
+        # Keep identity outside the changing scroll content. This prevents
+        # Flutter's scroll-column diff/layout pass from moving or reattaching
+        # the avatar when the selected semester or fee tab changes.
+        self._student_card_host = ft.Container(
+            width=float("inf"), visible=False, key="profile-student-card-host"
+        )
         self._data_host = ft.Column(
             controls=[],
             spacing=12,
@@ -345,6 +350,7 @@ class ProfileView(ft.Container):
                 self._loading_row,
                 self._error_state,
                 self._empty_state,
+                self._student_card_host,
                 self._data_host,
                 self._footer,
             ],
@@ -359,6 +365,7 @@ class ProfileView(ft.Container):
         """Show the spinner only when there is no snapshot to keep on screen."""
         if self._snapshot is None:
             self._loading_row.visible = True
+            self._student_card_host.visible = False
             self._data_host.visible = False
             self._empty_state.visible = False
             self._error_state.visible = False
@@ -371,6 +378,8 @@ class ProfileView(ft.Container):
         self._snapshot = None
         self._from_cache = False
         self._selected_semester = ""
+        self._student_card_host.content = None
+        self._student_card_host.visible = False
         self._data_host.controls = []
         self._data_host.visible = False
         self._loading_row.visible = False
@@ -412,6 +421,8 @@ class ProfileView(ft.Container):
         if message:
             self._error_text.value = message
         self._loading_row.visible = False
+        if self._snapshot is None:
+            self._student_card_host.visible = False
         self._data_host.visible = False
         self._empty_state.visible = False
         self._stale_banner.visible = False
@@ -509,6 +520,13 @@ class ProfileView(ft.Container):
             return
         self._ensure_selected_semester(snapshot)
         student_card = self._build_student_card(snapshot)
+        # Set the identity card only when its actual identity data changes.
+        # Normal semester/tab changes leave both this host and the avatar
+        # mounted in exactly the same place in the control tree.
+        if self._student_card_host.content is not student_card:
+            self._student_card_host.content = student_card
+        self._student_card_host.visible = True
+
         data_controls: list[ft.Control] = [
             self._build_summary(),
             self._build_semester_block(snapshot),
@@ -516,15 +534,7 @@ class ProfileView(ft.Container):
             self._build_table(),
             self._build_updated_line(snapshot),
         ]
-        # Keep the student card mounted as the same child of the scroll host.
-        # Replacing it on each semester/tab tap makes Flutter detach and reload
-        # the avatar image even when the image URL did not change.
-        if not self._data_host.controls:
-            self._data_host.controls = [student_card, *data_controls]
-        else:
-            if self._data_host.controls[0] is not student_card:
-                self._data_host.controls[0] = student_card
-            self._data_host.controls[1:] = data_controls
+        self._data_host.controls = data_controls
         self._data_host.visible = True
         self._update_footer()
         self._sync_footer()
@@ -533,10 +543,12 @@ class ProfileView(ft.Container):
         # empty Portal response (no profile, no fees) shows the empty state.
         if not has_content and not snapshot.profile.student_id:
             self._empty_state.visible = True
+            self._student_card_host.visible = False
             self._data_host.visible = False
             self._sync_footer()
         else:
             self._empty_state.visible = False
+            self._student_card_host.visible = True
 
     def _build_student_card(self, snapshot: ProfileSnapshot) -> ft.Container:
         profile = snapshot.profile
@@ -546,7 +558,7 @@ class ProfileView(ft.Container):
         if self._student_card is not None and self._student_card_key == card_key:
             return self._student_card
 
-        avatar_size = 52 if mobile else 104
+        avatar_size = 52 if mobile else 148
         if avatar_src.startswith(("data:image/", "http://", "https://")):
             if self._avatar_image is None or self._avatar_src != avatar_src:
                 self._avatar_image = ft.Image(
@@ -585,6 +597,22 @@ class ProfileView(ft.Container):
                 border_radius=avatar_size // 2,
                 bgcolor=C.ACCENT,
                 alignment=ft.Alignment(0, 0),
+                key="profile-student-avatar",
+                border=(
+                    ft.Border.all(3, "#B6D2FF")
+                    if not mobile
+                    else None
+                ),
+                shadow=(
+                    ft.BoxShadow(
+                        blur_radius=12,
+                        spread_radius=1,
+                        color=ft.Colors.with_opacity(0.20, C.ACCENT),
+                        offset=ft.Offset(0, 3),
+                    )
+                    if not mobile
+                    else None
+                ),
             )
         else:
             # Keep the same outer control mounted during semester/tab refreshes
@@ -595,9 +623,22 @@ class ProfileView(ft.Container):
             self._avatar.border_radius = avatar_size // 2
             self._avatar.bgcolor = C.ACCENT
             self._avatar.alignment = ft.Alignment(0, 0)
+            self._avatar.border = (
+                ft.Border.all(3, "#B6D2FF") if not mobile else None
+            )
+            self._avatar.shadow = (
+                ft.BoxShadow(
+                    blur_radius=12,
+                    spread_radius=1,
+                    color=ft.Colors.with_opacity(0.20, C.ACCENT),
+                    offset=ft.Offset(0, 3),
+                )
+                if not mobile
+                else None
+            )
         self._name_text = ft.Text(
             profile.full_name or "Chưa có dữ liệu sinh viên",
-            size=15 if mobile else 24,
+            size=15 if mobile else 29,
             weight=ft.FontWeight.W_700,
             color=C.TEXT_PRIMARY,
             max_lines=1,
@@ -605,7 +646,7 @@ class ProfileView(ft.Container):
         )
         self._sid_text = ft.Text(
             f"MSSV: {profile.student_id or '—'}",
-            size=12 if mobile else 15,
+            size=12 if mobile else 19,
             color=C.TEXT_SECONDARY,
         )
         # "Hệ đào tạo" becomes the blue badge from the mockups.
@@ -615,7 +656,7 @@ class ProfileView(ft.Container):
                     ft.Icon(ft.Icons.SCHOOL_ROUNDED, size=14, color=C.ACCENT),
                     ft.Text(
                         profile.education_type or "Chưa rõ hệ đào tạo",
-                        size=12 if mobile else 14,
+                        size=12 if mobile else 16,
                         weight=ft.FontWeight.W_600,
                         color=C.ACCENT,
                         max_lines=1,
@@ -685,68 +726,80 @@ class ProfileView(ft.Container):
         # Desktop: run the campus panorama across the header behind the student
         # identity, matching the wide profile-card mockup.
         page_width = float(getattr(self._page_ref, "width", 1280) or 1280)
-        name_width = min(320, max(210, page_width * 0.27))
-        wordmark = self._build_uth_wordmark()
-        wordmark.visible = page_width >= 740
+        name_width = min(390, max(250, page_width * 0.31))
         identity = ft.Row(
             controls=[
                 self._avatar,
                 ft.Column(
                     controls=[self._name_text, self._sid_text, badge],
-                    spacing=7,
+                    spacing=9,
                     tight=True,
                     width=name_width,
                 ),
                 ft.Container(expand=True),
-                wordmark,
             ],
-            spacing=20,
+            spacing=28,
             expand=True,
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        banner_height = 196
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
                     ft.Image(
-                        src="uth_campus_banner.jpg",
+                        src="uth_profile_banner.jpg",
                         width=float("inf"),
-                        height=180,
+                        height=banner_height,
                         expand=True,
-                        fit=ft.BoxFit.FILL,
+                        fit=ft.BoxFit.COVER,
                         anti_alias=True,
-                        semantics_label="UTH campus panorama",
+                        semantics_label="Khuôn viên UTH",
                     ),
                     ft.Container(
                         width=float("inf"),
-                        height=180,
+                        height=banner_height,
                         expand=True,
                         gradient=ft.LinearGradient(
                             begin=ft.Alignment(-1, 0),
                             end=ft.Alignment(1, 0),
                             colors=[
                                 ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.90, C.SURFACE),
-                                ft.Colors.with_opacity(0.48, C.SURFACE),
-                                ft.Colors.with_opacity(0.02, C.SURFACE),
+                                ft.Colors.with_opacity(0.91, C.SURFACE),
+                                ft.Colors.with_opacity(0.28, C.SURFACE),
+                                ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            stops=[0, 0.36, 0.60, 1],
+                            stops=[0, 0.34, 0.55, 0.70],
                         ),
                     ),
                     ft.Container(
+                        content=ft.Image(
+                            src="uth_profile_wordmark.png",
+                            width=180,
+                            height=62,
+                            fit=ft.BoxFit.CONTAIN,
+                            anti_alias=True,
+                            semantics_label="Logo UTH",
+                        ),
+                        width=180,
+                        height=62,
+                        right=16,
+                        top=8,
+                    ),
+                    ft.Container(
                         content=identity,
-                        padding=ft.Padding.symmetric(horizontal=24, vertical=16),
+                        padding=ft.Padding.symmetric(horizontal=30, vertical=12),
                         width=float("inf"),
                         expand=True,
                     ),
                 ],
-                height=180,
+                height=banner_height,
                 width=float("inf"),
                 expand=True,
                 fit=ft.StackFit.EXPAND,
                 clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             ),
-            height=180,
+            height=banner_height,
             width=float("inf"),
             expand=True,
             border_radius=14,
@@ -761,10 +814,10 @@ class ProfileView(ft.Container):
                     expand=True,
                 ),
                 ft.Container(
-                    width=1,
-                    height=148,
+                    width=2,
+                    height=180,
                     bgcolor=C.BORDER_STRONG,
-                    margin=ft.Margin.symmetric(horizontal=16),
+                    margin=ft.Margin.symmetric(horizontal=22),
                 ),
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in right_items],
@@ -773,7 +826,7 @@ class ProfileView(ft.Container):
                     expand=True,
                 ),
             ],
-            spacing=28,
+            spacing=34,
             tight=True,
         )
         self._student_card = ft.Container(
@@ -782,52 +835,27 @@ class ProfileView(ft.Container):
                     banner,
                     ft.Container(
                         content=self._info_column,
-                        padding=ft.Padding.only(left=22, right=22, top=18, bottom=20),
+                        padding=ft.Padding.only(left=30, right=30, top=22, bottom=24),
                     ),
                 ],
                 spacing=0,
                 tight=True,
             ),
-            padding=6,
-            border_radius=18,
-            border=ft.Border.all(1, C.BORDER),
+            padding=5,
+            border_radius=24,
+            border=ft.Border.all(1, "#C9DCFF"),
             bgcolor=C.SURFACE,
+            shadow=ft.BoxShadow(
+                blur_radius=16,
+                spread_radius=1,
+                color=ft.Colors.with_opacity(0.10, C.ACCENT),
+                offset=ft.Offset(0, 4),
+            ),
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
             width=float("inf"),
         )
         self._student_card_key = card_key
         return self._student_card
-
-    @staticmethod
-    def _build_uth_wordmark() -> ft.Container:
-        return ft.Container(
-            content=ft.Row(
-                controls=[
-                    ft.Text(
-                        "UTH",
-                        size=25,
-                        weight=ft.FontWeight.W_700,
-                        color="#078C96",
-                    ),
-                    ft.Column(
-                        controls=[
-                            ft.Text("UNIVERSITY OF", size=7, weight=ft.FontWeight.W_700),
-                            ft.Text("TRANSPORT", size=7, weight=ft.FontWeight.W_700),
-                            ft.Text("HO CHI MINH CITY", size=7, weight=ft.FontWeight.W_700),
-                        ],
-                        spacing=0,
-                        tight=True,
-                    ),
-                ],
-                spacing=6,
-                tight=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            padding=ft.Padding.symmetric(horizontal=14, vertical=8),
-            border_radius=999,
-            border=ft.Border.all(1, ft.Colors.with_opacity(0.15, C.ACCENT)),
-            bgcolor=ft.Colors.with_opacity(0.94, C.SURFACE),
-        )
 
     def _build_summary(self) -> ft.Container:
         rows = self._filtered_rows()
