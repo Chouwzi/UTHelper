@@ -461,11 +461,13 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     assert isinstance(stack, ft.Stack)
     campus_layer = stack.controls[0]
     campus_image = campus_layer.content
-    assert campus_image.src == "uth_profile_banner.jpg"
+    assert campus_image.src.startswith("data:image/jpeg;base64,")
     assert campus_image.fit == ft.BoxFit.FILL
-    assert campus_image.height == 188
-    assert campus_image.width == float("inf")
+    assert campus_image.expand is True
     assert campus_layer.left == 0
+    assert campus_layer.right == 0
+    assert campus_layer.top == 0
+    assert campus_layer.bottom == 0
 
     identity = stack.controls[2].content
     assert len(identity.controls) == 3
@@ -477,13 +479,16 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     assert campus_image.semantics_label == "Khuôn viên UTH"
     assert view._avatar.width == 148
     assert view._avatar.key == "profile-student-avatar"
+    assert view._name_text.size == 21
+    assert view._sid_text.size == 13
+    assert name_block.controls[2].content.controls[1].size == 12
 
     info_grid = card.content.controls[1].content
     assert len(info_grid.controls) == 3
     divider = info_grid.controls[1]
     assert isinstance(divider, ft.Container)
     assert divider.width == 2
-    assert divider.height == 180
+    assert divider.height == 148
     assert divider.bgcolor == C.BORDER_STRONG
     assert len(info_grid.controls[0].controls) == 4
     assert len(info_grid.controls[2].controls) == 5

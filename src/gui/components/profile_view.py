@@ -25,10 +25,13 @@ then fresh), so the screen renders instantly offline and refreshes itself.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
 import sys
+from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Optional
 
 # Patch path for direct execution / Flet preview compatibility
@@ -56,6 +59,27 @@ _STATUS_LABELS = {
     "debt": "Còn nợ",
     "unpaid": "Chưa đóng",
 }
+
+
+@lru_cache(maxsize=1)
+def _uth_banner_source() -> str:
+    """Read the campus banner as an embedded image for reliable Flet loading."""
+    candidates: list[Path] = []
+    candidates.append(
+        Path(__file__).resolve().parents[2] / "assets" / "uth_profile_banner.jpg"
+    )
+    active_assets = os.environ.get("FLET_ASSETS_DIR")
+    if active_assets:
+        candidates.append(Path(active_assets) / "uth_profile_banner.jpg")
+    for asset_path in candidates:
+        try:
+            if asset_path.is_file():
+                encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
+                return f"data:image/jpeg;base64,{encoded}"
+        except OSError:
+            logger.debug("Cannot read UTH profile banner: %s", asset_path, exc_info=True)
+    # Keep the standard Flet asset route as a fallback for packaged builds.
+    return "uth_profile_banner.jpg"
 
 
 def format_vnd(amount: int) -> str:
@@ -93,20 +117,19 @@ def _info_row(icon, label: str, value: str, *, desktop: bool = False) -> ft.Row:
         controls=[
             ft.Icon(
                 icon,
-                size=23 if desktop else 15,
-                color=C.ACCENT if desktop else C.TEXT_SECONDARY,
+                size=15,
+                color=C.TEXT_SECONDARY,
             ),
             ft.Text(
                 f"{label}:",
-                size=18 if desktop else 12.5,
-                weight=ft.FontWeight.W_700 if desktop else ft.FontWeight.W_400,
-                color=C.TEXT_PRIMARY if desktop else C.TEXT_SECONDARY,
-                width=188 if desktop else 112,
+                size=12.5,
+                color=C.TEXT_SECONDARY,
+                width=112,
                 selectable=True,
             ),
             ft.Text(
                 value or "—",
-                size=18 if desktop else 12.5,
+                size=12.5,
                 color=C.TEXT_PRIMARY,
                 expand=True,
                 max_lines=1,
@@ -642,7 +665,7 @@ class ProfileView(ft.Container):
             )
         self._name_text = ft.Text(
             profile.full_name or "Chưa có dữ liệu sinh viên",
-            size=15 if mobile else 29,
+            size=15 if mobile else 21,
             weight=ft.FontWeight.W_700,
             color=C.TEXT_PRIMARY,
             max_lines=1,
@@ -650,7 +673,7 @@ class ProfileView(ft.Container):
         )
         self._sid_text = ft.Text(
             f"MSSV: {profile.student_id or '—'}",
-            size=12 if mobile else 19,
+            size=12 if mobile else 13,
             color=C.TEXT_SECONDARY,
         )
         # "Hệ đào tạo" becomes the blue badge from the mockups.
@@ -660,7 +683,7 @@ class ProfileView(ft.Container):
                     ft.Icon(ft.Icons.SCHOOL_ROUNDED, size=14, color=C.ACCENT),
                     ft.Text(
                         profile.education_type or "Chưa rõ hệ đào tạo",
-                        size=12 if mobile else 16,
+                        size=12,
                         weight=ft.FontWeight.W_600,
                         color=C.ACCENT,
                         max_lines=1,
@@ -729,20 +752,18 @@ class ProfileView(ft.Container):
 
         # Desktop: run the campus panorama across the header behind the student
         # identity, matching the wide profile-card mockup.
-        page_width = float(getattr(self._page_ref, "width", 1280) or 1280)
-        name_width = min(390, max(250, page_width * 0.31))
         identity = ft.Row(
             controls=[
                 self._avatar,
                 ft.Column(
                     controls=[self._name_text, self._sid_text, badge],
-                    spacing=9,
+                    spacing=6,
                     tight=True,
-                    width=name_width,
+                    expand=True,
                 ),
                 ft.Container(expand=True),
             ],
-            spacing=28,
+            spacing=16,
             expand=True,
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -753,9 +774,8 @@ class ProfileView(ft.Container):
                 controls=[
                     ft.Container(
                         content=ft.Image(
-                            src="uth_profile_banner.jpg",
-                            width=float("inf"),
-                            height=banner_height,
+                            src=_uth_banner_source(),
+                            expand=True,
                             # Keep the whole supplied campus photo visible in
                             # the wide banner, as in the desktop reference.
                             fit=ft.BoxFit.FILL,
@@ -763,15 +783,16 @@ class ProfileView(ft.Container):
                             semantics_label="Khuôn viên UTH",
                             key="profile-uth-banner-image",
                         ),
-                        width=float("inf"),
-                        height=banner_height,
                         left=0,
+                        right=0,
                         top=0,
+                        bottom=0,
                     ),
                     ft.Container(
-                        width=float("inf"),
-                        height=banner_height,
-                        expand=True,
+                        left=0,
+                        right=0,
+                        top=0,
+                        bottom=0,
                         gradient=ft.LinearGradient(
                             begin=ft.Alignment(-1, 0),
                             end=ft.Alignment(1, 0),
@@ -787,10 +808,11 @@ class ProfileView(ft.Container):
                     ft.Container(
                         content=identity,
                         padding=ft.Padding.symmetric(horizontal=30, vertical=12),
-                        width=float("inf"),
-                        height=banner_height,
                         alignment=ft.Alignment(-1, 0),
-                        expand=True,
+                        left=0,
+                        right=0,
+                        top=0,
+                        bottom=0,
                     ),
                 ],
                 height=banner_height,
@@ -809,19 +831,19 @@ class ProfileView(ft.Container):
             controls=[
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in left_items],
-                    spacing=13,
+                    spacing=9,
                     tight=True,
                     expand=True,
                 ),
                 ft.Container(
                     width=2,
-                    height=180,
+                    height=148,
                     bgcolor=C.BORDER_STRONG,
                     margin=ft.Margin.symmetric(horizontal=22),
                 ),
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in right_items],
-                    spacing=13,
+                    spacing=9,
                     tight=True,
                     expand=True,
                 ),
@@ -835,7 +857,7 @@ class ProfileView(ft.Container):
                     banner,
                     ft.Container(
                         content=self._info_column,
-                        padding=ft.Padding.only(left=30, right=30, top=22, bottom=24),
+                        padding=ft.Padding.only(left=30, right=30, top=18, bottom=18),
                     ),
                 ],
                 spacing=0,
