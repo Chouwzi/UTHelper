@@ -94,6 +94,50 @@ Uri? validateQuizLaunchUrl(String? value, Uri? trustedOrigin) {
   return target;
 }
 
+const quizRenderProcessGoneErrorCode = 'render_process_gone';
+
+/// Handles Android `WebViewClient.onRenderProcessGone` on the active quiz WebView.
+///
+/// Intentionally does NOT auto-reload a live Moodle Quiz attempt so an in-flight
+/// POST or attempt submission is never duplicated; instead stops timers, tears
+/// down the dead WebView instance, and emits [quizRenderProcessGoneErrorCode] so
+/// the user can recover safely.
+void handleQuizMainRenderProcessGone({
+  required bool disposed,
+  required bool mounted,
+  required VoidCallback stopLoadTimeout,
+  required VoidCallback clearDeadWebViewState,
+  required void Function(String code) emitError,
+}) {
+  if (disposed || !mounted) return;
+  stopLoadTimeout();
+  clearDeadWebViewState();
+  emitError(quizRenderProcessGoneErrorCode);
+}
+
+/// Handles Android `WebViewClient.onRenderProcessGone` on an active quiz popup.
+void handleQuizPopupRenderProcessGone({
+  required bool disposed,
+  required bool mounted,
+  required VoidCallback closePopup,
+  required void Function(String code) emitError,
+}) {
+  if (disposed || !mounted) return;
+  closePopup();
+  emitError(quizRenderProcessGoneErrorCode);
+}
+
+/// Handles Android `WebViewClient.onRenderProcessGone` on an offstage blocked
+/// popup sink by tearing down the dead sink cleanly without crashing.
+void handleQuizBlockedPopupSinkRenderProcessGone({
+  required bool disposed,
+  required bool mounted,
+  required VoidCallback removeSink,
+}) {
+  if (disposed || !mounted) return;
+  removeSink();
+}
+
 /// Keeps the primary quiz WebView mounted at constant layout bounds while a
 /// popup is active, blocking pointer and keyboard focus instead of `Offstage`.
 Widget buildQuizMainWebViewLayer({
@@ -148,6 +192,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
   bool _sessionPayloadRejected = false;
   bool _sessionExpiredSent = false;
   bool _prepared = false;
+  bool _renderProcessGone = false;
   bool _disposed = false;
   bool _readySent = false;
   int _nextPopupKey = 0;
@@ -629,7 +674,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
   }
 
   void _closePopup(int key) {
-    if (_disposed) return;
+    if (_disposed || !mounted) return;
     _stopPopupLoadTimeout(key);
     setState(() => _popups.removeWhere((popup) => popup.key == key));
   }
@@ -692,6 +737,13 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
           shouldOverrideUrlLoading: (_controller, _action) async =>
               NavigationActionPolicy.CANCEL,
           onCreateWindow: (_controller, _action) async => false,
+          onRenderProcessGone: (_controller, _detail) {
+            handleQuizBlockedPopupSinkRenderProcessGone(
+              disposed: _disposed,
+              mounted: mounted,
+              removeSink: () => _removeBlockedPopup(blocked.key),
+            );
+          },
         ),
       ),
     );
@@ -720,6 +772,14 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
             _emitError('navigation_error');
           }
         },
+        onRenderProcessGone: (_controller, _detail) {
+          handleQuizPopupRenderProcessGone(
+            disposed: _disposed,
+            mounted: mounted,
+            closePopup: () => _closePopup(popup.key),
+            emitError: _emitError,
+          );
+        },
       ),
     );
   }
@@ -739,31 +799,48 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          buildQuizMainWebViewLayer(
-            obscuredByPopup: _popups.isNotEmpty,
-            child: InAppWebView(
-              key: _mainWebViewKey,
-              webViewEnvironment: _environment,
-              initialSettings: createQuizWebViewSettings(),
-              onWebViewCreated: _initializeController,
-              onLoadStart: (controller, url) {
-                _enforceLoadOrigin(controller, url);
-                _checkSessionExpired(url);
-                _startLoadTimeout();
-              },
-              onLoadStop: (controller, url) => _stopLoadTimeout(),
-              onReceivedError: (controller, request, error) {
-                if (request.isForMainFrame == true) {
-                  _loadTimer?.cancel();
-                  _emitError('navigation_error');
-                }
-              },
-              shouldOverrideUrlLoading: (controller, action) async =>
-                  _navigationPolicy(action),
-              onCreateWindow: (controller, action) => _createWindow(action),
-              onCloseWindow: (controller) => _rootRequestedClose(),
-            ),
-          ),
+          if (!_renderProcessGone)
+            buildQuizMainWebViewLayer(
+              obscuredByPopup: _popups.isNotEmpty,
+              child: InAppWebView(
+                key: _mainWebViewKey,
+                webViewEnvironment: _environment,
+                initialSettings: createQuizWebViewSettings(),
+                onWebViewCreated: _initializeController,
+                onLoadStart: (controller, url) {
+                  _enforceLoadOrigin(controller, url);
+                  _checkSessionExpired(url);
+                  _startLoadTimeout();
+                },
+                onLoadStop: (controller, url) => _stopLoadTimeout(),
+                onReceivedError: (controller, request, error) {
+                  if (request.isForMainFrame == true) {
+                    _loadTimer?.cancel();
+                    _emitError('navigation_error');
+                  }
+                },
+                shouldOverrideUrlLoading: (controller, action) async =>
+                    _navigationPolicy(action),
+                onCreateWindow: (controller, action) => _createWindow(action),
+                onCloseWindow: (controller) => _rootRequestedClose(),
+                onRenderProcessGone: (controller, _detail) {
+                  handleQuizMainRenderProcessGone(
+                    disposed: _disposed,
+                    mounted: mounted,
+                    stopLoadTimeout: _stopLoadTimeout,
+                    clearDeadWebViewState: () {
+                      if (identical(_controller, controller)) {
+                        _controller = null;
+                      }
+                      setState(() => _renderProcessGone = true);
+                    },
+                    emitError: _emitError,
+                  );
+                },
+              ),
+            )
+          else
+            const SizedBox.shrink(),
           for (final blocked in _blockedPopups) _blockedPopupSink(blocked),
           for (final popup in _popups) _popup(popup),
         ],

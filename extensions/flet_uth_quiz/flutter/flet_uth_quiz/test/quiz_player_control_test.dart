@@ -98,4 +98,122 @@ void main() {
     expect(source.contains('runCloseCleanup('), isTrue);
     expect(source.contains('bumpSessionEpoch('), isTrue);
   });
+
+  test('MOB-WEBVIEW-01: every QuizPlayer InAppWebView mount site defines non-null onRenderProcessGone and surfaces clean error without auto-reloading', () {
+    final source = File('lib/src/quiz_player_control.dart').readAsStringSync();
+    final mountArgs = _extractQuizInAppWebViewCalls(source);
+    // 3 mount sites: _blockedPopupSink, _popup, and main build() WebView.
+    expect(mountArgs, hasLength(3));
+    for (final callBody in mountArgs) {
+      expect(
+        callBody,
+        contains('onRenderProcessGone:'),
+        reason: 'Missing onRenderProcessGone on QuizPlayer InAppWebView mount site:\n$callBody',
+      );
+      expect(callBody, isNot(contains('onRenderProcessGone: null')));
+    }
+
+    // Active main quiz WebView: stops load timeout, clears dead WebView state, emits
+    // render_process_gone, and never auto-reloads a live quiz attempt.
+    var stoppedTimers = 0;
+    var clearedStates = 0;
+    final emitted = <String>[];
+    handleQuizMainRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      stopLoadTimeout: () => stoppedTimers++,
+      clearDeadWebViewState: () => clearedStates++,
+      emitError: emitted.add,
+    );
+    expect(stoppedTimers, 1);
+    expect(clearedStates, 1);
+    expect(emitted, [quizRenderProcessGoneErrorCode]);
+    expect(quizRenderProcessGoneErrorCode, 'render_process_gone');
+
+    // Guarded when unmounted or disposed.
+    handleQuizMainRenderProcessGone(
+      disposed: false,
+      mounted: false,
+      stopLoadTimeout: () => stoppedTimers++,
+      clearDeadWebViewState: () => clearedStates++,
+      emitError: emitted.add,
+    );
+    handleQuizMainRenderProcessGone(
+      disposed: true,
+      mounted: true,
+      stopLoadTimeout: () => stoppedTimers++,
+      clearDeadWebViewState: () => clearedStates++,
+      emitError: emitted.add,
+    );
+    expect(stoppedTimers, 1);
+    expect(clearedStates, 1);
+    expect(emitted, hasLength(1));
+
+    // Active quiz popup: closes dead popup and emits clean error only when mounted and alive.
+    var closedPopups = 0;
+    final popupErrors = <String>[];
+    handleQuizPopupRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      closePopup: () => closedPopups++,
+      emitError: popupErrors.add,
+    );
+    handleQuizPopupRenderProcessGone(
+      disposed: false,
+      mounted: false,
+      closePopup: () => closedPopups++,
+      emitError: popupErrors.add,
+    );
+    handleQuizPopupRenderProcessGone(
+      disposed: true,
+      mounted: true,
+      closePopup: () => closedPopups++,
+      emitError: popupErrors.add,
+    );
+    expect(closedPopups, 1);
+    expect(popupErrors, [quizRenderProcessGoneErrorCode]);
+
+    // Offstage blocked popup sink: swallows and removes sink safely without emitting error.
+    var removedBlocked = 0;
+    handleQuizBlockedPopupSinkRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      removeSink: () => removedBlocked++,
+    );
+    handleQuizBlockedPopupSinkRenderProcessGone(
+      disposed: false,
+      mounted: false,
+      removeSink: () => removedBlocked++,
+    );
+    handleQuizBlockedPopupSinkRenderProcessGone(
+      disposed: true,
+      mounted: true,
+      removeSink: () => removedBlocked++,
+    );
+    expect(removedBlocked, 1);
+  });
+}
+
+List<String> _extractQuizInAppWebViewCalls(String source) {
+  final results = <String>[];
+  const marker = 'InAppWebView(';
+  var searchFrom = 0;
+  while (true) {
+    final start = source.indexOf(marker, searchFrom);
+    if (start < 0) break;
+    var idx = start + marker.length;
+    var depth = 1;
+    while (idx < source.length && depth > 0) {
+      final ch = source[idx];
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        depth--;
+      }
+      idx++;
+    }
+    results.add(source.substring(start + marker.length, idx - 1));
+    searchFrom = idx;
+  }
+  return results;
 }

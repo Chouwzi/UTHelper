@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -1675,4 +1676,137 @@ void main() {
       AuthScriptLoadAction.clearNow,
     );
   });
+
+  test('MOB-WEBVIEW-01: createAppWebViewSettings enables useOnRenderProcessGone and every InAppWebView mount site handles onRenderProcessGone safely', () {
+    final browser = createAppWebViewSettings(viewerLocked: false);
+    final viewer = createAppWebViewSettings(
+      viewerLocked: true,
+      viewerPrefix: 'http://127.0.0.1:51234/pdf-viewer/tok/',
+    );
+    final sink = createAppWebViewSettings(
+      viewerLocked: true,
+      javaScriptEnabled: false,
+    );
+    expect(browser.useOnRenderProcessGone, isTrue);
+    expect(viewer.useOnRenderProcessGone, isTrue);
+    expect(sink.useOnRenderProcessGone, isTrue);
+
+    expect(
+      formatAppWebViewRenderProcessGoneError(true),
+      'render_process_gone:crashed',
+    );
+    expect(
+      formatAppWebViewRenderProcessGoneError(false),
+      'render_process_gone:terminated',
+    );
+    expect(
+      formatAppWebViewRenderProcessGoneError(null),
+      'render_process_gone:terminated',
+    );
+
+    // Every InAppWebView( mount site in app_webview_control.dart (offstage popup sink + main WebView)
+    // must define a non-null onRenderProcessGone callback so Android WebViewClient returns true
+    // instead of terminating the host app process.
+    final source = File('lib/src/app_webview_control.dart').readAsStringSync();
+    final mountArgs = _extractInAppWebViewCallArguments(source);
+    expect(mountArgs, hasLength(2));
+    for (final callBody in mountArgs) {
+      expect(
+        callBody,
+        contains('onRenderProcessGone:'),
+        reason: 'Missing onRenderProcessGone on InAppWebView mount site:\n$callBody',
+      );
+      expect(
+        callBody,
+        isNot(contains('onRenderProcessGone: null')),
+      );
+    }
+
+    // Active main WebView handler: mounted -> clears dead state and emits structured web_error.
+    var cleared = 0;
+    final errors = <String>[];
+    handleAppWebViewRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      detail: RenderProcessGoneDetail(didCrash: true),
+      clearDeadWebViewState: () => cleared++,
+      reportWebError: errors.add,
+    );
+    expect(cleared, 1);
+    expect(errors, ['render_process_gone:crashed']);
+
+    handleAppWebViewRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      detail: RenderProcessGoneDetail(didCrash: false),
+      clearDeadWebViewState: () => cleared++,
+      reportWebError: errors.add,
+    );
+    expect(cleared, 2);
+    expect(errors, [
+      'render_process_gone:crashed',
+      'render_process_gone:terminated',
+    ]);
+
+    // Unmounted or disposed -> safe no-op without throwing or emitting errors.
+    handleAppWebViewRenderProcessGone(
+      disposed: false,
+      mounted: false,
+      detail: RenderProcessGoneDetail(didCrash: true),
+      clearDeadWebViewState: () => cleared++,
+      reportWebError: errors.add,
+    );
+    handleAppWebViewRenderProcessGone(
+      disposed: true,
+      mounted: true,
+      detail: RenderProcessGoneDetail(didCrash: true),
+      clearDeadWebViewState: () => cleared++,
+      reportWebError: errors.add,
+    );
+    expect(cleared, 2);
+    expect(errors, hasLength(2));
+
+    // Offstage popup sink handler: swallows safely and removes sink only when mounted and alive.
+    var removedSinks = 0;
+    handleAppWebViewPopupSinkRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      removeSink: () => removedSinks++,
+    );
+    handleAppWebViewPopupSinkRenderProcessGone(
+      disposed: false,
+      mounted: false,
+      removeSink: () => removedSinks++,
+    );
+    handleAppWebViewPopupSinkRenderProcessGone(
+      disposed: true,
+      mounted: true,
+      removeSink: () => removedSinks++,
+    );
+    expect(removedSinks, 1);
+  });
+}
+
+List<String> _extractInAppWebViewCallArguments(String source) {
+  final results = <String>[];
+  const marker = 'InAppWebView(';
+  var searchFrom = 0;
+  while (true) {
+    final start = source.indexOf(marker, searchFrom);
+    if (start < 0) break;
+    var idx = start + marker.length;
+    var depth = 1;
+    while (idx < source.length && depth > 0) {
+      final ch = source[idx];
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        depth--;
+      }
+      idx++;
+    }
+    results.add(source.substring(start + marker.length, idx - 1));
+    searchFrom = idx;
+  }
+  return results;
 }

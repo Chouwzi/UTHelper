@@ -252,6 +252,31 @@ class _PopupSinkEntry {
   final bool allowInPlaceRedirect;
 }
 
+/// Handles Android `WebViewClient.onRenderProcessGone` on the primary
+/// `UthAppWebView` without terminating the host app process.
+void handleAppWebViewRenderProcessGone({
+  required bool disposed,
+  required bool mounted,
+  required RenderProcessGoneDetail detail,
+  required VoidCallback clearDeadWebViewState,
+  required void Function(String error) reportWebError,
+}) {
+  if (disposed || !mounted) return;
+  clearDeadWebViewState();
+  reportWebError(formatAppWebViewRenderProcessGoneError(detail.didCrash));
+}
+
+/// Handles Android `WebViewClient.onRenderProcessGone` on offstage popup-cancelling
+/// sink WebViews by safely tearing down the dead sink without crashing.
+void handleAppWebViewPopupSinkRenderProcessGone({
+  required bool disposed,
+  required bool mounted,
+  required VoidCallback removeSink,
+}) {
+  if (disposed || !mounted) return;
+  removeSink();
+}
+
 class UthAppWebViewControl extends StatefulWidget {
   const UthAppWebViewControl({super.key, required this.control});
 
@@ -282,6 +307,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   String? _normalizedUserAgent;
   bool _prepared = false;
   bool _surfaceRevealed = false;
+  bool _renderProcessGone = false;
   bool _hasCommittedPage = false;
   bool _hasReceivedDocumentTitle = false;
   bool _suppressCommitUntilNextLoadStart = false;
@@ -403,6 +429,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       _controller = null;
       _currentLoadedUrl = '';
       _surfaceRevealed = false;
+      _renderProcessGone = false;
       _hasCommittedPage = false;
       _hasReceivedDocumentTitle = false;
       _suppressCommitUntilNextLoadStart = false;
@@ -428,6 +455,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     if (nextHtml != null && nextHtml != _initialHtml) {
       _initialHtml = nextHtml;
       _initialBaseUrl = nextBaseUrl;
+      if (_renderProcessGone) {
+        _remountAfterRenderProcessGone(html: nextHtml, baseUrl: nextBaseUrl);
+        return;
+      }
       final ctrl = _controller;
       if (ctrl != null) {
         unawaited(_loadHtmlInternal(ctrl, nextHtml, baseUrl: nextBaseUrl));
@@ -453,6 +484,10 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           (uri.host == '127.0.0.1' || uri.host.toLowerCase() == 'localhost') &&
           uri.hasPort) {
         _allowedLoopbackPorts = {..._allowedLoopbackPorts, uri.port};
+      }
+      if (_renderProcessGone) {
+        _remountAfterRenderProcessGone(targetUrl: nextUrl);
+        return;
       }
       final ctrl = _controller;
       if (ctrl != null) {
@@ -839,6 +874,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           _initialUrl = targetUrl;
           final ctrl = _controller;
           if (ctrl == null) {
+            if (_renderProcessGone) {
+              _remountAfterRenderProcessGone(targetUrl: targetUrl);
+            }
             return true;
           }
           return await _navigateInternal(
@@ -873,6 +911,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           _initialUserScript = null;
           _initialUserScriptAllowedOrigin = null;
           _authScriptTracker.clear();
+          if (_renderProcessGone) {
+            _remountAfterRenderProcessGone(targetUrl: url);
+          }
           return true;
         }
         return await _navigateInternal(ctrl, url);
@@ -891,6 +932,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           _initialUserScript = null;
           _initialUserScriptAllowedOrigin = null;
           _authScriptTracker.clear();
+          if (_renderProcessGone) {
+            _remountAfterRenderProcessGone(html: html, baseUrl: baseUrl);
+          }
           return true;
         }
         await _clearAuthUserScripts(ctrl);
@@ -953,7 +997,23 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
 
       case 'reload':
         final ctrl = _controller;
-        if (ctrl == null) return false;
+        if (ctrl == null) {
+          if (_renderProcessGone) {
+            if (_initialHtml != null) {
+              _remountAfterRenderProcessGone(
+                html: _initialHtml!,
+                baseUrl: _initialBaseUrl,
+              );
+              return true;
+            }
+            final retryUrl = _resolveRenderProcessRecoveryUrl();
+            if (retryUrl.isNotEmpty) {
+              _remountAfterRenderProcessGone(targetUrl: retryUrl);
+              return true;
+            }
+          }
+          return false;
+        }
         try {
           final activeUrl = (await ctrl.getUrl())?.toString();
           if (shouldReloadViaInitialUrl(
@@ -1200,6 +1260,38 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     });
   }
 
+  String _resolveRenderProcessRecoveryUrl() {
+    final current = _currentLoadedUrl.trim();
+    if (current.isNotEmpty && !current.toLowerCase().startsWith('about:')) {
+      return current;
+    }
+    return _initialUrl.trim();
+  }
+
+  void _remountAfterRenderProcessGone({
+    String? targetUrl,
+    String? html,
+    String? baseUrl,
+  }) {
+    if (_disposed || !mounted) return;
+    if (html != null) {
+      _initialHtml = html;
+      _initialBaseUrl = baseUrl;
+    } else if (targetUrl != null && targetUrl.trim().isNotEmpty) {
+      _initialHtml = null;
+      _initialUrl = targetUrl.trim();
+    }
+    _controller = null;
+    _hasCommittedPage = false;
+    _hasReceivedDocumentTitle = false;
+    _suppressCommitUntilNextLoadStart = false;
+    setState(() {
+      _renderProcessGone = false;
+      _surfaceRevealed = false;
+      _webViewKey = GlobalKey();
+    });
+  }
+
   Widget _buildPopupSink(_PopupSinkEntry sink) {
     return Offstage(
       offstage: true,
@@ -1244,6 +1336,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             return NavigationActionPolicy.CANCEL;
           },
           onCreateWindow: (_c, _a) async => false,
+          onRenderProcessGone: (_controller, _detail) {
+            handleAppWebViewPopupSinkRenderProcessGone(
+              disposed: _disposed,
+              mounted: mounted,
+              removeSink: () => _removePopupSink(sink.key),
+            );
+          },
         ),
       ),
     );
@@ -1270,22 +1369,23 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          InAppWebView(
-            key: _webViewKey,
-            initialUserScripts: buildInitialAppWebViewUserScripts(
-              source: _initialUserScript,
-              allowedOrigin: _initialUserScriptAllowedOrigin,
-              initialUrl: _initialUrl,
-              viewerLocked: _viewerLocked,
-              blockUthLms: _blockUthLms,
-            ),
-            initialSettings: createAppWebViewSettings(
-              viewerLocked: _viewerLocked,
-              viewerPrefix: _viewerPrefix,
-              userAgent: _normalizedUserAgent,
-              isInspectable: kDebugMode && !_viewerLocked,
-            ),
-            onWebViewCreated: _onWebViewCreated,
+          if (!_renderProcessGone)
+            InAppWebView(
+              key: _webViewKey,
+              initialUserScripts: buildInitialAppWebViewUserScripts(
+                source: _initialUserScript,
+                allowedOrigin: _initialUserScriptAllowedOrigin,
+                initialUrl: _initialUrl,
+                viewerLocked: _viewerLocked,
+                blockUthLms: _blockUthLms,
+              ),
+              initialSettings: createAppWebViewSettings(
+                viewerLocked: _viewerLocked,
+                viewerPrefix: _viewerPrefix,
+                userAgent: _normalizedUserAgent,
+                isInspectable: kDebugMode && !_viewerLocked,
+              ),
+              onWebViewCreated: _onWebViewCreated,
             shouldOverrideUrlLoading: (controller, action) async {
               if (_disposed) return NavigationActionPolicy.CANCEL;
               final rawActionUri = action.request.url;
@@ -1545,8 +1645,66 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                 widget.control.triggerEvent('console_message', msg);
               }
             },
+            onRenderProcessGone: (controller, detail) {
+              handleAppWebViewRenderProcessGone(
+                disposed: _disposed,
+                mounted: mounted,
+                detail: detail,
+                clearDeadWebViewState: () {
+                  if (identical(_controller, controller)) {
+                    _controller = null;
+                  }
+                  _hasCommittedPage = false;
+                  _hasReceivedDocumentTitle = false;
+                  _suppressCommitUntilNextLoadStart = false;
+                  setState(() {
+                    _renderProcessGone = true;
+                    _surfaceRevealed = false;
+                  });
+                },
+                reportWebError: (err) {
+                  widget.control.triggerEvent('web_error', err);
+                },
+              );
+            },
           ),
-          if (!_surfaceRevealed)
+          if (_renderProcessGone)
+            Material(
+              color: effectiveBgColor,
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.refresh_rounded, size: 32),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Trình xem web vừa được hệ thống khởi động lại.',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton(
+                        onPressed: () {
+                          if (_initialHtml != null) {
+                            _remountAfterRenderProcessGone(
+                              html: _initialHtml!,
+                              baseUrl: _initialBaseUrl,
+                            );
+                          } else {
+                            _remountAfterRenderProcessGone(
+                              targetUrl: _resolveRenderProcessRecoveryUrl(),
+                            );
+                          }
+                        },
+                        child: const Text('Tải lại'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else if (!_surfaceRevealed)
             IgnorePointer(
               child: ColoredBox(
                 color: effectiveBgColor,
