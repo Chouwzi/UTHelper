@@ -170,6 +170,139 @@ def _is_source_checkout(module_path: Path) -> bool:
         return False
 
 
+def _is_embedded_windows_runner(
+    *,
+    development: bool | None = None,
+    environ=None,
+) -> bool:
+    """Return True when running inside the packaged Flet Windows dart_bridge runner."""
+    if sys.platform != "win32" or _TEST_MODE:
+        return False
+    is_dev = (
+        _is_source_checkout(Path(__file__))
+        if development is None
+        else bool(development)
+    )
+    if is_dev:
+        return False
+    env = os.environ if environ is None else environ
+    return bool(
+        env.get("FLET_DART_BRIDGE_EXIT_PORT") or env.get("FLET_DART_BRIDGE_PORT")
+    )
+
+
+def _resolve_windows_release_channel(*, development: bool) -> str:
+    """Isolate Microsoft Store single-instance mutex names from sideload/LTS builds."""
+    if development:
+        return "stable"
+    try:
+        from core.distribution import DistributionChannel, resolve_distribution_channel
+
+        profile = resolve_distribution_channel()
+        channel = getattr(profile, "channel", profile)
+        if channel == DistributionChannel.MSSTORE:
+            return "msstore"
+    except Exception:
+        pass
+    return "stable"
+
+
+def _hide_current_process_flutter_windows() -> None:
+    """Hide top-level FLUTTER_RUNNER_WIN32_WINDOW HWNDs owned by this process."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        enum_proc_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        user32.EnumWindows.argtypes = [enum_proc_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+
+        current_pid = os.getpid()
+        sw_hide = 0
+
+        def _callback(hwnd: int, _lparam: int) -> bool:
+            owner_pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+            if owner_pid.value == current_pid:
+                class_buf = ctypes.create_unicode_buffer(128)
+                if user32.GetClassNameW(hwnd, class_buf, 128) > 0:
+                    if class_buf.value == "FLUTTER_RUNNER_WIN32_WINDOW":
+                        user32.ShowWindow(hwnd, sw_hide)
+            return True
+
+        cb = enum_proc_type(_callback)
+        user32.EnumWindows(cb, 0)
+    except Exception:
+        pass
+
+
+def _terminate_embedded_windows_process(exit_code: int) -> None:
+    """Terminate packaged Windows process cleanly without C++ static destructor crashes.
+
+    In packaged ``UTHelper.exe``, ``flutter_inappwebview_windows_plugin.dll`` owns an
+    ``inline static winrt::com_ptr<IDispatcherQueueController>`` bound to Win32 Thread 0.
+    Calling ``ucrtbase!exit()`` or ``ExitProcess()`` runs ``DLL_PROCESS_DETACH`` static
+    destructors either from the background Python worker thread or after Thread 0's
+    ``CoUninitialize()``, faulting with ``0xC0000005`` inside ``coremessaging.dll``.
+    Matching upstream ``dart_bridge``'s ``serious_python_hard_exit``, flush all Python
+    streams/logs first and terminate the kernel process directly with ``exit_code``.
+    """
+    _hide_current_process_flutter_windows()
+    try:
+        logging.shutdown()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+    normalized_code = int(exit_code) & 0xFFFFFFFF
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            # Explicit 64-bit HANDLE typing is mandatory: default restype c_int
+            # truncates GetCurrentProcess() (-1 -> 0x00000000FFFFFFFF on x64),
+            # causing TerminateProcess to fail with ERROR_INVALID_HANDLE (6).
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.argtypes = []
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            kernel32.TerminateProcess.restype = wintypes.BOOL
+            kernel32.TerminateProcess(
+                kernel32.GetCurrentProcess(),
+                normalized_code,
+            )
+        except Exception:
+            pass
+    os._exit(int(exit_code))
+
+
+def _exit_main_process(exit_code: int) -> None:
+    """Exit with exact code: ``TerminateProcess`` in embedded runner, ``SystemExit`` on CLI."""
+    if _is_embedded_windows_runner():
+        _terminate_embedded_windows_process(exit_code)
+        return
+    raise SystemExit(exit_code)
+
+
 def _show_startup_screen(
     page,
     ft,
@@ -288,7 +421,7 @@ def main() -> int:
     if desktop_windows:
         result = bootstrap_windows_instance(
             autostart_launch=autostart_launch,
-            release_channel="stable",
+            release_channel=_resolve_windows_release_channel(development=development),
             development=development,
         )
         if result.exit_code is not None:
@@ -343,14 +476,81 @@ def main() -> int:
     import flet as ft
 
     active_page = None
+    active_controller = None
+    embedded_windows_runner = desktop_windows and _is_embedded_windows_runner(
+        development=development
+    )
+    broker_closed = False
+    runtime_closed = False
+    destroy_started = False
+
+    def _close_broker_and_runtime(*, clean: bool) -> None:
+        nonlocal broker_closed, runtime_closed
+        try:
+            if not broker_closed and result and result.broker:
+                broker_closed = True
+                result.broker.close(timeout_seconds=1.0)
+        finally:
+            if not runtime_closed and runtime is not None:
+                runtime_closed = True
+                runtime.mark_phase(AppPhase.SHUTDOWN)
+                runtime.close(clean=clean)
 
     async def _app_target(page: ft.Page):
-        nonlocal active_page
+        nonlocal active_page, active_controller, destroy_started
         active_page = page
         if runtime is not None:
             runtime.attach_page(page)
             runtime.attach_asyncio_loop(asyncio.get_running_loop())
             runtime.mark_phase(AppPhase.GUI)
+
+        if embedded_windows_runner:
+            window_obj = getattr(page, "window", None)
+            if window_obj is not None:
+                async def _safe_embedded_destroy() -> None:
+                    nonlocal destroy_started
+                    if destroy_started:
+                        return
+                    destroy_started = True
+                    _hide_current_process_flutter_windows()
+                    if active_controller is not None:
+                        prepare_fn = getattr(
+                            active_controller, "_prepare_async_shutdown", None
+                        )
+                        if callable(prepare_fn):
+                            try:
+                                prepare_fn()
+                            except Exception:
+                                pass
+                        shutdown_fn = getattr(
+                            active_controller, "_shutdown_for_exit", None
+                        )
+                        if callable(shutdown_fn):
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(shutdown_fn),
+                                    timeout=2.5,
+                                )
+                            except Exception:
+                                pass
+                    try:
+                        _close_broker_and_runtime(clean=True)
+                    except Exception:
+                        pass
+                    _terminate_embedded_windows_process(0)
+
+                async def _early_splash_window_event(event) -> None:
+                    event_type = getattr(event, "type", getattr(event, "data", ""))
+                    close_type = getattr(
+                        getattr(ft, "WindowEventType", None), "CLOSE", "close"
+                    )
+                    if event_type == close_type or getattr(event, "data", "") == "close":
+                        await _safe_embedded_destroy()
+
+                window_obj.destroy = _safe_embedded_destroy
+                window_obj.prevent_close = True
+                window_obj.on_event = _early_splash_window_event
+
         try:
             # Load the persisted launch preference before deciding whether the
             # compact startup window should be published. New installations
@@ -411,7 +611,7 @@ def main() -> int:
             }
             if "diagnostic_recorder" in inspect.signature(app_main).parameters:
                 app_options["diagnostic_recorder"] = runtime
-            app_main(page, **app_options)
+            active_controller = app_main(page, **app_options)
             logger.info("App started successfully")
             
         except Exception as exc:
@@ -469,16 +669,7 @@ def main() -> int:
         clean_exit = True
         exit_code = 1
     finally:
-        try:
-            if result and result.broker:
-                result.broker.close(timeout_seconds=1.0)
-        finally:
-            if runtime is not None:
-                runtime.mark_phase(AppPhase.SHUTDOWN)
-                if clean_exit:
-                    runtime.close(clean=True)
-                else:
-                    runtime.close(clean=False)
+        _close_broker_and_runtime(clean=clean_exit)
     return exit_code
 
 
@@ -487,4 +678,4 @@ if __name__ == "__main__":
     if sys.platform == 'win32':
         import multiprocessing
         multiprocessing.freeze_support()
-    raise SystemExit(main())
+    _exit_main_process(main())

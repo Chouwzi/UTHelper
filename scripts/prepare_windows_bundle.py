@@ -1,10 +1,11 @@
-"""Prepare deterministic launch aliases required by a Flet Windows bundle."""
+"""Prepare deterministic launch aliases and strip debug/bloat artifacts from a Flet Windows bundle."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import shutil
+import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -14,8 +15,57 @@ class BundlePreparationError(RuntimeError):
     """Raised when a Windows bundle cannot be prepared safely."""
 
 
+def _unlink_bundle_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise BundlePreparationError(
+                f"Could not remove forbidden bundle artifact {path}: {exc}"
+            ) from exc
+    except OSError as exc:
+        raise BundlePreparationError(
+            f"Could not remove forbidden bundle artifact {path}: {exc}"
+        ) from exc
+
+
+def _is_dlls_bloat_or_debug_binary(filename: str) -> bool:
+    lower = filename.lower()
+    if lower.endswith(("_d.pyd", "_d.dll")):
+        return True
+    if lower.endswith(".pyd") and "_d.cp" in lower:
+        return True
+    if lower.endswith(".dll") and (lower.startswith("tcl") or lower.startswith("tk")):
+        return True
+    return False
+
+
+def _strip_debug_and_unused_artifacts(root: Path) -> None:
+    """Remove CPython debug binaries, PDB symbols, and unused Tcl/Tk DLLs."""
+    dlls_dir = root / "DLLs"
+    if dlls_dir.is_dir():
+        for entry in sorted(dlls_dir.iterdir()):
+            if entry.is_symlink() or entry.is_file():
+                if _is_dlls_bloat_or_debug_binary(entry.name):
+                    _unlink_bundle_file(entry)
+
+    for entry in sorted(root.rglob("*")):
+        if not (entry.is_symlink() or entry.is_file()):
+            continue
+        lower = entry.name.lower()
+        if (
+            lower.endswith(".pdb")
+            or lower.endswith(("_d.pyd", "_d.dll"))
+            or (lower.endswith(".pyd") and "_d.cp" in lower)
+        ):
+            _unlink_bundle_file(entry)
+
+
 def prepare_windows_bundle(bundle_dir: Path) -> Path:
-    """Create an argument-free autostart runner alias beside ``UTHelper.exe``."""
+    """Strip debug/bloat artifacts and create ``UTHelperAutostart.exe`` beside ``UTHelper.exe``."""
     root = bundle_dir.resolve()
     runner = root / "UTHelper.exe"
     alias = root / "UTHelperAutostart.exe"
@@ -25,6 +75,8 @@ def prepare_windows_bundle(bundle_dir: Path) -> Path:
         raise BundlePreparationError(f"Bundle directory does not exist: {root}")
     if not runner.is_file():
         raise BundlePreparationError(f"Flet runner does not exist: {runner}")
+
+    _strip_debug_and_unused_artifacts(root)
 
     try:
         shutil.copy2(runner, temporary_alias)
