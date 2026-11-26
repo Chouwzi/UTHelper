@@ -616,7 +616,10 @@ def main() -> int:
             if not runtime_closed and runtime is not None:
                 runtime_closed = True
                 runtime.mark_phase(AppPhase.SHUTDOWN)
-                runtime.close(clean=clean)
+                if clean:
+                    runtime.close(clean=True)
+                else:
+                    runtime.close(clean=False)
 
     async def _app_target(page: ft.Page):
         nonlocal active_page, active_controller, destroy_started
