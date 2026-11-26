@@ -61,25 +61,25 @@ _STATUS_LABELS = {
 }
 
 
-@lru_cache(maxsize=1)
-def _uth_banner_source() -> str:
-    """Read the campus banner as an embedded image for reliable Flet loading."""
+@lru_cache(maxsize=4)
+def _asset_image_source(filename: str, mime_type: str) -> str:
+    """Read an image as a data URL so Flet does not depend on asset URL routing."""
     candidates: list[Path] = []
     candidates.append(
-        Path(__file__).resolve().parents[2] / "assets" / "uth_profile_banner.jpg"
+        Path(__file__).resolve().parents[2] / "assets" / filename
     )
     active_assets = os.environ.get("FLET_ASSETS_DIR")
     if active_assets:
-        candidates.append(Path(active_assets) / "uth_profile_banner.jpg")
+        candidates.append(Path(active_assets) / filename)
     for asset_path in candidates:
         try:
             if asset_path.is_file():
                 encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
-                return f"data:image/jpeg;base64,{encoded}"
+                return f"data:{mime_type};base64,{encoded}"
         except OSError:
-            logger.debug("Cannot read UTH profile banner: %s", asset_path, exc_info=True)
+            logger.debug("Cannot read image asset: %s", asset_path, exc_info=True)
     # Keep the standard Flet asset route as a fallback for packaged builds.
-    return "uth_profile_banner.jpg"
+    return filename
 
 
 def format_vnd(amount: int) -> str:
@@ -774,11 +774,14 @@ class ProfileView(ft.Container):
                 controls=[
                     ft.Container(
                         content=ft.Image(
-                            src=_uth_banner_source(),
+                            src=_asset_image_source(
+                                "uth_campus_banner.jpg", "image/jpeg"
+                            ),
                             expand=True,
-                            # Keep the whole supplied campus photo visible in
-                            # the wide banner, as in the desktop reference.
-                            fit=ft.BoxFit.FILL,
+                            # Scale proportionally and crop to the wide banner;
+                            # never stretch the campus photo horizontally.
+                            fit=ft.BoxFit.COVER,
+                            filter_quality=ft.FilterQuality.HIGH,
                             anti_alias=True,
                             semantics_label="Khuôn viên UTH",
                             key="profile-uth-banner-image",
@@ -813,6 +816,25 @@ class ProfileView(ft.Container):
                         right=0,
                         top=0,
                         bottom=0,
+                    ),
+                    ft.Container(
+                        content=ft.Image(
+                            src=_asset_image_source(
+                                "uth_profile_wordmark.png", "image/png"
+                            ),
+                            width=168,
+                            height=50,
+                            fit=ft.BoxFit.CONTAIN,
+                            filter_quality=ft.FilterQuality.HIGH,
+                            semantics_label="UTH — University of Transport Ho Chi Minh City",
+                        ),
+                        width=168,
+                        height=50,
+                        right=10,
+                        top=8,
+                        bgcolor=C.SURFACE,
+                        border_radius=25,
+                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                     ),
                 ],
                 height=banner_height,
