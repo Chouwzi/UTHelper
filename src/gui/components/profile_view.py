@@ -359,6 +359,32 @@ class ProfileView(ft.Container):
             self._sync_footer()
             self._update()
 
+    def clear(self) -> None:
+        """Remove all account-owned profile data from controls and dialogs."""
+        self._snapshot = None
+        self._from_cache = False
+        self._selected_semester = ""
+        self._data_host.controls = []
+        self._data_host.visible = False
+        self._loading_row.visible = False
+        self._error_state.visible = False
+        self._empty_state.visible = False
+        self._stale_banner.visible = False
+        self._footer.visible = False
+        self._avatar = None
+        self._avatar_text = None
+        self._avatar_image = None
+        self._avatar_src = ""
+        for attr in ("_profile_sheet", "_detail_sheet", "_semester_sheet"):
+            sheet = getattr(self, attr, None)
+            if sheet is not None and self._page_ref is not None:
+                try:
+                    self._page_ref.pop_dialog()
+                except Exception:  # noqa: BLE001 - dialog may already be closed
+                    logger.debug("Profile dialog already closed during clear")
+            setattr(self, attr, None)
+        self._update()
+
     def update_snapshot(
         self, snapshot: ProfileSnapshot, *, from_cache: bool = False
     ) -> None:
@@ -1018,6 +1044,27 @@ class ProfileView(ft.Container):
             # Phone: a vertical tappable list — one tap opens the fee detail
             # sheet instead of swiping a wide table sideways like the Portal.
             return self._build_mobile_list()
+        if not self._filtered_rows():
+            empty_label = (
+                "Không có khoản thu khác."
+                if self._active_tab == TAB_OTHER
+                else "Không có học phí trong lựa chọn này."
+            )
+            self._table = None
+            self._table_host = ft.Container(
+                content=ft.Text(
+                    empty_label,
+                    size=13,
+                    color=C.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                alignment=ft.Alignment(0, 0),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=24),
+                border_radius=12,
+                border=ft.Border.all(1, C.BORDER),
+                bgcolor=C.SURFACE,
+            )
+            return self._table_host
         if self._active_tab == TAB_OTHER:
             table = self._build_other_fee_table()
         else:

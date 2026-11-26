@@ -20,8 +20,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, get_type_hints
+from typing import Any, Callable, get_type_hints
 
+from core.portal_client import PortalAuthenticationError
 from core.safe_file_io import SafeFileIO
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,10 @@ class ProfileLoadResult:
 
     snapshot: ProfileSnapshot
     from_cache: bool
+
+
+class ProfileLoadCancelled(RuntimeError):
+    """A profile refresh was invalidated by logout or an account change."""
 
 
 def parse_summary_profile(raw: Any) -> StudentProfile:
@@ -329,11 +334,7 @@ class StudentProfileCache:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, cache_dir: Path | None = None, namespace: str = "") -> None:
-        if cache_dir is None:
-            from config import _USER_DATA_DIR
-
-            cache_dir = _USER_DATA_DIR
+    def __init__(self, cache_dir: Path, namespace: str = "") -> None:
         digest = hashlib.sha256(
             namespace.strip().casefold().encode("utf-8")
         ).hexdigest()[:12]
@@ -425,31 +426,46 @@ class StudentProfileService:
         password: str,
         *,
         force_refresh: bool = False,
+        is_current: Callable[[], bool] | None = None,
     ) -> ProfileLoadResult:
+        def ensure_current() -> None:
+            if is_current is not None and not is_current():
+                raise ProfileLoadCancelled("Student profile request was invalidated")
+
+        if not username or not password:
+            raise ValueError("Portal credentials are unavailable")
         cached = self._cache.load()
         if cached is not None and not force_refresh:
             return ProfileLoadResult(cached, from_cache=True)
-        if not username or not password:
-            if cached is not None:
-                return ProfileLoadResult(cached, from_cache=True)
-            raise ValueError("Portal credentials are unavailable")
         try:
+            ensure_current()
             profile = parse_summary_profile(
                 self._portal_client.fetch_summary_profile(username, password)
             )
+            ensure_current()
             credit = self._portal_client.fetch_credit(username, password)
+            ensure_current()
             semesters = parse_semesters(
                 self._portal_client.fetch_semesters(username, password)
             )
+            ensure_current()
             # idDot=0 asks for every semester; the dropdown then filters the
             # rows locally without another round trip.
             tuition_rows = parse_tuition_rows(
                 self._portal_client.fetch_tuition(0, username, password)
             )
+            ensure_current()
             other_fees = parse_other_fee_rows(
                 self._portal_client.fetch_tuition_other(username, password)
             )
+            ensure_current()
+        except ProfileLoadCancelled:
+            raise
         except Exception as exc:
+            status = getattr(exc, "status_code", getattr(exc, "status", None))
+            if isinstance(exc, PortalAuthenticationError) or status in (401, 403):
+                self._cache.clear()
+                raise
             if cached is not None:
                 logger.warning(
                     "Student profile refresh failed; serving cached copy: %s", exc
@@ -460,8 +476,16 @@ class StudentProfileService:
         # whole refresh, so fall back to the cached photo (or none) instead.
         avatar = ""
         try:
+            ensure_current()
             avatar = self._portal_client.fetch_profile_image(username, password)
+            ensure_current()
+        except ProfileLoadCancelled:
+            raise
         except Exception as exc:
+            status = getattr(exc, "status_code", getattr(exc, "status", None))
+            if isinstance(exc, PortalAuthenticationError) or status in (401, 403):
+                self._cache.clear()
+                raise
             logger.warning("Student profile avatar refresh failed: %s", exc)
             if cached is not None:
                 avatar = cached.avatar
@@ -475,5 +499,6 @@ class StudentProfileService:
             account=username,
             avatar=avatar,
         )
+        ensure_current()
         self._cache.save(snapshot)
         return ProfileLoadResult(snapshot, from_cache=False)

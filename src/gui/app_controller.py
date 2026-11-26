@@ -27,7 +27,7 @@ from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
-from core.portal_client import PortalClient
+from core.portal_client import PortalAuthenticationError, PortalClient
 from core.student_profile import StudentProfileCache, StudentProfileService
 from core.today_schedule import (
     ScheduleLoadStatus,
@@ -55,6 +55,7 @@ except ImportError:
     _core_classify_uth_webview_url = None
     _core_normalize_uth_webview_target_url = None
 from config import (
+    get_data_dir,
     get_sync_interval_minutes,
     hydrate_secrets,
     pop_pending_plaintext_migration,
@@ -760,6 +761,12 @@ class AppController:
         can coalesce with or overwrite the new account's caches, UI, or alerts.
         """
         new_username = str(new_identity[0] or "").strip()
+        previous_identity = getattr(self, "_settings_identity", None)
+        previous_profile_username = (
+            str(previous_identity[0] or "").strip()
+            if previous_identity
+            else ""
+        )
         # 1. Flip identity & advance epochs BEFORE scheduling or mutating anything.
         self._settings_identity = new_identity
         should_advance_account_epoch = bool(
@@ -981,6 +988,35 @@ class AppController:
                     self._schedule_webview2_profile_purge(keep_profile)
                 except Exception:
                     logger.debug("WebView2 profile purge skipped", exc_info=True)
+
+        # Student profile data is private account-owned information. Remove
+        # its disk snapshot and rendered controls on logout, account switch,
+        # or any credential change (including a password change).
+        if reset_moodle_and_caches or account_switched_or_logged_out or mark_logged_out:
+            profile_service = getattr(self, "_profile_service", None)
+            profile_cache = getattr(profile_service, "cache", None)
+            clear_profile_cache = getattr(profile_cache, "clear", None)
+            if callable(clear_profile_cache):
+                try:
+                    clear_profile_cache()
+                except Exception:
+                    logger.debug("Student profile cache clear failed", exc_info=True)
+            elif previous_profile_username:
+                try:
+                    StudentProfileCache(
+                        cache_dir=get_data_dir(), namespace=previous_profile_username
+                    ).clear()
+                except Exception:
+                    logger.debug("Student profile cache clear failed", exc_info=True)
+            self._profile_service = None
+            self._profile_service_account = None
+            profile_view = getattr(self, "profile_view", None)
+            clear_profile_view = getattr(profile_view, "clear", None)
+            if callable(clear_profile_view):
+                try:
+                    clear_profile_view()
+                except Exception:
+                    logger.debug("Student profile UI clear failed", exc_info=True)
 
         # 6. Clear schedule caches & views.
         week_cache = getattr(self, "_week_schedule_cache", None)
@@ -2434,6 +2470,7 @@ class AppController:
             ),
             distribution_profile=self._get_distribution_profile(),
             on_open_store_url=self._open_store_url,
+            on_open_profile=lambda: self._safe_run_task(self._show_profile),
         )
         # Seam contracts with SettingsView (`ui-webview-docs`): explicit logout
         # and Settings -> Tài khoản login route through unified AppController isolation.
@@ -5446,7 +5483,9 @@ class AppController:
         if service is None or getattr(self, "_profile_service_account", None) != username:
             service = StudentProfileService(
                 self._portal_client,
-                StudentProfileCache(namespace=username or "anon"),
+                StudentProfileCache(
+                    cache_dir=get_data_dir(), namespace=username or "anon"
+                ),
             )
             self._profile_service = service
             self._profile_service_account = username
@@ -5466,16 +5505,48 @@ class AppController:
         service = self._get_profile_service()
         username = settings.UTH_USERNAME or ""
         password = settings.UTH_PASSWORD or ""
-        cached = await asyncio.to_thread(service.load_cached)
+        request_account_epoch = getattr(self, "_account_epoch", 0)
+        has_credentials = bool(username.strip() and password)
+        cached = (
+            await asyncio.to_thread(service.load_cached)
+            if has_credentials
+            else None
+        )
+        if (
+            request_account_epoch != getattr(self, "_account_epoch", 0)
+            or username != (settings.UTH_USERNAME or "")
+            or password != (settings.UTH_PASSWORD or "")
+        ):
+            return
         if cached is not None:
             self.view_manager.show_profile_data(cached, from_cache=True)
         try:
             result = await asyncio.to_thread(
-                service.load, username, password, force_refresh=True
+                service.load,
+                username,
+                password,
+                force_refresh=True,
+                is_current=lambda: (
+                    request_account_epoch == getattr(self, "_account_epoch", 0)
+                    and username == (settings.UTH_USERNAME or "")
+                    and password == (settings.UTH_PASSWORD or "")
+                ),
             )
         except Exception as exc:
+            if (
+                request_account_epoch != getattr(self, "_account_epoch", 0)
+                or username != (settings.UTH_USERNAME or "")
+                or password != (settings.UTH_PASSWORD or "")
+            ):
+                return
             logger.error("Student profile load failed: %s", exc)
-            if cached is None:
+            status = getattr(exc, "status_code", getattr(exc, "status", None))
+            if isinstance(exc, PortalAuthenticationError) or status in (401, 403):
+                self.profile_view.clear()
+                self.view_manager.show_profile_error(
+                    "Tài khoản Portal không được xác thực. Hãy kiểm tra lại MSSV và mật khẩu."
+                )
+            elif cached is None:
                 self.view_manager.show_profile_error(
                     "Không tải được hồ sơ từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
                 )
@@ -5484,7 +5555,12 @@ class AppController:
                     "Không thể làm mới · đang hiển thị dữ liệu đã lưu."
                 )
             return
-        if not getattr(self.profile_view, "visible", False):
+        if (
+            request_account_epoch != getattr(self, "_account_epoch", 0)
+            or username != (settings.UTH_USERNAME or "")
+            or password != (settings.UTH_PASSWORD or "")
+            or not getattr(self.profile_view, "visible", False)
+        ):
             return  # Người dùng đã chuyển màn trước khi tải xong.
         self.view_manager.show_profile_data(result.snapshot, from_cache=result.from_cache)
         if result.from_cache:

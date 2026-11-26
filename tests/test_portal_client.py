@@ -611,6 +611,7 @@ def test_portal_client_fetches_summary_profile_and_credit_with_shared_login():
 
 def test_portal_client_fetch_profile_image_normalizes_avatar_sources():
     """``user/image`` may return a data URI or bare base64; empty means no avatar."""
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfixture").decode("ascii")
     requests = []
 
     def opener(request, timeout):
@@ -619,13 +620,14 @@ def test_portal_client_fetch_profile_image_normalizes_avatar_sources():
         if request.full_url.endswith("/user/login"):
             return _Response({"success": True, "token": "jwt-token"})
         if request.full_url.endswith("/user/image"):
-            return _Response({"success": True, "body": "data:image/png;base64,QUJD"})
+            return _Response({"success": True, "body": f"data:image/png;base64,{png}"})
         raise AssertionError(f"unexpected request {request.full_url}")
 
     client = PortalClient(
         "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
     )
-    assert client.fetch_profile_image("student", "secret") == "data:image/png;base64,QUJD"
+    expected = f"data:image/png;base64,{png}"
+    assert client.fetch_profile_image("student", "secret") == expected
     # Second call reuses the cached token: exactly one login overall.
     assert sum(url.endswith("/user/login") for url in requests) == 1
 
@@ -634,13 +636,13 @@ def test_portal_client_fetch_profile_image_normalizes_avatar_sources():
         del timeout
         if request.full_url.endswith("/user/login"):
             return _Response({"success": True, "token": "jwt-token"})
-        return _Response({"success": True, "body": "QUJD"})
+        return _Response({"success": True, "body": png})
 
     bare = PortalClient(
         "https://portal-publicapp.ut.edu.vn/api/v1", opener=bare_opener
     )
     assert bare.fetch_profile_image("student", "secret") == (
-        "data:image/png;base64,QUJD"
+        expected
     )
 
     def empty_opener(request, timeout):
@@ -653,6 +655,84 @@ def test_portal_client_fetch_profile_image_normalizes_avatar_sources():
         "https://portal-publicapp.ut.edu.vn/api/v1", opener=empty_opener
     )
     assert empty.fetch_profile_image("student", "secret") == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "https://example.invalid/avatar.png",
+        "data:image/svg+xml;base64,PHN2Zz4=",
+        "data:image/jpeg;base64,iVBORw0KGgo=",
+        "not-base64!",
+    ],
+)
+def test_portal_client_rejects_untrusted_or_malformed_profile_images(body):
+    from core.portal_client import PortalProtocolError
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": body})
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+    with pytest.raises(PortalProtocolError):
+        client.fetch_profile_image("student", "secret")
+
+
+def test_portal_client_rejects_oversized_profile_image():
+    from core.portal_client import PortalProtocolError
+
+    png = b"\x89PNG\r\n\x1a\n" + b"x" * (2 * 1024 * 1024)
+    encoded = base64.b64encode(png).decode("ascii")
+
+    def opener(request, timeout):
+        del timeout
+        if request.full_url.endswith("/user/login"):
+            return _Response({"success": True, "token": "jwt-token"})
+        return _Response({"success": True, "body": encoded})
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+    with pytest.raises(PortalProtocolError, match="size"):
+        client.fetch_profile_image("student", "secret")
+
+
+def test_student_profile_portal_endpoints_use_offline_demo_fixtures():
+    from core.portal_client import PortalAuthenticationError
+
+    calls = []
+
+    def opener(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("demo profile endpoints must not access the Portal")
+
+    client = PortalClient(
+        "https://portal-publicapp.ut.edu.vn/api/v1", opener=opener
+    )
+    username = "uthelper_demo"
+    password = "UTH-Review-2026!"
+
+    profile = client.fetch_summary_profile(username, password)
+    semesters = client.fetch_semesters(username, password)
+    tuition = client.fetch_tuition(0, username, password)
+    other = client.fetch_tuition_other(username, password)
+    credit = client.fetch_credit(username, password)
+    avatar = client.fetch_profile_image(username, password)
+
+    assert profile["maSinhVien"] == "SV-DEMO"
+    assert len(semesters) == 2
+    assert len(tuition) == 2
+    assert len(other) == 1
+    assert credit == "0.00Đ (UTH)"
+    assert avatar == ""
+    assert calls == []
+
+    with pytest.raises(PortalAuthenticationError):
+        client.fetch_summary_profile(username, "wrong-password")
 
 
 def test_portal_client_tuition_endpoints_send_id_dot_and_normalize_lists():

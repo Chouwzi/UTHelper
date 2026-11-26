@@ -32,6 +32,43 @@ from core.today_schedule import (
 )
 
 _MAX_PORTAL_RESPONSE_BYTES = 8 * 1024 * 1024
+_MAX_STUDENT_AVATAR_BYTES = 2 * 1024 * 1024
+
+
+def _normalize_avatar_body(body: Any) -> str:
+    """Accept only small, well-formed PNG/JPEG/WebP image payloads."""
+    if body is None:
+        return ""
+    if not isinstance(body, str):
+        raise PortalProtocolError("Portal image contract was invalid")
+    text = body.strip()
+    if not text:
+        return ""
+    declared_mime = ""
+    if text.startswith("data:"):
+        header, separator, text = text.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise PortalProtocolError("Portal image data URI was invalid")
+        declared_mime = header[5:].split(";", 1)[0].lower()
+        if declared_mime not in {"image/png", "image/jpeg", "image/webp"}:
+            raise PortalProtocolError("Portal image format was not supported")
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise PortalProtocolError("Portal image data was not valid base64") from exc
+    if not raw or len(raw) > _MAX_STUDENT_AVATAR_BYTES:
+        raise PortalProtocolError("Portal image exceeded the supported size")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        detected_mime = "image/png"
+    elif raw.startswith(b"\xff\xd8\xff"):
+        detected_mime = "image/jpeg"
+    elif raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        detected_mime = "image/webp"
+    else:
+        raise PortalProtocolError("Portal image format was not supported")
+    if declared_mime and declared_mime != detected_mime:
+        raise PortalProtocolError("Portal image MIME type did not match its data")
+    return f"data:{detected_mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def _decompress_gzip_bounded(compressed: bytes, max_bytes: int) -> bytes:
@@ -664,16 +701,28 @@ class PortalClient:
         the same token-owner and generation rules as ``fetch_day``.
         """
         generation = self._current_generation()
-        token = self._cached_token(username) or self._login(
-            username, password, generation
-        )
+        token = self._cached_token(username)
+        if not token:
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
         try:
             payload = self._request_json("GET", path, token=token, query=query)
         except _PortalHttpError as exc:
+            if exc.status == 403:
+                self._discard_token(generation)
+                raise
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
-            payload = self._request_json("GET", path, token=token, query=query)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
+            try:
+                payload = self._request_json("GET", path, token=token, query=query)
+            except _PortalHttpError as retry_exc:
+                if retry_exc.status in (401, 403):
+                    self._discard_token(generation)
+                raise
         refreshed_token = payload.get("token")
         if isinstance(refreshed_token, str) and refreshed_token:
             self._store_token(refreshed_token, username, generation)
@@ -698,6 +747,23 @@ class PortalClient:
         maSinhVien, khoa, nganh, ...) so callers can tolerate optional
         fields the Portal does not always populate.
         """
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return {
+                "maSinhVien": "SV-DEMO",
+                "hoDem": "Nguyễn Văn",
+                "ten": "Sinh viên Demo",
+                "khoaHoc": "2024",
+                "heDaoTao": "Đại học - chính quy",
+                "khoa": "Ban Công nghệ số",
+                "nganh": "Công nghệ thông tin",
+                "chuyenNganh": "Kỹ thuật phần mềm",
+                "lop": "D23TH01",
+                "ngaySinh": "01/01/2006",
+                "noiSinhTinh": "TP. Hồ Chí Minh",
+                "soDienThoai": "0900000000",
+                "email": "demo@example.invalid",
+            }
         payload = self._authorized_get(
             "user/getSummaryProfile", username, password
         )
@@ -708,6 +774,9 @@ class PortalClient:
 
     def fetch_credit(self, username: str, password: str) -> str:
         """Fetch the UTH account balance as Portal renders it (``0.00Đ (UTH)``)."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return "0.00Đ (UTH)"
         payload = self._authorized_get("user/getCredit", username, password)
         body = payload.get("body")
         if body is None:
@@ -724,23 +793,22 @@ class PortalClient:
         so callers can hand the result straight to ``ft.Image(src=...)``.
         An empty body means "no avatar" and returns ``""`` instead of raising.
         """
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return ""
         payload = self._authorized_get("user/image", username, password)
-        body = payload.get("body")
-        if body is None:
-            return ""
-        if not isinstance(body, str):
-            raise PortalProtocolError("Portal image contract was invalid")
-        text = body.strip()
-        if not text:
-            return ""
-        if text.startswith(("data:image/", "http://", "https://")):
-            return text
-        return f"data:image/png;base64,{text}"
+        return _normalize_avatar_body(payload.get("body"))
 
     def fetch_semesters(
         self, username: str, password: str
     ) -> tuple[dict[str, Any], ...]:
         """Fetch semester references (``{"id", "tenDot"}``) in Portal order."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return (
+                {"id": 202601, "tenDot": "Học kỳ 1 năm học 2025-2026"},
+                {"id": 202602, "tenDot": "Học kỳ 2 năm học 2025-2026"},
+            )
         return self._list_body(
             self._authorized_get("hoctap/hocky", username, password),
             "hocky",
@@ -755,6 +823,40 @@ class PortalClient:
         (tenDot, maLopHocPhan, noiDung, soTinChi, mucPhiBanDau, mucNop,
         ngayNop, soTienNop, khauTru, truNo, congNo, daDongHocPhi).
         """
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            rows = (
+                {
+                    "tenDot": "Học kỳ 1 năm học 2025-2026",
+                    "maLopHocPhan": "DEMO1001",
+                    "noiDung": "Lập trình ứng dụng",
+                    "soTinChi": 3,
+                    "mucPhiBanDau": 4500000,
+                    "mucNop": 4500000,
+                    "soTienNop": 4500000,
+                    "congNo": 0,
+                    "daDongHocPhi": True,
+                },
+                {
+                    "tenDot": "Học kỳ 2 năm học 2025-2026",
+                    "maLopHocPhan": "DEMO2001",
+                    "noiDung": "Cơ sở dữ liệu",
+                    "soTinChi": 3,
+                    "mucPhiBanDau": 4500000,
+                    "mucNop": 4500000,
+                    "soTienNop": 1500000,
+                    "congNo": 3000000,
+                    "daDongHocPhi": False,
+                },
+            )
+            if str(id_dot) == "0":
+                return rows
+            semester_id = str(id_dot)
+            labels = {"202601": "Học kỳ 1", "202602": "Học kỳ 2"}
+            prefix = labels.get(semester_id, "")
+            return tuple(
+                row for row in rows if prefix and row["tenDot"].startswith(prefix)
+            )
         return self._list_body(
             self._authorized_get(
                 "hocphi",
@@ -769,6 +871,19 @@ class PortalClient:
         self, username: str, password: str
     ) -> tuple[dict[str, Any], ...]:
         """Fetch non-tuition collections (bảo hiểm, ký túc xá, ...)."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return (
+                {
+                    "namHoc": "2025-2026",
+                    "maKhoanThuKhac": "DEMO-BHYT",
+                    "tenKhoanThuKhac": "Bảo hiểm y tế (Demo)",
+                    "mucNop": 500000,
+                    "soTienNop": 500000,
+                    "congNo": 0,
+                    "isBatBuoc": True,
+                },
+            )
         return self._list_body(
             self._authorized_get("hocphi/khoanthukhac", username, password),
             "hocphi/khoanthukhac",

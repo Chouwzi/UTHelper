@@ -284,6 +284,10 @@ def test_settings_logout_and_account_login_seams_and_hub_back_navigation():
     # 2. Sub-screen Back when on_closed is None returns to hub first instead of closing Settings
     view._navigate_to_detail("account")
     assert view._current_screen == "account"
+    profile_opens = []
+    view._on_open_profile = lambda: profile_opens.append(True)
+    view._open_profile_btn.on_click(None)
+    assert profile_opens == [True]
     asyncio.run(view._handle_back(None, on_closed=None))
     assert view._current_screen == "hub"
     assert closed_calls == []

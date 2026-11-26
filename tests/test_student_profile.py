@@ -355,6 +355,51 @@ def test_service_without_credentials_uses_cache_or_raises(tmp_path):
 
     service.load("sv001", "secret", force_refresh=True)
     client = _FakePortalClient(fail=True)
-    result = StudentProfileService(client, cache).load("", "")
-    assert result.from_cache is True
+    with pytest.raises(ValueError, match="credentials"):
+        StudentProfileService(client, cache).load("", "")
     assert client.calls == []
+    assert cache.load() is not None
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_service_clears_cache_instead_of_showing_it_after_auth_rejection(
+    tmp_path, status
+):
+    cache = StudentProfileCache(cache_dir=tmp_path, namespace="sv001")
+    StudentProfileService(_FakePortalClient(), cache).load(
+        "sv001", "secret", force_refresh=True
+    )
+
+    class AuthRejected(Exception):
+        status_code = status
+
+    client = _FakePortalClient()
+
+    def reject_auth(*_args, **_kwargs):
+        raise AuthRejected()
+
+    client.fetch_summary_profile = reject_auth
+    service = StudentProfileService(client, cache)
+    with pytest.raises(AuthRejected):
+        service.load("sv001", "changed-password", force_refresh=True)
+    assert cache.load() is None
+
+
+def test_service_stops_refresh_and_does_not_restore_cache_after_account_switch(
+    tmp_path,
+):
+    from core.student_profile import ProfileLoadCancelled
+
+    client = _FakePortalClient()
+    cache = StudentProfileCache(cache_dir=tmp_path, namespace="sv001")
+    states = iter((True, False))
+    with pytest.raises(ProfileLoadCancelled):
+        StudentProfileService(client, cache).load(
+            "sv001",
+            "secret",
+            force_refresh=True,
+            is_current=lambda: next(states),
+        )
+
+    assert client.calls == ["profile"]
+    assert cache.load() is None

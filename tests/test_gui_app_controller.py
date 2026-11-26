@@ -2548,6 +2548,13 @@ def test_handle_logout_clears_all_account_state_and_never_uses_none_namespace(mo
     )
     controller._portal_client = SimpleNamespace(clear_token=lambda: events.append("portal_clear"))
     controller._portal_week_client = SimpleNamespace(clear_token=lambda: events.append("portal_week_clear"))
+    controller._profile_service = SimpleNamespace(
+        cache=SimpleNamespace(clear=lambda: events.append("profile_cache_clear"))
+    )
+    controller._profile_service_account = "sv_A"
+    controller.profile_view = SimpleNamespace(
+        clear=lambda: events.append("profile_view_clear")
+    )
     controller._week_schedule_cache = SimpleNamespace(set_namespace=lambda ns: events.append(("week_ns", ns)))
     controller.calendar_view = SimpleNamespace(reset_schedule=lambda: events.append("cal_reset"))
     controller._today_schedule_coordinator = SimpleNamespace(
@@ -2600,6 +2607,9 @@ def test_handle_logout_clears_all_account_state_and_never_uses_none_namespace(mo
     assert "gm_reset" in events
     assert "notif_clear" in events
     assert "academic_clear" in events
+    assert "profile_cache_clear" in events
+    assert "profile_view_clear" in events
+    assert controller._profile_service is None
     assert "quiz_force_close" in events
     assert any(fn is quiz_clear for fn, _, _ in scheduled)
     assert any(fn is controller._android_background.logout for fn, _, _ in scheduled)

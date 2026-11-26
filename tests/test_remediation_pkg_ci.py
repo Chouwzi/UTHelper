@@ -29,7 +29,7 @@ from core.update_models import (
     UpdateCandidate,
     VerificationResult,
 )
-from gui.components.courses.adaptive_nav import NAV_DESTINATIONS
+from gui.components.courses.adaptive_nav import MOBILE_NAV_DESTINATIONS
 from platform_utils import android_updates
 from platform_utils.android_updates import (
     PACKAGE_ID,
@@ -677,8 +677,8 @@ def test_pkg02_play_console_app_access_block_matches_real_login_and_nav_ui():
     assert "uthelper_demo" in verbatim
     assert "UTH-Review-2026!" in verbatim
 
-    # All 5 real top-level tabs from AdaptiveNavShell must match verbatim.
-    for spec in NAV_DESTINATIONS:
+    # All 5 real mobile bottom-bar tabs from AdaptiveNavShell must match verbatim.
+    for spec in MOBILE_NAV_DESTINATIONS:
         assert f'"{spec.label}"' in verbatim
 
     # Non-existent first-run Terms & Privacy dialog must be removed.

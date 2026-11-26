@@ -135,9 +135,9 @@ def test_navigate_destination_prompts_unsaved_settings_before_switching_tabs(
         asyncio.run(controller._navigate_destination("calendar"))
         controller._show_calendar.assert_not_awaited()
         assert view.visible is True
-        # Rail/bottom-bar highlight is snapped back to "settings" (index 5).
+        # Rail (6 destinations) and mobile bar (5 destinations) highlight Settings.
         assert controller._nav_shell.rail.selected_index == 5
-        assert controller._nav_shell.bar.selected_index == 5
+        assert controller._nav_shell.bar.selected_index == 4
         assert len(dialogs) == 1
         assert isinstance(dialogs[0], ft.AlertDialog)
 

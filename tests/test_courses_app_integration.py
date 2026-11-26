@@ -28,6 +28,7 @@ from core.courses.preview_cache import PreviewFileCache
 from gui.app_controller import AppController
 from gui.components.courses.adaptive_nav import (
     NAV_DESTINATIONS,
+    MOBILE_NAV_DESTINATIONS,
     RAIL_BREAKPOINT,
     RAIL_WIDTH,
     AdaptiveNavShell,
@@ -270,6 +271,14 @@ def test_adaptive_nav_shell_switches_bar_and_rail_and_handles_theme():
         "profile",
         "settings",
     ]
+    assert [d.key for d in MOBILE_NAV_DESTINATIONS] == [
+        "home",
+        "courses",
+        "calendar",
+        "grades",
+        "settings",
+    ]
+    assert len(nav.bar.destinations) == 5
     assert RAIL_BREAKPOINT == 600
     assert RAIL_WIDTH == 88
 
@@ -303,12 +312,19 @@ def test_adaptive_nav_shell_switches_bar_and_rail_and_handles_theme():
     assert nav.rail.selected_index == 1
     assert nav.bar.selected_index == 1
 
+    nav._handle_bar_change(
+        SimpleNamespace(control=SimpleNamespace(selected_index=4), data=None)
+    )
+    nav.set_active("profile")
+    assert nav.rail.selected_index == 4
+    assert nav.bar.selected_index == 4  # Settings is the mobile entry point.
+
     # _handle_change extracts control.selected_index (including 0) and e.data fallback
     nav._handle_change(SimpleNamespace(control=SimpleNamespace(selected_index=0), data="1"))
     nav._handle_change(SimpleNamespace(control=SimpleNamespace(selected_index=None), data="2"))
     nav._handle_change(SimpleNamespace(control=SimpleNamespace(selected_index=99), data=None))
     nav._handle_change(SimpleNamespace(control=None, data="bad"))
-    assert seen == ["home", "calendar"]
+    assert seen == ["settings", "home", "calendar"]
 
     original_theme = config.settings.THEME
     try:

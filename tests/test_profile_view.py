@@ -377,6 +377,22 @@ def test_profile_view_mobile_renders_tappable_cards_instead_of_table(
     assert other_cards[0].on_click is not None
 
 
+def test_profile_view_desktop_empty_fee_states_do_not_build_malformed_rows():
+    view = _make_view()
+    view.update_snapshot(_make_snapshot(empty=True))
+
+    empty_tuition = view._table_host
+    assert view._table is None
+    assert isinstance(empty_tuition.content, ft.Text)
+    assert "Không có học phí" in empty_tuition.content.value
+
+    view.select_tab(TAB_OTHER)
+    empty_other = view._table_host
+    assert view._table is None
+    assert isinstance(empty_other.content, ft.Text)
+    assert "Không có khoản thu khác" in empty_other.content.value
+
+
 def test_profile_view_mobile_detail_sheet_shows_money_and_status(monkeypatch):
     from gui.components import profile_view as profile_view_module
 
@@ -513,6 +529,19 @@ def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):
 
     # No data on screen -> the total bar hides with it.
     view.show_error("Không tải được hồ sơ từ Portal.")
+    assert view._footer.visible is False
+
+
+def test_profile_view_clear_discards_snapshot_and_rendered_account_data():
+    view = _make_view()
+    view.update_snapshot(_make_snapshot())
+
+    view.clear()
+
+    assert view._snapshot is None
+    assert view._data_host.controls == []
+    assert view._data_host.visible is False
+    assert view._avatar is None
     assert view._footer.visible is False
 
 
