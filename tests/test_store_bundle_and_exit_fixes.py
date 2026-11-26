@@ -17,6 +17,7 @@ import pytest
 
 from core.distribution import DistributionChannel, build_distribution_profile
 from scripts.prepare_windows_bundle import prepare_windows_bundle
+from scripts.release_metadata import read_project_version
 from scripts.verify_windows_bundle import (
     BundleVerificationError,
     inspect_bundle,
@@ -26,6 +27,7 @@ import src.main as application
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_PROJECT_VERSION = read_project_version(ROOT / "pyproject.toml")
 PACKAGE_MSIX_PS1 = ROOT / "scripts" / "package_msix.ps1"
 VERIFY_MSIX_PS1 = ROOT / "scripts" / "verify_msix_release.ps1"
 BUILD_ANDROID_PS1 = ROOT / "scripts" / "build_android.ps1"
@@ -158,7 +160,9 @@ def _write_valid_bundle(root: Path) -> None:
     (root / "site-packages" / "flet_uth_quiz" / "quiz_player.pyc").write_bytes(b"pyc")
     (root / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
     (root / "app" / "main.pyc").write_bytes(b"pyc")
-    (root / "app" / "assets" / "release-version").write_bytes(b"2.5.1\n")
+    (root / "app" / "assets" / "release-version").write_bytes(
+        f"{CURRENT_PROJECT_VERSION}\n".encode("ascii")
+    )
 
     for asset_name in (
         "docx_host.html",
@@ -234,7 +238,7 @@ def test_prepare_windows_bundle_strips_debug_binaries_pdbs_and_tcltk(tmp_path: P
     # Release binaries must remain untouched
     assert (tmp_path / "DLLs" / "_asyncio.pyd").is_file()
     assert (tmp_path / "DLLs" / "sqlite3.dll").is_file()
-    assert inspect_bundle(tmp_path, expected_version="2.5.1") == ()
+    assert inspect_bundle(tmp_path, expected_version=CURRENT_PROJECT_VERSION) == ()
 
 
 @pytest.mark.parametrize(
@@ -260,7 +264,7 @@ def test_verify_windows_bundle_fails_closed_on_debug_files_pdbs_or_tcltk(
     target.write_bytes(_build_minimal_pe_with_imports(["KERNEL32.dll"]))
 
     with pytest.raises(BundleVerificationError):
-        verify_bundle(tmp_path, expected_version="2.5.1")
+        verify_bundle(tmp_path, expected_version=CURRENT_PROJECT_VERSION)
 
 
 @pytest.mark.parametrize(
@@ -286,7 +290,7 @@ def test_verify_windows_bundle_pe_scanner_rejects_debug_crt_imports(
     (tmp_path / "DLLs" / "disguised_release.pyd").write_bytes(bad_pe)
 
     with pytest.raises(BundleVerificationError) as exc_info:
-        verify_bundle(tmp_path, expected_version="2.5.1")
+        verify_bundle(tmp_path, expected_version=CURRENT_PROJECT_VERSION)
 
     msg = str(exc_info.value).lower()
     assert "disguised_release.pyd" in msg

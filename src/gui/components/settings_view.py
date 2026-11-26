@@ -42,6 +42,10 @@ from gui.components.settings.theme_section import init_theme_controls, build_the
 from gui.components.settings.notification_section import init_notification_controls, build_notification_section
 from gui.components.settings.integration_section import init_integration_controls
 from gui.components.settings.debug_section import init_debug_controls, build_debug_section
+from gui.components.settings.credits_section import (
+    build_credits_section,
+    refresh_credits_section_colors,
+)
 from gui.controllers.autostart_settings import (
     AutostartSettingsCoordinator,
     AutostartUiState,
@@ -448,8 +452,69 @@ class SettingsView(ft.Container):
             expand=True,
         )
 
+        self._credits_entry_icon = ft.Icon(
+            ft.Icons.INFO_OUTLINE_ROUNDED,
+            size=14,
+            color=C.TEXT_SECONDARY,
+        )
+        self._credits_entry_sep = ft.Text(
+            "·",
+            size=11,
+            color=C.TEXT_SECONDARY,
+        )
+        self._credits_entry_label = ft.Text(
+            "Giới thiệu & Tác giả",
+            size=11,
+            weight=ft.FontWeight.W_500,
+            color=C.ACCENT,
+        )
+        self._credits_entry_chevron = ft.Icon(
+            ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            size=15,
+            color=C.TEXT_SECONDARY,
+        )
+        self._credits_entry_pill = ft.Container(
+            content=ft.Semantics(
+                content=ft.Row(
+                    controls=[
+                        ft.Row(
+                            controls=[self._credits_entry_icon, self._hub_version],
+                            spacing=6,
+                            tight=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        self._credits_entry_sep,
+                        ft.Row(
+                            controls=[
+                                self._credits_entry_label,
+                                self._credits_entry_chevron,
+                            ],
+                            spacing=2,
+                            tight=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ],
+                    spacing=6,
+                    run_spacing=2,
+                    wrap=True,
+                    tight=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                button=True,
+                label="Giới thiệu và tác giả UTHelper",
+                on_tap_hint_text="Mở trang thông tin tác giả và đóng góp",
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.55, C.BORDER)),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=7),
+            ink=True,
+            on_click=lambda _: self._navigate_to_detail("credits"),
+        )
+
         version_footer = ft.Container(
-            content=self._hub_version,
+            content=self._credits_entry_pill,
             alignment=ft.Alignment(0, 0),
             padding=ft.Padding.only(top=8, bottom=4),
         )
@@ -538,15 +603,24 @@ class SettingsView(ft.Container):
         self._current_screen = cat_id
 
         # Update title and subtitle
-        for cid, _, title, _, desc in self._category_defs:
-            if cid == cat_id:
-                self._detail_title.value = title
-                self._detail_subtitle.value = desc
-                break
+        if cat_id == "credits":
+            self._detail_title.value = "Giới thiệu & Đóng góp"
+            self._detail_subtitle.value = (
+                f"UTHelper v{APP_VERSION} · Thông tin tác giả và dự án"
+            )
+        else:
+            for cid, _, title, _, desc in self._category_defs:
+                if cid == cat_id:
+                    self._detail_title.value = title
+                    self._detail_subtitle.value = desc
+                    break
 
         # Build section controls
         if cat_id == "account":
             detail_ctrl = build_account_section(self)
+            self._sticky_footer.visible = False
+        elif cat_id == "credits":
+            detail_ctrl = build_credits_section(self)
             self._sticky_footer.visible = False
         else:
             self._sticky_footer.visible = True
@@ -1376,6 +1450,28 @@ class SettingsView(ft.Container):
             self._hub_title.color = C.TEXT_PRIMARY
         if hasattr(self, '_hub_version'):
             self._hub_version.color = C.TEXT_SECONDARY
+        credits_pill = getattr(self, "_credits_entry_pill", None)
+        if credits_pill is not None:
+            credits_pill.bgcolor = C.SURFACE
+            credits_pill.border = ft.Border.all(
+                1, ft.Colors.with_opacity(0.55, C.BORDER)
+            )
+        credits_icon = getattr(self, "_credits_entry_icon", None)
+        if credits_icon is not None:
+            credits_icon.color = C.TEXT_SECONDARY
+        credits_sep = getattr(self, "_credits_entry_sep", None)
+        if credits_sep is not None:
+            credits_sep.color = C.TEXT_SECONDARY
+        credits_label = getattr(self, "_credits_entry_label", None)
+        if credits_label is not None:
+            credits_label.color = C.ACCENT
+        credits_chevron = getattr(self, "_credits_entry_chevron", None)
+        if credits_chevron is not None:
+            credits_chevron.color = C.TEXT_SECONDARY
+        system_version = getattr(self, "_system_version_text", None)
+        if system_version is not None:
+            system_version.color = C.TEXT_SECONDARY
+        refresh_credits_section_colors(self)
         store_info = getattr(self, "_store_update_info_text", None)
         if store_info is not None:
             store_info.color = C.TEXT_PRIMARY
