@@ -15,6 +15,16 @@ on:
         required: false
         type: string
         default: ''
+      display_name:
+        description: Partner Center reserved DisplayName (defaults to vars.MSSTORE_DISPLAY_NAME or UTHelper)
+        required: false
+        type: string
+        default: ''
+      publisher_display_name:
+        description: Partner Center PublisherDisplayName (defaults to vars.MSSTORE_PUBLISHER_DISPLAY_NAME or UTHelper)
+        required: false
+        type: string
+        default: ''
       store_product_id:
         description: Optional Microsoft Store ProductId for deep links (defaults to vars.MSSTORE_PRODUCT_ID)
         required: false
@@ -146,11 +156,15 @@ jobs:
         env:
           INPUT_IDENTITY_NAME: ${{ inputs.identity_name }}
           INPUT_PUBLISHER: ${{ inputs.publisher }}
+          INPUT_DISPLAY_NAME: ${{ inputs.display_name }}
+          INPUT_PUBLISHER_DISPLAY_NAME: ${{ inputs.publisher_display_name }}
           INPUT_STORE_PRODUCT_ID: ${{ inputs.store_product_id }}
           INPUT_SIGN_MODE: ${{ inputs.sign_mode }}
           INPUT_RUN_WACK: ${{ inputs.run_wack }}
           VAR_IDENTITY_NAME: ${{ vars.MSSTORE_IDENTITY_NAME }}
           VAR_PUBLISHER: ${{ vars.MSSTORE_PUBLISHER }}
+          VAR_DISPLAY_NAME: ${{ vars.MSSTORE_DISPLAY_NAME }}
+          VAR_PUBLISHER_DISPLAY_NAME: ${{ vars.MSSTORE_PUBLISHER_DISPLAY_NAME }}
           VAR_STORE_PRODUCT_ID: ${{ vars.MSSTORE_PRODUCT_ID }}
         run: |
           $ErrorActionPreference = "Stop"
@@ -173,6 +187,22 @@ jobs:
             "CN=UTHelper"
           }
 
+          $displayName = if (-not [string]::IsNullOrWhiteSpace($env:INPUT_DISPLAY_NAME)) {
+            $env:INPUT_DISPLAY_NAME.Trim()
+          } elseif (-not [string]::IsNullOrWhiteSpace($env:VAR_DISPLAY_NAME)) {
+            $env:VAR_DISPLAY_NAME.Trim()
+          } else {
+            "UTHelper"
+          }
+
+          $publisherDisplayName = if (-not [string]::IsNullOrWhiteSpace($env:INPUT_PUBLISHER_DISPLAY_NAME)) {
+            $env:INPUT_PUBLISHER_DISPLAY_NAME.Trim()
+          } elseif (-not [string]::IsNullOrWhiteSpace($env:VAR_PUBLISHER_DISPLAY_NAME)) {
+            $env:VAR_PUBLISHER_DISPLAY_NAME.Trim()
+          } else {
+            "UTHelper"
+          }
+
           $storeProductId = if (-not [string]::IsNullOrWhiteSpace($env:INPUT_STORE_PRODUCT_ID)) {
             $env:INPUT_STORE_PRODUCT_ID.Trim()
           } elseif (-not [string]::IsNullOrWhiteSpace($env:VAR_STORE_PRODUCT_ID)) {
@@ -192,13 +222,15 @@ jobs:
           $evidenceJson = "evidence/UTHelper-$version-msstore.msix.verification.json"
 
           $packArgs = @{
-            BundleDir    = "build/windows"
-            Version      = $msixVersion
-            IdentityName = $identityName
-            Publisher    = $publisher
-            Channel      = "msstore"
-            SignMode     = $signMode
-            Output       = $outputMsix
+            BundleDir            = "build/windows"
+            Version              = $msixVersion
+            IdentityName         = $identityName
+            Publisher            = $publisher
+            DisplayName          = $displayName
+            PublisherDisplayName = $publisherDisplayName
+            Channel              = "msstore"
+            SignMode             = $signMode
+            Output               = $outputMsix
           }
           if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
             $packArgs.StoreProductId = $storeProductId
@@ -206,12 +238,14 @@ jobs:
           ./scripts/package_msix.ps1 @packArgs
 
           $verifyArgs = @{
-            MsixPath            = $outputMsix
-            Channel             = "msstore"
-            IdentityName        = $identityName
-            Publisher           = $publisher
-            Version             = $msixVersion
-            Output              = $evidenceJson
+            MsixPath = $outputMsix
+            Channel = "msstore"
+            IdentityName = $identityName
+            Publisher = $publisher
+            DisplayName = $displayName
+            PublisherDisplayName = $publisherDisplayName
+            Version = $msixVersion
+            Output = $evidenceJson
             RequireOfficeViewer = $true
           }
           if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
@@ -229,13 +263,15 @@ jobs:
                 New-Item -ItemType Directory -Path $wackTempDir -Force | Out-Null
                 $wackMsix = "$wackTempDir/UTHelper-$version-msstore-wack.msix"
                 $wackPackArgs = @{
-                  BundleDir    = "build/windows"
-                  Version      = $msixVersion
-                  IdentityName = $identityName
-                  Publisher    = $publisher
-                  Channel      = "msstore"
-                  SignMode     = "test"
-                  Output       = $wackMsix
+                  BundleDir            = "build/windows"
+                  Version              = $msixVersion
+                  IdentityName         = $identityName
+                  Publisher            = $publisher
+                  DisplayName          = $displayName
+                  PublisherDisplayName = $publisherDisplayName
+                  Channel              = "msstore"
+                  SignMode             = "test"
+                  Output               = $wackMsix
                 }
                 if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
                   $wackPackArgs.StoreProductId = $storeProductId
@@ -252,14 +288,16 @@ jobs:
               }
 
               $wackVerifyArgs = @{
-                MsixPath            = $wackMsix
-                Channel             = "msstore"
-                IdentityName        = $identityName
-                Publisher           = $publisher
-                Version             = $msixVersion
+                MsixPath = $wackMsix
+                Channel = "msstore"
+                IdentityName = $identityName
+                Publisher = $publisher
+                DisplayName = $displayName
+                PublisherDisplayName = $publisherDisplayName
+                Version = $msixVersion
                 RequireOfficeViewer = $true
-                RunWack             = $true
-                WackReportPath      = "evidence/UTHelper-$version-msstore.wack-report.xml"
+                RunWack = $true
+                WackReportPath = "evidence/UTHelper-$version-msstore.wack-report.xml"
               }
               if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
                 $wackVerifyArgs.StoreProductId = $storeProductId

@@ -93,6 +93,9 @@ dependencies = [
 [tool.flet.windows.dev_packages]
 flet-uth-quiz = "extensions/flet_uth_quiz"
 
+[tool.flet.windows.app]
+hide_window_on_start = true
+
 [tool.flet.windows.cleanup]
 # PyWin32 compiled help is not used at runtime; retain every runtime module.
 package_files = ["**.chm"]
