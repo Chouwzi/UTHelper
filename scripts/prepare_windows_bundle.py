@@ -10,6 +10,15 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+try:
+    from scripts.release_metadata import ReleaseMetadataError, write_runtime_version
+except ModuleNotFoundError:
+    from release_metadata import ReleaseMetadataError, write_runtime_version
+
+
+_DEFAULT_PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
+_RUNTIME_VERSION_RELATIVE = Path("app") / "assets" / "release-version"
+
 
 class BundlePreparationError(RuntimeError):
     """Raised when a Windows bundle cannot be prepared safely."""
@@ -64,8 +73,29 @@ def _strip_debug_and_unused_artifacts(root: Path) -> None:
             _unlink_bundle_file(entry)
 
 
-def prepare_windows_bundle(bundle_dir: Path) -> Path:
-    """Strip debug/bloat artifacts and create ``UTHelperAutostart.exe`` beside ``UTHelper.exe``."""
+def _sync_bundle_runtime_version(root: Path, pyproject: Path | None) -> None:
+    """Keep packaged ``app/assets/release-version`` synchronized with ``pyproject.toml``."""
+    target = root / _RUNTIME_VERSION_RELATIVE
+    if pyproject is not None:
+        source = Path(pyproject)
+    elif (root / "app").is_dir() and _DEFAULT_PYPROJECT.is_file():
+        source = _DEFAULT_PYPROJECT
+    else:
+        return
+    try:
+        write_runtime_version(source, target)
+    except ReleaseMetadataError as exc:
+        raise BundlePreparationError(
+            f"Could not sync packaged release version from {source}: {exc}"
+        ) from exc
+
+
+def prepare_windows_bundle(
+    bundle_dir: Path,
+    *,
+    pyproject: Path | None = None,
+) -> Path:
+    """Strip debug/bloat artifacts, sync runtime version, and create ``UTHelperAutostart.exe``."""
     root = bundle_dir.resolve()
     runner = root / "UTHelper.exe"
     alias = root / "UTHelperAutostart.exe"
@@ -77,6 +107,7 @@ def prepare_windows_bundle(bundle_dir: Path) -> Path:
         raise BundlePreparationError(f"Flet runner does not exist: {runner}")
 
     _strip_debug_and_unused_artifacts(root)
+    _sync_bundle_runtime_version(root, pyproject)
 
     try:
         shutil.copy2(runner, temporary_alias)
@@ -94,9 +125,15 @@ def prepare_windows_bundle(bundle_dir: Path) -> Path:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prepare a Flet Windows bundle")
     parser.add_argument("bundle_dir", type=Path)
+    parser.add_argument(
+        "--pyproject",
+        type=Path,
+        default=None,
+        help="Optional pyproject.toml path used to sync app/assets/release-version",
+    )
     args = parser.parse_args(argv)
     try:
-        alias = prepare_windows_bundle(args.bundle_dir)
+        alias = prepare_windows_bundle(args.bundle_dir, pyproject=args.pyproject)
     except BundlePreparationError as exc:
         print(f"Windows bundle preparation failed: {exc}", file=sys.stderr)
         return 1
