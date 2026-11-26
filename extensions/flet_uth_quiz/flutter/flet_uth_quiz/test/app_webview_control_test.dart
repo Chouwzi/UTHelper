@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -1675,4 +1676,256 @@ void main() {
       AuthScriptLoadAction.clearNow,
     );
   });
+
+  test('MOB-WEBVIEW-01: createAppWebViewSettings enables useOnRenderProcessGone and every InAppWebView mount site handles onRenderProcessGone safely', () {
+    final browser = createAppWebViewSettings(viewerLocked: false);
+    final viewer = createAppWebViewSettings(
+      viewerLocked: true,
+      viewerPrefix: 'http://127.0.0.1:51234/pdf-viewer/tok/',
+    );
+    final sink = createAppWebViewSettings(
+      viewerLocked: true,
+      javaScriptEnabled: false,
+    );
+    expect(browser.useOnRenderProcessGone, isTrue);
+    expect(viewer.useOnRenderProcessGone, isTrue);
+    expect(sink.useOnRenderProcessGone, isTrue);
+
+    expect(
+      formatAppWebViewRenderProcessGoneError(true),
+      'render_process_gone:crashed',
+    );
+    expect(
+      formatAppWebViewRenderProcessGoneError(false),
+      'render_process_gone:terminated',
+    );
+    expect(
+      formatAppWebViewRenderProcessGoneError(null),
+      'render_process_gone:terminated',
+    );
+
+    // Every InAppWebView( mount site in app_webview_control.dart (offstage popup sink + main WebView)
+    // must define a non-null onRenderProcessGone callback so Android WebViewClient returns true
+    // instead of terminating the host app process.
+    final source = File('lib/src/app_webview_control.dart').readAsStringSync();
+    final mountArgs = _extractInAppWebViewCallArguments(source);
+    expect(mountArgs, hasLength(2));
+    for (final callBody in mountArgs) {
+      expect(
+        callBody,
+        contains('onRenderProcessGone:'),
+        reason: 'Missing onRenderProcessGone on InAppWebView mount site:\n$callBody',
+      );
+      expect(
+        callBody,
+        isNot(contains('onRenderProcessGone: null')),
+      );
+    }
+    // Never compare outer Dart wrapper identity; flutter_inappwebview_android allocates distinct
+    // InAppWebViewController wrappers for onWebViewCreated and onRenderProcessGone.
+    expect(source, isNot(contains('identical(_controller, controller)')));
+    expect(source, contains('_webViewGeneration'));
+    expect(source, contains('resolveAppWebViewMethodDuringRenderProcessGone('));
+
+    // Distinct outer InAppWebViewController wrappers sharing one PlatformInAppWebViewController
+    // must match as the same WebView controller (reproducing Android plugin dual-wrapper behavior).
+    final sharedPlatform = _FakePlatformWebViewController(101);
+    final otherPlatform = _FakePlatformWebViewController(202);
+    final wrapperFromCreate =
+        InAppWebViewController.fromPlatform(platform: sharedPlatform);
+    final wrapperFromCrash =
+        InAppWebViewController.fromPlatform(platform: sharedPlatform);
+    final wrapperOther =
+        InAppWebViewController.fromPlatform(platform: otherPlatform);
+    expect(identical(wrapperFromCreate, wrapperFromCrash), isFalse);
+    expect(
+      isSameInAppWebViewController(wrapperFromCreate, wrapperFromCrash),
+      isTrue,
+    );
+    expect(
+      isSameInAppWebViewController(wrapperFromCreate, wrapperOther),
+      isFalse,
+    );
+    expect(isSameInAppWebViewController(null, wrapperFromCrash), isFalse);
+
+    // Active main WebView handler: mounted & matching generation -> clears dead state and emits web_error.
+    var cleared = 0;
+    final errors = <String>[];
+    expect(
+      handleAppWebViewRenderProcessGone(
+        disposed: false,
+        mounted: true,
+        callbackGeneration: 1,
+        activeGeneration: 1,
+        detail: RenderProcessGoneDetail(didCrash: true),
+        clearDeadWebViewState: () => cleared++,
+        reportWebError: errors.add,
+      ),
+      isTrue,
+    );
+    expect(cleared, 1);
+    expect(errors, ['render_process_gone:crashed']);
+
+    expect(
+      handleAppWebViewRenderProcessGone(
+        disposed: false,
+        mounted: true,
+        callbackGeneration: 2,
+        activeGeneration: 2,
+        detail: RenderProcessGoneDetail(didCrash: false),
+        clearDeadWebViewState: () => cleared++,
+        reportWebError: errors.add,
+      ),
+      isTrue,
+    );
+    expect(cleared, 2);
+    expect(errors, [
+      'render_process_gone:crashed',
+      'render_process_gone:terminated',
+    ]);
+
+    // Stale generation (from a previously remounted WebView), unmounted, or disposed -> safe no-op.
+    expect(
+      handleAppWebViewRenderProcessGone(
+        disposed: false,
+        mounted: true,
+        callbackGeneration: 1,
+        activeGeneration: 2,
+        detail: RenderProcessGoneDetail(didCrash: true),
+        clearDeadWebViewState: () => cleared++,
+        reportWebError: errors.add,
+      ),
+      isFalse,
+    );
+    expect(
+      handleAppWebViewRenderProcessGone(
+        disposed: false,
+        mounted: false,
+        callbackGeneration: 2,
+        activeGeneration: 2,
+        detail: RenderProcessGoneDetail(didCrash: true),
+        clearDeadWebViewState: () => cleared++,
+        reportWebError: errors.add,
+      ),
+      isFalse,
+    );
+    expect(
+      handleAppWebViewRenderProcessGone(
+        disposed: true,
+        mounted: true,
+        callbackGeneration: 2,
+        activeGeneration: 2,
+        detail: RenderProcessGoneDetail(didCrash: true),
+        clearDeadWebViewState: () => cleared++,
+        reportWebError: errors.add,
+      ),
+      isFalse,
+    );
+    expect(cleared, 2);
+    expect(errors, hasLength(2));
+
+    // Recovery dispatch checks _renderProcessGone BEFORE ctrl == null (even if hasController is true),
+    // remounting on reload/navigate/load_html/apply_auth_and_navigate and failing closed on live-only methods.
+    for (final recoveryMethod in [
+      'reload',
+      'navigate',
+      'load_html',
+      'apply_auth_and_navigate',
+    ]) {
+      expect(
+        resolveAppWebViewMethodDuringRenderProcessGone(
+          recoveryMethod,
+          renderProcessGone: true,
+          hasController: true,
+        ),
+        AppWebViewRenderProcessMethodOutcome.remountRecovery,
+        reason: '$recoveryMethod must remount when renderProcessGone even if controller ref is non-null',
+      );
+      expect(
+        resolveAppWebViewMethodDuringRenderProcessGone(
+          recoveryMethod,
+          renderProcessGone: true,
+          hasController: false,
+        ),
+        AppWebViewRenderProcessMethodOutcome.remountRecovery,
+      );
+    }
+    for (final failClosedMethod in ['eval_js', 'go_back', 'go_forward']) {
+      expect(
+        resolveAppWebViewMethodDuringRenderProcessGone(
+          failClosedMethod,
+          renderProcessGone: true,
+          hasController: true,
+        ),
+        AppWebViewRenderProcessMethodOutcome.failClosed,
+        reason: '$failClosedMethod must fail closed when renderProcessGone',
+      );
+      expect(
+        resolveAppWebViewMethodDuringRenderProcessGone(
+          failClosedMethod,
+          renderProcessGone: false,
+          hasController: false,
+        ),
+        AppWebViewRenderProcessMethodOutcome.failClosed,
+      );
+      expect(
+        resolveAppWebViewMethodDuringRenderProcessGone(
+          failClosedMethod,
+          renderProcessGone: false,
+          hasController: true,
+        ),
+        AppWebViewRenderProcessMethodOutcome.proceedLive,
+      );
+    }
+
+    // Offstage popup sink handler: swallows safely and removes sink only when mounted and alive.
+    var removedSinks = 0;
+    handleAppWebViewPopupSinkRenderProcessGone(
+      disposed: false,
+      mounted: true,
+      removeSink: () => removedSinks++,
+    );
+    handleAppWebViewPopupSinkRenderProcessGone(
+      disposed: false,
+      mounted: false,
+      removeSink: () => removedSinks++,
+    );
+    handleAppWebViewPopupSinkRenderProcessGone(
+      disposed: true,
+      mounted: true,
+      removeSink: () => removedSinks++,
+    );
+    expect(removedSinks, 1);
+  });
+}
+
+class _FakePlatformWebViewController extends PlatformInAppWebViewController {
+  _FakePlatformWebViewController(dynamic id)
+      : super.implementation(
+          PlatformInAppWebViewControllerCreationParams(id: id),
+        );
+}
+
+List<String> _extractInAppWebViewCallArguments(String source) {
+  final results = <String>[];
+  const marker = 'InAppWebView(';
+  var searchFrom = 0;
+  while (true) {
+    final start = source.indexOf(marker, searchFrom);
+    if (start < 0) break;
+    var idx = start + marker.length;
+    var depth = 1;
+    while (idx < source.length && depth > 0) {
+      final ch = source[idx];
+      if (ch == '(') {
+        depth++;
+      } else if (ch == ')') {
+        depth--;
+      }
+      idx++;
+    }
+    results.add(source.substring(start + marker.length, idx - 1));
+    searchFrom = idx;
+  }
+  return results;
 }
