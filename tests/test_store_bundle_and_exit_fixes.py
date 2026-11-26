@@ -395,6 +395,7 @@ def test_terminate_embedded_windows_process_binds_64bit_handle_types(
         ctypes,
         "WinDLL",
         lambda name, **_kw: fake_k32 if name == "kernel32" else SimpleNamespace(),
+        raising=False,
     )
 
     with pytest.raises(SystemExit, match="intercepted-after-terminate"):
@@ -584,6 +585,7 @@ def test_early_flutter_window_hide_guard_hides_owned_hwnd_and_hard_exits_on_prem
         ctypes,
         "WinDLL",
         lambda name, **_kw: fake_user32 if name == "user32" else SimpleNamespace(),
+        raising=False,
     )
     monkeypatch.setattr(
         application,

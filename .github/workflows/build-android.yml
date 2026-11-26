@@ -154,6 +154,35 @@ jobs:
 
           export UTH_DISTRIBUTION_CHANNEL="$CHANNEL"
           export ORG_GRADLE_PROJECT_uthDistributionChannel="$CHANNEL"
+          export GRADLE_OPTS="-Dorg.gradle.internal.http.retry.max.attempts=6 -Dorg.gradle.internal.http.retry.initial.backoff=3000 ${GRADLE_OPTS:-}"
+
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/maven-central-mirror.gradle" <<'GRADLE'
+          def mirrorUrl = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+          def rewriteMavenCentral = { RepositoryHandler repos ->
+              repos.withType(MavenArtifactRepository).configureEach { repo ->
+                  def raw = repo.url?.toString() ?: ""
+                  if (raw.startsWith("https://repo.maven.apache.org/maven2") || raw.startsWith("https://repo1.maven.org/maven2")) {
+                      repo.setUrl(mirrorUrl)
+                  }
+              }
+          }
+
+          beforeSettings { settings ->
+              settings.pluginManagement.repositories {
+                  maven { url = mirrorUrl }
+              }
+              rewriteMavenCentral(settings.pluginManagement.repositories)
+              rewriteMavenCentral(settings.dependencyResolutionManagement.repositories)
+          }
+
+          gradle.projectsLoaded { g ->
+              g.allprojects { proj ->
+                  rewriteMavenCentral(proj.buildscript.repositories)
+                  rewriteMavenCentral(proj.repositories)
+              }
+          }
+          GRADLE
 
           EXTRA_ARGS=("$LEGACY_FLAG")
           if [ "$CHANNEL" = "apk_lts" ]; then
@@ -177,13 +206,33 @@ jobs:
           # manifest removals, and 16 KB packaging before the final build pass.
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
-          flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter
+          for build_attempt in 1 2 3; do
+            if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter; then
+              break
+            fi
+            if [ "$build_attempt" -lt 3 ]; then
+              echo "flet build bootstrap ($BUILD_TARGET) failed on attempt $build_attempt; retrying in $((build_attempt * 15))s..." >&2
+              sleep "$((build_attempt * 15))"
+            fi
+          done
+          test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel "$CHANNEL" --target-sdk 36
 
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
           python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
-          flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose
+          build_ok=0
+          for build_attempt in 1 2 3; do
+            if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose; then
+              build_ok=1
+              break
+            fi
+            if [ "$build_attempt" -lt 3 ]; then
+              echo "flet build ($BUILD_TARGET) failed on attempt $build_attempt; retrying in $((build_attempt * 15))s..." >&2
+              sleep "$((build_attempt * 15))"
+            fi
+          done
+          test "$build_ok" -eq 1
 
       - name: Test native update and background sync contracts
         if: matrix.channel == 'apk_lts'

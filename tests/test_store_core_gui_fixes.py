@@ -614,6 +614,7 @@ def test_ui_copy_01_settings_system_desc_matches_platform_and_channel(
         ),
         orchestrator=SimpleNamespace(),
         on_close=lambda: None,
+        autostart_coordinator=SimpleNamespace(),
         distribution_profile=DistributionProfile(
             channel=channel,
             supports_github_self_update=self_update,
