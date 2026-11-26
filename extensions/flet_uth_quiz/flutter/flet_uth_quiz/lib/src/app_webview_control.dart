@@ -252,18 +252,75 @@ class _PopupSinkEntry {
   final bool allowInPlaceRedirect;
 }
 
+/// Returns true when two [InAppWebViewController] handles wrap the same
+/// underlying platform WebView controller.
+///
+/// `flutter_inappwebview_android` allocates separate Dart wrapper instances for
+/// `onWebViewCreated` and `onRenderProcessGone` via `controllerFromPlatform`,
+/// so outer wrapper `identical(a, b)` is always false on Android.
+bool isSameInAppWebViewController(
+  InAppWebViewController? first,
+  InAppWebViewController? second,
+) {
+  if (first == null || second == null) return false;
+  return identical(first, second) || identical(first.platform, second.platform);
+}
+
+enum AppWebViewRenderProcessMethodOutcome {
+  proceedLive,
+  remountRecovery,
+  failClosed,
+}
+
+/// Decides how `UthAppWebView._invokeMethod` handles a method call when the
+/// Android WebView renderer has died, checking [renderProcessGone] BEFORE
+/// inspecting [hasController] so stale controller references never block
+/// recovery or invoke a dead WebView.
+AppWebViewRenderProcessMethodOutcome resolveAppWebViewMethodDuringRenderProcessGone(
+  String methodName, {
+  required bool renderProcessGone,
+  required bool hasController,
+}) {
+  if (renderProcessGone) {
+    return switch (methodName) {
+      'reload' ||
+      'navigate' ||
+      'load_html' ||
+      'apply_auth_and_navigate' =>
+        AppWebViewRenderProcessMethodOutcome.remountRecovery,
+      'eval_js' || 'go_back' || 'go_forward' =>
+        AppWebViewRenderProcessMethodOutcome.failClosed,
+      _ => AppWebViewRenderProcessMethodOutcome.proceedLive,
+    };
+  }
+  if (!hasController &&
+      (methodName == 'eval_js' ||
+          methodName == 'go_back' ||
+          methodName == 'go_forward' ||
+          methodName == 'reload')) {
+    return AppWebViewRenderProcessMethodOutcome.failClosed;
+  }
+  return AppWebViewRenderProcessMethodOutcome.proceedLive;
+}
+
 /// Handles Android `WebViewClient.onRenderProcessGone` on the primary
-/// `UthAppWebView` without terminating the host app process.
-void handleAppWebViewRenderProcessGone({
+/// `UthAppWebView` without terminating the host app process, ignoring stale
+/// callbacks from previously unmounted WebView generations.
+bool handleAppWebViewRenderProcessGone({
   required bool disposed,
   required bool mounted,
+  required int callbackGeneration,
+  required int activeGeneration,
   required RenderProcessGoneDetail detail,
   required VoidCallback clearDeadWebViewState,
   required void Function(String error) reportWebError,
 }) {
-  if (disposed || !mounted) return;
+  if (disposed || !mounted || callbackGeneration != activeGeneration) {
+    return false;
+  }
   clearDeadWebViewState();
   reportWebError(formatAppWebViewRenderProcessGoneError(detail.didCrash));
+  return true;
 }
 
 /// Handles Android `WebViewClient.onRenderProcessGone` on offstage popup-cancelling
@@ -288,6 +345,7 @@ class UthAppWebViewControl extends StatefulWidget {
 
 class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
   GlobalKey _webViewKey = GlobalKey();
+  int _webViewGeneration = 0;
   InAppWebViewController? _controller;
   String _initialUrl = '';
   String _currentLoadedUrl = '';
@@ -436,6 +494,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       _cookieBootstrapStarted = false;
       _initialNavDispatched = false;
       _lateCookieReloaded = false;
+      _webViewGeneration++;
       _webViewKey = GlobalKey();
       _readControlProperties();
       _openCookieChannelIfNeeded();
@@ -596,7 +655,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     final rawAllowedOrigin = decoded['init_script_allowed_origin'] is String
         ? decoded['init_script_allowed_origin'] as String
         : null;
-    final ctrl = _controller;
+    final ctrl = _renderProcessGone ? null : _controller;
     final cm = CookieManager.instance();
 
     final res = await applyAppWebViewAuthPayload(
@@ -678,7 +737,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         initialNavDispatched: _initialNavDispatched,
         alreadyReloaded: _lateCookieReloaded,
         disposed: _disposed,
-        hasController: _controller != null,
+        hasController: !_renderProcessGone && _controller != null,
         initialUrl: _initialUrl,
         currentLoadedUrl: _currentLoadedUrl,
       )) {
@@ -694,8 +753,13 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     }
   }
 
-  Future<void> _onWebViewCreated(InAppWebViewController controller) async {
-    if (_disposed) return;
+  Future<void> _onWebViewCreated(
+    InAppWebViewController controller,
+    int mountGeneration,
+  ) async {
+    if (_disposed || _renderProcessGone || mountGeneration != _webViewGeneration) {
+      return;
+    }
     _controller = controller;
     if (_initialHtml != null) {
       await _loadHtmlInternal(
@@ -712,7 +776,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         // Proceed with navigation even if cookie channel timed out.
       }
     }
-    if (_disposed) return;
+    if (_disposed || _renderProcessGone || mountGeneration != _webViewGeneration) {
+      return;
+    }
     final deferredScript = _deferredControllerUserScript;
     if (deferredScript != null) {
       _deferredControllerUserScript = null;
@@ -723,6 +789,9 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         await controller.addUserScript(userScript: deferredScript);
         _authScriptTracker.arm(deferredScript.allowedOriginRules.first);
       } catch (_) {}
+    }
+    if (_disposed || _renderProcessGone || mountGeneration != _webViewGeneration) {
+      return;
     }
     if (_initialUrl.isNotEmpty) {
       _initialNavDispatched = true;
@@ -872,11 +941,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           if (_disposed) return false;
           _initialHtml = null;
           _initialUrl = targetUrl;
+          final authAction = resolveAppWebViewMethodDuringRenderProcessGone(
+            'apply_auth_and_navigate',
+            renderProcessGone: _renderProcessGone,
+            hasController: _controller != null,
+          );
+          if (authAction == AppWebViewRenderProcessMethodOutcome.remountRecovery) {
+            _remountAfterRenderProcessGone(targetUrl: targetUrl);
+            return true;
+          }
           final ctrl = _controller;
           if (ctrl == null) {
-            if (_renderProcessGone) {
-              _remountAfterRenderProcessGone(targetUrl: targetUrl);
-            }
             return true;
           }
           return await _navigateInternal(
@@ -903,6 +978,21 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
             uri.hasPort) {
           _allowedLoopbackPorts = {..._allowedLoopbackPorts, uri.port};
         }
+        final navAction = resolveAppWebViewMethodDuringRenderProcessGone(
+          'navigate',
+          renderProcessGone: _renderProcessGone,
+          hasController: _controller != null,
+        );
+        if (navAction == AppWebViewRenderProcessMethodOutcome.remountRecovery) {
+          _initialHtml = null;
+          _initialUrl = url;
+          _deferredControllerUserScript = null;
+          _initialUserScript = null;
+          _initialUserScriptAllowedOrigin = null;
+          _authScriptTracker.clear();
+          _remountAfterRenderProcessGone(targetUrl: url);
+          return true;
+        }
         final ctrl = _controller;
         if (ctrl == null) {
           _initialHtml = null;
@@ -911,9 +1001,6 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           _initialUserScript = null;
           _initialUserScriptAllowedOrigin = null;
           _authScriptTracker.clear();
-          if (_renderProcessGone) {
-            _remountAfterRenderProcessGone(targetUrl: url);
-          }
           return true;
         }
         return await _navigateInternal(ctrl, url);
@@ -924,6 +1011,21 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         final baseUrl = args is Map && args['base_url'] is String
             ? args['base_url'] as String
             : null;
+        final htmlAction = resolveAppWebViewMethodDuringRenderProcessGone(
+          'load_html',
+          renderProcessGone: _renderProcessGone,
+          hasController: _controller != null,
+        );
+        if (htmlAction == AppWebViewRenderProcessMethodOutcome.remountRecovery) {
+          _initialHtml = html;
+          _initialBaseUrl = baseUrl;
+          _deferredControllerUserScript = null;
+          _initialUserScript = null;
+          _initialUserScriptAllowedOrigin = null;
+          _authScriptTracker.clear();
+          _remountAfterRenderProcessGone(html: html, baseUrl: baseUrl);
+          return true;
+        }
         final ctrl = _controller;
         if (ctrl == null) {
           _initialHtml = html;
@@ -932,9 +1034,6 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           _initialUserScript = null;
           _initialUserScriptAllowedOrigin = null;
           _authScriptTracker.clear();
-          if (_renderProcessGone) {
-            _remountAfterRenderProcessGone(html: html, baseUrl: baseUrl);
-          }
           return true;
         }
         await _clearAuthUserScripts(ctrl);
@@ -944,8 +1043,17 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         final script = args is Map && args['script'] is String
             ? args['script'] as String
             : '';
+        final evalAction = resolveAppWebViewMethodDuringRenderProcessGone(
+          'eval_js',
+          renderProcessGone: _renderProcessGone,
+          hasController: _controller != null,
+        );
         final ctrl = _controller;
-        if (ctrl == null || script.isEmpty) return false;
+        if (evalAction == AppWebViewRenderProcessMethodOutcome.failClosed ||
+            ctrl == null ||
+            script.isEmpty) {
+          return false;
+        }
         if (_viewerLocked) {
           try {
             await ctrl.evaluateJavascript(source: script);
@@ -961,7 +1069,12 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
           lease = await sharedMobileSessionQueue.acquire(
             cancelled: Future.any<void>([_disposeSignal.future, timeout.future]),
           );
-          if (lease == null || _disposed || _controller != ctrl) return false;
+          if (lease == null ||
+              _disposed ||
+              _renderProcessGone ||
+              !isSameInAppWebViewController(_controller, ctrl)) {
+            return false;
+          }
           await ctrl.evaluateJavascript(source: script);
           return true;
         } catch (_) {
@@ -972,8 +1085,16 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         }
 
       case 'go_back':
+        final backAction = resolveAppWebViewMethodDuringRenderProcessGone(
+          'go_back',
+          renderProcessGone: _renderProcessGone,
+          hasController: _controller != null,
+        );
         final ctrl = _controller;
-        if (ctrl == null) return false;
+        if (backAction == AppWebViewRenderProcessMethodOutcome.failClosed ||
+            ctrl == null) {
+          return false;
+        }
         try {
           if (await ctrl.canGoBack()) {
             await ctrl.goBack();
@@ -984,8 +1105,16 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         return false;
 
       case 'go_forward':
+        final fwdAction = resolveAppWebViewMethodDuringRenderProcessGone(
+          'go_forward',
+          renderProcessGone: _renderProcessGone,
+          hasController: _controller != null,
+        );
         final ctrl = _controller;
-        if (ctrl == null) return false;
+        if (fwdAction == AppWebViewRenderProcessMethodOutcome.failClosed ||
+            ctrl == null) {
+          return false;
+        }
         try {
           if (await ctrl.canGoForward()) {
             await ctrl.goForward();
@@ -996,22 +1125,30 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
         return false;
 
       case 'reload':
-        final ctrl = _controller;
-        if (ctrl == null) {
-          if (_renderProcessGone) {
-            if (_initialHtml != null) {
-              _remountAfterRenderProcessGone(
-                html: _initialHtml!,
-                baseUrl: _initialBaseUrl,
-              );
-              return true;
-            }
-            final retryUrl = _resolveRenderProcessRecoveryUrl();
-            if (retryUrl.isNotEmpty) {
-              _remountAfterRenderProcessGone(targetUrl: retryUrl);
-              return true;
-            }
+        final reloadAction = resolveAppWebViewMethodDuringRenderProcessGone(
+          'reload',
+          renderProcessGone: _renderProcessGone,
+          hasController: _controller != null,
+        );
+        if (reloadAction ==
+            AppWebViewRenderProcessMethodOutcome.remountRecovery) {
+          if (_initialHtml != null) {
+            _remountAfterRenderProcessGone(
+              html: _initialHtml!,
+              baseUrl: _initialBaseUrl,
+            );
+            return true;
           }
+          final retryUrl = _resolveRenderProcessRecoveryUrl();
+          if (retryUrl.isNotEmpty) {
+            _remountAfterRenderProcessGone(targetUrl: retryUrl);
+            return true;
+          }
+          return false;
+        }
+        final ctrl = _controller;
+        if (reloadAction == AppWebViewRenderProcessMethodOutcome.failClosed ||
+            ctrl == null) {
           return false;
         }
         try {
@@ -1218,6 +1355,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       return;
     }
     if (!kIsWeb &&
+        !_renderProcessGone &&
         _controller != null &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS)) {
@@ -1251,7 +1389,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       allowedLoopbackPorts: _allowedLoopbackPorts,
       blockUthLms: _blockUthLms,
     );
-    if (deferredTarget != null && _controller != null) {
+    if (deferredTarget != null && !_renderProcessGone && _controller != null) {
       _consumedPopupSinkKeys.add(sink.key);
       unawaited(_navigateInternal(_controller!, deferredTarget));
     }
@@ -1288,6 +1426,7 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
     setState(() {
       _renderProcessGone = false;
       _surfaceRevealed = false;
+      _webViewGeneration++;
       _webViewKey = GlobalKey();
     });
   }
@@ -1364,6 +1503,8 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
       );
     }
 
+    final mountGeneration = _webViewGeneration;
+
     return LayoutControl(
       control: widget.control,
       child: Stack(
@@ -1385,7 +1526,8 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
                 userAgent: _normalizedUserAgent,
                 isInspectable: kDebugMode && !_viewerLocked,
               ),
-              onWebViewCreated: _onWebViewCreated,
+              onWebViewCreated: (controller) =>
+                  unawaited(_onWebViewCreated(controller, mountGeneration)),
             shouldOverrideUrlLoading: (controller, action) async {
               if (_disposed) return NavigationActionPolicy.CANCEL;
               final rawActionUri = action.request.url;
@@ -1649,11 +1791,15 @@ class _UthAppWebViewControlState extends State<UthAppWebViewControl> {
               handleAppWebViewRenderProcessGone(
                 disposed: _disposed,
                 mounted: mounted,
+                callbackGeneration: mountGeneration,
+                activeGeneration: _webViewGeneration,
                 detail: detail,
                 clearDeadWebViewState: () {
-                  if (identical(_controller, controller)) {
+                  if (_controller == null ||
+                      isSameInAppWebViewController(_controller, controller)) {
                     _controller = null;
                   }
+                  _webViewGeneration++;
                   _hasCommittedPage = false;
                   _hasReceivedDocumentTitle = false;
                   _suppressCommitUntilNextLoadStart = false;

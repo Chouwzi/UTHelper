@@ -96,23 +96,42 @@ Uri? validateQuizLaunchUrl(String? value, Uri? trustedOrigin) {
 
 const quizRenderProcessGoneErrorCode = 'render_process_gone';
 
+/// Returns true when two [InAppWebViewController] handles wrap the same
+/// underlying platform WebView controller.
+///
+/// `flutter_inappwebview_android` allocates distinct Dart wrapper instances for
+/// `onWebViewCreated` and `onRenderProcessGone`, so outer `identical(a, b)` is
+/// always false on Android.
+bool isSameQuizWebViewController(
+  InAppWebViewController? first,
+  InAppWebViewController? second,
+) {
+  if (first == null || second == null) return false;
+  return identical(first, second) || identical(first.platform, second.platform);
+}
+
 /// Handles Android `WebViewClient.onRenderProcessGone` on the active quiz WebView.
 ///
 /// Intentionally does NOT auto-reload a live Moodle Quiz attempt so an in-flight
 /// POST or attempt submission is never duplicated; instead stops timers, tears
 /// down the dead WebView instance, and emits [quizRenderProcessGoneErrorCode] so
-/// the user can recover safely.
-void handleQuizMainRenderProcessGone({
+/// the user can recover safely. Ignores stale callbacks from older generations.
+bool handleQuizMainRenderProcessGone({
   required bool disposed,
   required bool mounted,
+  required int callbackGeneration,
+  required int activeGeneration,
   required VoidCallback stopLoadTimeout,
   required VoidCallback clearDeadWebViewState,
   required void Function(String code) emitError,
 }) {
-  if (disposed || !mounted) return;
+  if (disposed || !mounted || callbackGeneration != activeGeneration) {
+    return false;
+  }
   stopLoadTimeout();
   clearDeadWebViewState();
   emitError(quizRenderProcessGoneErrorCode);
+  return true;
 }
 
 /// Handles Android `WebViewClient.onRenderProcessGone` on an active quiz popup.
@@ -178,6 +197,7 @@ class _BlockedPopupWindow {
 
 class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
   final GlobalKey _mainWebViewKey = GlobalKey();
+  int _webViewGeneration = 0;
   InAppWebViewController? _controller;
   WebViewEnvironment? _environment;
   bool _hasActiveEnvironmentMount = false;
@@ -343,14 +363,21 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     }
   }
 
-  Future<void> _initializeController(InAppWebViewController controller) async {
-    if (_disposed) return;
+  Future<void> _initializeController(
+    InAppWebViewController controller,
+    int mountGeneration,
+  ) async {
+    if (_disposed || _renderProcessGone || mountGeneration != _webViewGeneration) {
+      return;
+    }
     _controller = controller;
     try {
       final purge = _purgeQuizOriginStore();
       _initialStorePurge = purge;
       await purge.timeout(_mobileCleanupTimeout);
-      if (_disposed) return;
+      if (_disposed || _renderProcessGone || mountGeneration != _webViewGeneration) {
+        return;
+      }
       if (!_readySent) {
         _readySent = true;
         _trigger('ready', 'ready');
@@ -495,7 +522,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
     _bootstrapCompletion = bootstrapDone.future;
     Uint8List? payload;
     try {
-      if (_controller == null || _disposed) return false;
+      if (_controller == null || _disposed || _renderProcessGone) return false;
       payload = await _takeSessionPayload();
       final decoded = jsonDecode(utf8.decode(payload));
       if (decoded is! Map ||
@@ -535,7 +562,7 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
         if (!applied) throw const FormatException();
         if (_disposed) return false;
       }
-      if (_disposed || _controller == null) return false;
+      if (_disposed || _renderProcessGone || _controller == null) return false;
       _sessionBootstrapped = true;
       if (launchUri != null) {
         await _loadLaunchUrl(_controller!, launchUri.toString());
@@ -794,6 +821,8 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
       );
     }
 
+    final mountGeneration = _webViewGeneration;
+
     return LayoutControl(
       control: widget.control,
       child: Stack(
@@ -806,7 +835,8 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
                 key: _mainWebViewKey,
                 webViewEnvironment: _environment,
                 initialSettings: createQuizWebViewSettings(),
-                onWebViewCreated: _initializeController,
+                onWebViewCreated: (controller) =>
+                    unawaited(_initializeController(controller, mountGeneration)),
                 onLoadStart: (controller, url) {
                   _enforceLoadOrigin(controller, url);
                   _checkSessionExpired(url);
@@ -827,11 +857,15 @@ class _UthQuizPlayerControlState extends State<UthQuizPlayerControl> {
                   handleQuizMainRenderProcessGone(
                     disposed: _disposed,
                     mounted: mounted,
+                    callbackGeneration: mountGeneration,
+                    activeGeneration: _webViewGeneration,
                     stopLoadTimeout: _stopLoadTimeout,
                     clearDeadWebViewState: () {
-                      if (identical(_controller, controller)) {
+                      if (_controller == null ||
+                          isSameQuizWebViewController(_controller, controller)) {
                         _controller = null;
                       }
+                      _webViewGeneration++;
                       setState(() => _renderProcessGone = true);
                     },
                     emitError: _emitError,

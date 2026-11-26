@@ -1,6 +1,7 @@
 package com.uthelper.backgroundsync.security
 
 import android.content.Context
+import android.util.Base64
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,6 +21,7 @@ import java.security.ProviderException
 import java.security.UnrecoverableKeyException
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
@@ -558,6 +560,73 @@ class CredentialVaultTest {
         }
         assertTrue(deletedAliases.isEmpty())
         assertEquals(0, getOrCreateCalls)
+
+        credVault.clear()
+        secretVault.clear()
+    }
+
+    @Test
+    fun vaultsPreserveKeystoreAliasOnBenignMissingFilesAndValidEmptySecretPayload() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val deletedAliases = mutableListOf<String>()
+        val keyProvider = object : VaultKeyProvider {
+            private val keys = linkedMapOf<String, SecretKey>()
+
+            override fun getExistingKey(alias: String): SecretKey? = keys[alias]
+
+            override fun getOrCreateKey(alias: String): SecretKey =
+                keys.getOrPut(alias) {
+                    KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+                }
+
+            override fun deleteKey(alias: String) {
+                deletedAliases.add(alias)
+                keys.remove(alias)
+            }
+        }
+
+        val credVault = CredentialVault(context, keyProvider)
+        val secretVault = AppSecretVault(context, keyProvider)
+        credVault.clear()
+        secretVault.clear()
+        deletedAliases.clear()
+
+        // 1. Fresh install / post-clear missing vault files must NEVER call deleteKey(KEY_ALIAS).
+        val credFile = File(context.noBackupFilesDir, "uth_ws_credential.json")
+        val secretsFile = File(context.noBackupFilesDir, "uth_app_secrets.json")
+        assertFalse(credFile.exists())
+        assertFalse(secretsFile.exists())
+
+        assertNull(credVault.read())
+        assertEquals(emptyMap<String, String>(), secretVault.readAll())
+        assertTrue(deletedAliases.isEmpty())
+
+        // Pre-seed keys while files are still missing -> read() / readAll() must preserve them.
+        keyProvider.getOrCreateKey("uthelper_moodle_ws_token_v1")
+        keyProvider.getOrCreateKey("uthelper_app_secrets_v1")
+        assertNull(credVault.read())
+        assertEquals(emptyMap<String, String>(), secretVault.readAll())
+        assertTrue(deletedAliases.isEmpty())
+        assertNotNull(keyProvider.getExistingKey("uthelper_moodle_ws_token_v1"))
+        assertNotNull(keyProvider.getExistingKey("uthelper_app_secrets_v1"))
+
+        // 2. Valid encrypted empty JSON object "{}" in AppSecretVault must return emptyMap()
+        //    without deleting the file or evicting KEY_ALIAS.
+        val key = keyProvider.getOrCreateKey("uthelper_app_secrets_v1")
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.ENCRYPT_MODE, key)
+        }
+        val ciphertext = cipher.doFinal("{}".toByteArray(Charsets.UTF_8))
+        val envelope = JSONObject()
+            .put("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .put("ciphertext", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+        secretsFile.parentFile?.mkdirs()
+        secretsFile.writeText(envelope.toString(), Charsets.UTF_8)
+
+        assertEquals(emptyMap<String, String>(), secretVault.readAll())
+        assertTrue(secretsFile.exists())
+        assertTrue(deletedAliases.isEmpty())
+        assertNotNull(keyProvider.getExistingKey("uthelper_app_secrets_v1"))
 
         credVault.clear()
         secretVault.clear()

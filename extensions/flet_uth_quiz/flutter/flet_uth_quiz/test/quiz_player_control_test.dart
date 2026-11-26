@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flet_uth_quiz/src/quiz_player_control.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -112,38 +113,81 @@ void main() {
       );
       expect(callBody, isNot(contains('onRenderProcessGone: null')));
     }
+    expect(source, isNot(contains('identical(_controller, controller)')));
+    expect(source, contains('_webViewGeneration'));
+
+    // Distinct outer InAppWebViewController wrappers sharing one platform instance must match.
+    final sharedPlatform = _FakeQuizPlatformWebViewController(11);
+    final otherPlatform = _FakeQuizPlatformWebViewController(22);
+    final createdWrapper =
+        InAppWebViewController.fromPlatform(platform: sharedPlatform);
+    final crashWrapper =
+        InAppWebViewController.fromPlatform(platform: sharedPlatform);
+    final otherWrapper =
+        InAppWebViewController.fromPlatform(platform: otherPlatform);
+    expect(identical(createdWrapper, crashWrapper), isFalse);
+    expect(isSameQuizWebViewController(createdWrapper, crashWrapper), isTrue);
+    expect(isSameQuizWebViewController(createdWrapper, otherWrapper), isFalse);
+    expect(isSameQuizWebViewController(null, crashWrapper), isFalse);
 
     // Active main quiz WebView: stops load timeout, clears dead WebView state, emits
     // render_process_gone, and never auto-reloads a live quiz attempt.
     var stoppedTimers = 0;
     var clearedStates = 0;
     final emitted = <String>[];
-    handleQuizMainRenderProcessGone(
-      disposed: false,
-      mounted: true,
-      stopLoadTimeout: () => stoppedTimers++,
-      clearDeadWebViewState: () => clearedStates++,
-      emitError: emitted.add,
+    expect(
+      handleQuizMainRenderProcessGone(
+        disposed: false,
+        mounted: true,
+        callbackGeneration: 0,
+        activeGeneration: 0,
+        stopLoadTimeout: () => stoppedTimers++,
+        clearDeadWebViewState: () => clearedStates++,
+        emitError: emitted.add,
+      ),
+      isTrue,
     );
     expect(stoppedTimers, 1);
     expect(clearedStates, 1);
     expect(emitted, [quizRenderProcessGoneErrorCode]);
     expect(quizRenderProcessGoneErrorCode, 'render_process_gone');
 
-    // Guarded when unmounted or disposed.
-    handleQuizMainRenderProcessGone(
-      disposed: false,
-      mounted: false,
-      stopLoadTimeout: () => stoppedTimers++,
-      clearDeadWebViewState: () => clearedStates++,
-      emitError: emitted.add,
+    // Guarded when stale generation, unmounted, or disposed.
+    expect(
+      handleQuizMainRenderProcessGone(
+        disposed: false,
+        mounted: true,
+        callbackGeneration: 0,
+        activeGeneration: 1,
+        stopLoadTimeout: () => stoppedTimers++,
+        clearDeadWebViewState: () => clearedStates++,
+        emitError: emitted.add,
+      ),
+      isFalse,
     );
-    handleQuizMainRenderProcessGone(
-      disposed: true,
-      mounted: true,
-      stopLoadTimeout: () => stoppedTimers++,
-      clearDeadWebViewState: () => clearedStates++,
-      emitError: emitted.add,
+    expect(
+      handleQuizMainRenderProcessGone(
+        disposed: false,
+        mounted: false,
+        callbackGeneration: 1,
+        activeGeneration: 1,
+        stopLoadTimeout: () => stoppedTimers++,
+        clearDeadWebViewState: () => clearedStates++,
+        emitError: emitted.add,
+      ),
+      isFalse,
+    );
+    expect(
+      handleQuizMainRenderProcessGone(
+        disposed: true,
+        mounted: true,
+        callbackGeneration: 1,
+        activeGeneration: 1,
+        stopLoadTimeout: () => stoppedTimers++,
+        clearDeadWebViewState: () => clearedStates++,
+        emitError: emitted.add,
+      ),
+      isFalse,
     );
     expect(stoppedTimers, 1);
     expect(clearedStates, 1);
@@ -192,6 +236,13 @@ void main() {
     );
     expect(removedBlocked, 1);
   });
+}
+
+class _FakeQuizPlatformWebViewController extends PlatformInAppWebViewController {
+  _FakeQuizPlatformWebViewController(dynamic id)
+      : super.implementation(
+          PlatformInAppWebViewControllerCreationParams(id: id),
+        );
 }
 
 List<String> _extractQuizInAppWebViewCalls(String source) {
