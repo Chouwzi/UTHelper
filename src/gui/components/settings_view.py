@@ -1668,6 +1668,7 @@ class SettingsView(ft.Container):
                     if inspect.isawaitable(cb_res):
                         await cb_res
                 else:
+                    prev_user = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
                     settings.UTH_USERNAME = user
                     settings.UTH_PASSWORD = pwd
                     if is_demo_account(user):
@@ -1676,6 +1677,19 @@ class SettingsView(ft.Container):
                         settings.MOODLE_WS_TOKEN_USERNAME = ""
                     elif supports_persist:
                         settings.UTH_CREDENTIALS_ORIGIN = ""
+                        raw_owner = getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+                        token_owner = (
+                            raw_owner.strip() if isinstance(raw_owner, str) else ""
+                        )
+                        clean_user = user.strip()
+                        if (
+                            prev_user.casefold() != clean_user.casefold()
+                            or not token_owner
+                            or token_owner.casefold() != clean_user.casefold()
+                        ):
+                            settings.MOODLE_WS_TOKEN = ""
+                            settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                            settings.MOODLE_WS_TOKEN_USERNAME = ""
                     has_persisted_auth = (
                         is_demo_account(user)
                         or not supports_persist

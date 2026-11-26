@@ -673,6 +673,11 @@ def test_sec_pc_04_reset_settings_clears_secrets_and_cache_actions_cover_namespa
         '{"UTH_USERNAME": "2251120001", "MOODLE_WS_TOKEN_USERNAME": "2251120001"}',
         encoding="utf-8",
     )
+    for secret_attr in config._SECRET_FIELDS:
+        monkeypatch.setattr(settings, secret_attr, getattr(settings, secret_attr, ""))
+    monkeypatch.setattr(
+        settings, "UTH_CREDENTIALS_ORIGIN", settings.UTH_CREDENTIALS_ORIGIN
+    )
     monkeypatch.setattr(settings, "UTH_PASSWORD", "persisted_password")
     monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "persisted_ws_tok")
     monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "2251120001", raising=False)
@@ -732,3 +737,172 @@ def test_sec_pc_04_reset_settings_clears_secrets_and_cache_actions_cover_namespa
     assert reloaded.MOODLE_WS_TOKEN == ""
     assert reloaded.DISCORD_WEBHOOK_URL == ""
     assert reloaded.TELEGRAM_BOT_TOKEN == ""
+
+
+def test_sec_pc_01_legacy_upgrade_account_switch_never_reuses_unstamped_prior_token(
+    tmp_path: Path, monkeypatch
+):
+    # 1a. load_settings() backfills MOODLE_WS_TOKEN_USERNAME on legacy JSON without that key
+    monkeypatch.setattr(config, "_USER_DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+
+    class _ReadOnlyVault:
+        def read_secret(self, key: str) -> str:
+            return {
+                "ws_token": "tok_studentA_secret",
+                "ws_token_origin": "https://courses.ut.edu.vn",
+            }.get(key, "")
+
+        def write_secret(self, key: str, value: str) -> bool:
+            return True
+
+        def snapshot_secrets(self, keys):
+            return {k: self.read_secret(k) for k in keys}
+
+        def restore_secrets(self, snapshot) -> bool:
+            return True
+
+        def write_all(self, values) -> bool:
+            return True
+
+    monkeypatch.setattr(config, "_secret_backend", _ReadOnlyVault())
+    monkeypatch.setattr(config, "_secret_backend_factory", None)
+    (tmp_path / "settings.json").write_text(
+        '{"UTH_USERNAME": "studentA", "UTH_CREDENTIALS_ORIGIN": "https://courses.ut.edu.vn"}',
+        encoding="utf-8",
+    )
+    loaded = config.load_settings()
+    assert loaded.MOODLE_WS_TOKEN == "tok_studentA_secret"
+    assert loaded.MOODLE_WS_TOKEN_USERNAME == "studentA"
+
+    # 1b. AppController._teardown_account_session wipes unstamped legacy token on switch
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "UTH_USERNAME", "studentB")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "passB")
+    monkeypatch.setattr(settings, "UTH_CREDENTIALS_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "tok_studentA_secret")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+
+    ctrl = AppController.__new__(AppController)
+    ctrl.page = SimpleNamespace(update=lambda: None, session=None)
+    ctrl._safe_run_task = Mock()
+    ctrl._teardown_detail_view_for_account_switch = Mock()
+    ctrl._is_macos_native_runtime = lambda: False
+    monkeypatch.setattr(
+        ac_mod,
+        "_build_account_data_cache",
+        lambda _u: SimpleNamespace(),
+    )
+    monkeypatch.setattr(ac_mod.sys, "platform", "linux")
+
+    ctrl._teardown_account_session(
+        ("studentB", "passB"),
+        reset_moodle_and_caches=True,
+        account_switched_or_logged_out=True,
+        schedule_refresh_trigger="login",
+    )
+    assert settings.MOODLE_WS_TOKEN == ""
+    assert settings.MOODLE_WS_TOKEN_ORIGIN == ""
+    assert settings.MOODLE_WS_TOKEN_USERNAME == ""
+
+    # 1c. SettingsView._handle_test_login fallback (on_account_login=None) wipes unstamped/prior token
+    monkeypatch.setattr(sv_mod, "save_settings", lambda: True)
+    monkeypatch.setattr(settings, "UTH_USERNAME", "studentA")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "passA")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "tok_studentA_secret")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+
+    orch = SimpleNamespace(
+        client=SimpleNamespace(
+            login=lambda username=None, password=None, force=False, persist=True: True
+        ),
+        is_logged_in=True,
+        get_cached_details_snapshot=lambda: {},
+    )
+    sview = SettingsView(
+        page=SimpleNamespace(
+            overlay=[],
+            update=lambda: None,
+            run_task=lambda *_a, **_kw: None,
+        ),
+        orchestrator=orch,
+        on_close=lambda: None,
+        autostart_coordinator=None,
+    )
+    sview.update = Mock()
+    sview._username_field.value = "studentB"
+    sview._password_field.value = "passB"
+    asyncio.run(sview._handle_test_login(None))
+
+    assert settings.UTH_USERNAME == "studentB"
+    assert settings.MOODLE_WS_TOKEN == ""
+    assert settings.MOODLE_WS_TOKEN_ORIGIN == ""
+    assert settings.MOODLE_WS_TOKEN_USERNAME == ""
+    assert orch.is_logged_in is False
+
+
+@pytest.mark.parametrize("call_clear_session", [True, False])
+def test_sec_pc_01_call_ws_api_invalidtoken_never_retries_cross_account_request(
+    monkeypatch, call_clear_session: bool
+):
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "UTH_USERNAME", "studentA")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "passA")
+    monkeypatch.setattr(settings, "UTH_CREDENTIALS_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "tok_A_expired")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "studentA")
+    monkeypatch.setattr(config, "save_settings", lambda: True)
+
+    client = MoodleClient("https://courses.ut.edu.vn")
+    entered_server = threading.Event()
+    release_server = threading.Event()
+    post_calls: list[tuple[str, dict]] = []
+
+    def _fake_post(url, data, headers=None, timeout=20):
+        post_calls.append((url, dict(data)))
+        if len(post_calls) == 1:
+            entered_server.set()
+            assert release_server.wait(timeout=2.0)
+            return 200, {
+                "exception": "moodle_exception",
+                "errorcode": "invalidtoken",
+                "message": "Invalid token - token not found",
+            }
+        return 200, {"token": "minted_studentB_token", "ok": True}
+
+    monkeypatch.setattr(client, "_post", _fake_post)
+    results: list = []
+
+    worker = threading.Thread(
+        target=lambda: results.append(
+            client.call_ws_api("mod_assign_save_submission", assignmentid=999)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert entered_server.wait(timeout=2.0)
+
+    # User switches to studentB while studentA's WS mutation is in flight
+    settings.UTH_USERNAME = "studentB"
+    settings.UTH_PASSWORD = "passB"
+    settings.UTH_CREDENTIALS_ORIGIN = "https://courses.ut.edu.vn"
+    settings.MOODLE_WS_TOKEN = "tok_B_valid"
+    settings.MOODLE_WS_TOKEN_ORIGIN = "https://courses.ut.edu.vn"
+    settings.MOODLE_WS_TOKEN_USERNAME = "studentB"
+    if call_clear_session:
+        client.clear_session()
+
+    release_server.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+
+    assert results == [None]
+    assert len(post_calls) == 1
+    assert post_calls[0][1]["wstoken"] == "tok_A_expired"
+    assert settings.MOODLE_WS_TOKEN == "tok_B_valid"
+    assert settings.MOODLE_WS_TOKEN_USERNAME == "studentB"
+

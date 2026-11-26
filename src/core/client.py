@@ -2333,6 +2333,10 @@ class MoodleClient:
                 return None
             return result
 
+        with self._get_lock("_session_lock", reentrant=True):
+            start_gen = int(getattr(self, "_session_generation", 0))
+            start_user_norm = self._clean_setting_str("UTH_USERNAME").casefold()
+
         token = self._get_ws_token()
         if not token:
             return None
@@ -2358,13 +2362,37 @@ class MoodleClient:
             # Kiểm tra xem token hết hạn hoặc không hợp lệ
             if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
                 logger.warning(f"WS token hết hạn hoặc không hợp lệ: {result.get('error', '')}")
-                # Token đã hết hạn → bắt buộc làm mới (force refresh) nếu vẫn thuộc phiên hiện tại
-                if getattr(settings, "MOODLE_WS_TOKEN", "") in ("", token):
-                    settings.MOODLE_WS_TOKEN = ""
-                    settings.MOODLE_WS_TOKEN_ORIGIN = ""
-                    settings.MOODLE_WS_TOKEN_USERNAME = ""
+                # Chỉ cho phép làm mới và gọi lại nếu phiên và tài khoản hiện hành không đổi
+                with self._get_lock("_session_lock", reentrant=True):
+                    cur_gen = int(getattr(self, "_session_generation", 0))
+                    cur_user_raw = self._clean_setting_str("UTH_USERNAME")
+                    cur_user_norm = cur_user_raw.casefold()
+                    can_retry = (
+                        cur_gen == start_gen
+                        and bool(cur_user_norm)
+                        and not is_demo_account(cur_user_raw)
+                        and cur_user_norm == start_user_norm
+                    )
+                    if can_retry and getattr(settings, "MOODLE_WS_TOKEN", "") in ("", token):
+                        settings.MOODLE_WS_TOKEN = ""
+                        settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                        settings.MOODLE_WS_TOKEN_USERNAME = ""
+                if not can_retry:
+                    logger.info(
+                        "Aborting WS API [%s] invalidtoken retry: session or active account changed.",
+                        function,
+                    )
+                    return None
                 token = self._get_ws_token(force=True)
                 if token:
+                    with self._get_lock("_session_lock", reentrant=True):
+                        still_same_session = (
+                            int(getattr(self, "_session_generation", 0)) == start_gen
+                            and self._clean_setting_str("UTH_USERNAME").casefold()
+                            == start_user_norm
+                        )
+                    if not still_same_session:
+                        return None
                     request_params['wstoken'] = token
                     status, result = self._post(
                         f"{self.moodle_site_origin}/webservice/rest/server.php",

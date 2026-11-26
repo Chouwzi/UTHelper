@@ -838,7 +838,8 @@ class AppController:
                     if (
                         not clean_new
                         or is_demo_account(clean_new)
-                        or (token_owner and token_owner.casefold() != clean_new.casefold())
+                        or not token_owner
+                        or token_owner.casefold() != clean_new.casefold()
                     ):
                         settings.MOODLE_WS_TOKEN = ""
                         settings.MOODLE_WS_TOKEN_ORIGIN = ""
