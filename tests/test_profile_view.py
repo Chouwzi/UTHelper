@@ -462,10 +462,10 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     campus_layer = stack.controls[0]
     campus_image = campus_layer.content
     assert campus_image.src == "uth_profile_banner.jpg"
-    assert campus_image.fit == ft.BoxFit.CONTAIN
-    assert campus_image.height == 220
-    assert abs(campus_image.width / campus_image.height - 560 / 292) < 0.01
-    assert campus_layer.right == 0
+    assert campus_image.fit == ft.BoxFit.FILL
+    assert campus_image.height == 188
+    assert campus_image.width == float("inf")
+    assert campus_layer.left == 0
 
     identity = stack.controls[2].content
     assert len(identity.controls) == 3
@@ -527,6 +527,7 @@ def test_profile_view_keeps_student_card_and_avatar_mounted_when_switching_secti
         assert view._avatar is avatar
         assert view._avatar_image is avatar_image
         assert view._avatar_image.src == "data:image/png;base64,QUJD"
+        assert view._avatar_image.gapless_playback is True
 
 
 def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):

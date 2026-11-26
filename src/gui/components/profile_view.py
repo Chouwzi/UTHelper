@@ -461,7 +461,7 @@ class ProfileView(ft.Container):
             return
         self._selected_semester = key
         self._render_data()
-        self._update()
+        self._update_data_area()
 
     def select_tab(self, key: str) -> None:
         """Switch between the tuition and other-fee tables."""
@@ -471,7 +471,7 @@ class ProfileView(ft.Container):
             return
         self._active_tab = key
         self._render_data()
-        self._update()
+        self._update_data_area()
 
     def _handle_close(self, _event=None) -> None:
         if callable(self._on_close):
@@ -568,6 +568,8 @@ class ProfileView(ft.Container):
                     fit=ft.BoxFit.COVER,
                     border_radius=avatar_size // 2,
                     anti_alias=True,
+                    gapless_playback=True,
+                    key="profile-student-avatar-image",
                 )
                 self._avatar_src = avatar_src
             avatar_content: ft.Control = self._avatar_image
@@ -745,23 +747,25 @@ class ProfileView(ft.Container):
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        banner_height = 220
-        campus_width = 422  # preserve the source image's 560:292 aspect ratio
+        banner_height = 188
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
                     ft.Container(
                         content=ft.Image(
                             src="uth_profile_banner.jpg",
-                            width=campus_width,
+                            width=float("inf"),
                             height=banner_height,
-                            fit=ft.BoxFit.CONTAIN,
+                            # Keep the whole supplied campus photo visible in
+                            # the wide banner, as in the desktop reference.
+                            fit=ft.BoxFit.FILL,
                             anti_alias=True,
                             semantics_label="Khuôn viên UTH",
+                            key="profile-uth-banner-image",
                         ),
-                        width=campus_width,
+                        width=float("inf"),
                         height=banner_height,
-                        right=0,
+                        left=0,
                         top=0,
                     ),
                     ft.Container(
@@ -784,6 +788,8 @@ class ProfileView(ft.Container):
                         content=identity,
                         padding=ft.Padding.symmetric(horizontal=30, vertical=12),
                         width=float("inf"),
+                        height=banner_height,
+                        alignment=ft.Alignment(-1, 0),
                         expand=True,
                     ),
                 ],
@@ -1993,6 +1999,20 @@ class ProfileView(ft.Container):
             self.update()
         except Exception:
             pass
+
+    def _update_data_area(self) -> None:
+        """Update fee controls without diffing the static student identity.
+
+        The profile card and avatar are deliberately outside ``_data_host``.
+        Sending updates only for the changed data area prevents Flutter from
+        reattaching/repainting the avatar when a semester or fee tab changes.
+        """
+        for control in (self._data_host, self._footer):
+            try:
+                control.update()
+            except Exception:
+                # Controls can be detached in previews and unit tests.
+                pass
 
 
 def _pills_status_label(rows: tuple) -> str:
