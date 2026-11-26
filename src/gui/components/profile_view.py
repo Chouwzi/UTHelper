@@ -582,7 +582,9 @@ class ProfileView(ft.Container):
         if self._student_card is not None and self._student_card_key == card_key:
             return self._student_card
 
-        avatar_size = 52 if mobile else 148
+        # Mockup proportion: the photo circle covers ~57% of the 188px banner
+        # (148px made it nearly touch the banner edges).
+        avatar_size = 52 if mobile else 112
         if avatar_src.startswith(("data:image/", "http://", "https://")):
             if self._avatar_image is None or self._avatar_src != avatar_src:
                 self._avatar_image = ft.Image(
@@ -802,11 +804,13 @@ class ProfileView(ft.Container):
                             end=ft.Alignment(1, 0),
                             colors=[
                                 ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.90, C.SURFACE),
+                                ft.Colors.with_opacity(0.92, C.SURFACE),
                                 ft.Colors.with_opacity(0.14, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            stops=[0, 0.34, 0.46, 0.56],
+                            # White holds until ~40% (name/badge zone) so the
+                            # building starts exactly where the mockup puts it.
+                            stops=[0, 0.40, 0.52, 0.60],
                         ),
                     ),
                     ft.Container(
