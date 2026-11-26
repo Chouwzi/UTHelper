@@ -1405,14 +1405,23 @@ def test_sec_c06_android_app_secret_vault_evicts_corrupt_key_alias_on_general_se
     assert "throw ioError" in io_branch
     assert "deleteKey" not in io_branch
 
-    # Permanent keystore / AEAD failure must delete corrupt file AND safely evict KEY_ALIAS.
+    # Permanent keystore / KeyMint / AEAD failure must delete corrupt file AND safely evict KEY_ALIAS.
     gse_branch = read_all_block.split("catch (_: GeneralSecurityException)", 1)[1].split(
+        "catch (_: ProviderException)", 1
+    )[0]
+    provider_branch = read_all_block.split("catch (_: ProviderException)", 1)[1].split(
         "catch (_: JSONException)", 1
     )[0]
-    assert "secretsFile.delete()" in gse_branch
-    assert "runCatching { keyProvider.deleteKey(KEY_ALIAS) }" in gse_branch
-    assert gse_branch.index("secretsFile.delete()") < gse_branch.index(
-        "runCatching { keyProvider.deleteKey(KEY_ALIAS) }"
+    assert "wipeCorruptedVaultFile(secretsFile, keyProvider, KEY_ALIAS)" in gse_branch
+    assert "wipeCorruptedVaultFile(secretsFile, keyProvider, KEY_ALIAS)" in provider_branch
+
+    wipe_helper = vault_src.split("private fun wipeCorruptedVaultFile(", 1)[1].split(
+        "private fun cleanupTempFiles(", 1
+    )[0]
+    assert "target.delete()" in wipe_helper
+    assert "runCatching { keyProvider.deleteKey(alias) }" in wipe_helper
+    assert wipe_helper.index("target.delete()") < wipe_helper.index(
+        "runCatching { keyProvider.deleteKey(alias) }"
     )
 
 

@@ -354,6 +354,7 @@ import hashlib
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -382,41 +383,56 @@ def get_active_assets_dir() -> Path:
     return _USER_DATA_DIR
 
 
+def _is_packaged_or_readonly_assets() -> bool:
+    """Return True when running from a packaged bundle or read-only FLET_ASSETS_DIR."""
+    if os.environ.get("FLET_ASSETS_DIR", "").strip() or bool(getattr(sys, "frozen", False)):
+        return True
+    return False
+
+
 def ensure_image_in_assets(cache_file_path: Path) -> str:
     """
     Đảm bảo tệp hình ảnh đã cache tồn tại trong thư mục assets đang hoạt động
     để Flet có thể load được trong cả chế độ Web và Desktop.
-    Nếu chạy trên nền tảng di động (Android/iOS) nơi thư mục assets là read-only,
-    hàm sẽ trả về đường dẫn tuyệt đối thô (raw absolute path) để tải trực tiếp từ persistent cache.
+    Khi chạy bản đóng gói (FLET_ASSETS_DIR / WindowsApps / Program Files / Mobile)
+    hoặc thư mục assets là read-only, trả về đường dẫn tuyệt đối chuẩn hoá từ cache_dir
+    mà không chạm vào FLET_ASSETS_DIR.
     """
     try:
         if not cache_file_path.exists():
             return ""
-            
+
+        resolved_cache = cache_file_path.resolve()
+        if _is_packaged_or_readonly_assets():
+            return str(resolved_cache)
+
         assets_dir = get_active_assets_dir()
-        if assets_dir == cache_file_path.parent.parent.parent:
+        if assets_dir.exists() and assets_dir.resolve() == resolved_cache.parent.parent.parent:
             # Nếu thư mục assets trùng với USER_DATA_DIR
             return f"cache/images/{cache_file_path.name}"
-            
+
+        if assets_dir.exists() and not os.access(assets_dir, os.W_OK):
+            return str(resolved_cache)
+
         dest_dir = assets_dir / "cache" / "images"
-        
-        # Thử tạo thư mục (ném lỗi OSError nếu assets là read-only trên Mobile)
+
+        # Thử tạo thư mục (ném lỗi OSError nếu assets là read-only)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_file = dest_dir / cache_file_path.name
-        
+
         # Sao chép tệp nếu chưa có hoặc kích thước khác nhau
         if not dest_file.exists() or dest_file.stat().st_size != cache_file_path.stat().st_size:
             shutil.copy2(cache_file_path, dest_file)
             logger.info(f"Đã sao chép ảnh cache vào assets: {dest_file}")
-            
+
         return f"cache/images/{cache_file_path.name}"
     except OSError as e:
-        # Trường hợp không ghi được vào assets (ví dụ: Read-only file system trên Android/iOS)
-        logger.info(f"Thư mục assets không thể ghi (có thể đang ở Mobile). Sử dụng đường dẫn tuyệt đối: {e}")
-        return str(cache_file_path)
+        # Trường hợp không ghi được vào assets (ví dụ: Read-only file system)
+        logger.info(f"Thư mục assets không thể ghi. Sử dụng đường dẫn tuyệt đối: {e}")
+        return str(cache_file_path.resolve())
     except Exception as e:
         logger.warning(f"Lỗi khi sao chép ảnh vào assets: {e}")
-        return str(cache_file_path)
+        return str(cache_file_path.resolve())
 
 
 def cleanup_image_cache():
@@ -443,8 +459,11 @@ def cleanup_image_cache():
         if not files:
             return
             
-        assets_dir = get_active_assets_dir()
-        assets_cache_dir = assets_dir / "cache" / "images"
+        assets_cache_dir = (
+            None
+            if _is_packaged_or_readonly_assets()
+            else (get_active_assets_dir() / "cache" / "images")
+        )
         
         # Bước 1: Dọn dẹp theo thời hạn lưu trữ (TTL)
         remaining_files = []
@@ -456,7 +475,7 @@ def cleanup_image_cache():
                     age = now - stat.st_mtime
                     if age > MAX_AGE_SECONDS:
                         f.unlink()
-                        if assets_cache_dir.exists():
+                        if assets_cache_dir is not None and assets_cache_dir.exists():
                             mirrored_file = assets_cache_dir / f.name
                             if mirrored_file.exists():
                                 mirrored_file.unlink()
@@ -477,7 +496,7 @@ def cleanup_image_cache():
         for f, size, _ in remaining_files:
             try:
                 f.unlink()
-                if assets_cache_dir.exists():
+                if assets_cache_dir is not None and assets_cache_dir.exists():
                     mirrored_file = assets_cache_dir / f.name
                     if mirrored_file.exists():
                         mirrored_file.unlink()
@@ -570,16 +589,17 @@ def clear_cached_description_images() -> int:
     removed = _clear_image_cache_directory(user_cache_dir, expected_base=user_base)
 
     try:
-        assets_base = Path(get_active_assets_dir())
-        if assets_base.exists() and assets_base.is_dir():
-            same_base = (
-                user_base.exists() and assets_base.resolve() == user_base.resolve()
-            )
-            if not same_base:
-                assets_cache_dir = assets_base / "cache" / "images"
-                removed += _clear_image_cache_directory(
-                    assets_cache_dir, expected_base=assets_base
+        if not _is_packaged_or_readonly_assets():
+            assets_base = Path(get_active_assets_dir())
+            if assets_base.exists() and assets_base.is_dir():
+                same_base = (
+                    user_base.exists() and assets_base.resolve() == user_base.resolve()
                 )
+                if not same_base:
+                    assets_cache_dir = assets_base / "cache" / "images"
+                    removed += _clear_image_cache_directory(
+                        assets_cache_dir, expected_base=assets_base
+                    )
     except OSError as exc:
         logger.debug("Skipping mirrored assets image cache clear: %s", exc)
 
@@ -662,8 +682,15 @@ def pre_cache_description_images(html_content: str) -> str:
     if trusted_site is None:
         return html_content
     trusted_origin = trusted_site.origin
+    raw_token_owner = getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+    token_owner = raw_token_owner.strip() if isinstance(raw_token_owner, str) else ""
+    active_user = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+    token_matches_owner = not token_owner or (
+        bool(active_user) and token_owner.casefold() == active_user.casefold()
+    )
     token_matches_origin = bool(
         token
+        and token_matches_owner
         and (
             not getattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "")
             or settings.MOODLE_WS_TOKEN_ORIGIN == trusted_origin
@@ -777,6 +804,44 @@ def pre_cache_description_images(html_content: str) -> str:
 _SAFE_CACHED_IMAGE_RE = re.compile(
     r"^cache/images/[0-9a-f]{64}\.[A-Za-z0-9]{1,5}$"
 )
+_SAFE_CACHED_IMAGE_NAME_RE = re.compile(r"^[0-9a-f]{64}\.[A-Za-z0-9]{1,5}$")
+
+
+def _validate_absolute_cached_image_path(unescaped: str) -> str | None:
+    """Validate an absolute path pinned strictly inside ``_USER_DATA_DIR/cache/images``."""
+    if unescaped.startswith(("\\\\", "//")) or any(
+        ch in unescaped for ch in ("<", ">", '"', "'")
+    ):
+        return None
+    try:
+        candidate = Path(unescaped)
+    except (TypeError, ValueError, OSError):
+        return None
+    if not candidate.is_absolute():
+        return None
+    if os.name == "nt" and not re.fullmatch(r"[A-Za-z]:", candidate.drive):
+        return None
+    if ".." in candidate.parts or "." in candidate.parts:
+        return None
+    if not _SAFE_CACHED_IMAGE_NAME_RE.fullmatch(candidate.name):
+        return None
+    try:
+        from config import _USER_DATA_DIR
+
+        expected_cache_dir = Path(_USER_DATA_DIR) / "cache" / "images"
+        if (
+            _is_reparse_point_or_symlink(candidate)
+            or _is_reparse_point_or_symlink(expected_cache_dir)
+            or _is_reparse_point_or_symlink(expected_cache_dir.parent)
+        ):
+            return None
+        resolved_root = expected_cache_dir.resolve()
+        resolved_candidate = candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if resolved_candidate.parent != resolved_root or resolved_candidate.name != candidate.name:
+        return None
+    return resolved_candidate.as_posix()
 
 
 def _sanitize_markdown_url(raw_url: str, *, allow_cached_image: bool = False) -> str | None:
@@ -786,8 +851,12 @@ def _sanitize_markdown_url(raw_url: str, *, allow_cached_image: bool = False) ->
         return None
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in unescaped):
         return None
-    if allow_cached_image and _SAFE_CACHED_IMAGE_RE.match(unescaped):
-        return unescaped
+    if allow_cached_image:
+        if _SAFE_CACHED_IMAGE_RE.match(unescaped):
+            return unescaped
+        abs_cached = _validate_absolute_cached_image_path(unescaped)
+        if abs_cached is not None:
+            return abs_cached
     if "\\" in unescaped or any(ch.isspace() for ch in unescaped):
         return None
     try:
@@ -859,7 +928,12 @@ def html_to_markdown(html_content: str) -> str:
             raw_alt.replace("[", "").replace("]", "").replace("\r", " ").replace("\n", " ").strip()
             or "Hình ảnh"
         )
-        return f"\n\n![{safe_alt}]({safe_src})\n\n"
+        md_src = (
+            f"<{safe_src}>"
+            if any(ch.isspace() or ch in "()" for ch in safe_src)
+            else safe_src
+        )
+        return f"\n\n![{safe_alt}]({md_src})\n\n"
 
     text = re.sub(r'<img\b[^>]*>', _img_repl, text, flags=re.IGNORECASE)
 

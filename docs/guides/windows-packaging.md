@@ -195,13 +195,13 @@ package the exact verified `build\windows` Flet bundle as an `.msix` using
 ```powershell
 .\scripts\package_msix.ps1 `
   -BundleDir build\windows `
-  -Version "2.5.1.0" `
+  -Version "2.6.0.0" `
   -IdentityName "com.uthelper.UTHelper" `
   -Publisher "CN=UTHelper" `
   -StoreProductId "9NBLGGH4NNS1" `
   -Channel msstore `
   -SignMode none `
-  -Output dist\UTHelper-2.5.1-msstore.msix
+  -Output dist\UTHelper-2.6.0-msstore.msix
 ```
 
    The script stages `distribution-channel.json` (`channel = "msstore"`) inside
@@ -216,13 +216,13 @@ package the exact verified `build\windows` Flet bundle as an `.msix` using
 
 ```powershell
 .\scripts\verify_msix_release.ps1 `
-  -MsixPath dist\UTHelper-2.5.1-msstore.msix `
+  -MsixPath dist\UTHelper-2.6.0-msstore.msix `
   -Channel msstore `
   -IdentityName "com.uthelper.UTHelper" `
   -Publisher "CN=UTHelper" `
-  -Version "2.5.1.0" `
+  -Version "2.6.0.0" `
   -StoreProductId "9NBLGGH4NNS1" `
-  -Output evidence\UTHelper-2.5.1-msstore.msix.verification.json `
+  -Output evidence\UTHelper-2.6.0-msstore.msix.verification.json `
   -RunWack
 ```
 
