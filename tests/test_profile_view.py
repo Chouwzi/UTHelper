@@ -445,48 +445,78 @@ def test_profile_view_mobile_detail_sheet_is_skipped_without_a_page(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_profile_view_desktop_card_matches_mockup_layout():
+def test_profile_view_desktop_card_matches_wide_banner_mockup():
     view = _make_view()
     view.update_snapshot(_make_snapshot())
 
-    # Big page title + subtitle underneath (desktop mockup header).
     assert view._title.size == 22
-    assert "tình trạng đóng học phí" in view._subtitle.value
+    assert view._subtitle.value
 
     card = view._data_host.controls[0]
-    # Identity row: avatar · name/MSSV/badge · UTH campus photo in the corner.
-    identity = card.content.controls[0]
-    campus_image = identity.controls[2].content
+    banner = card.content.controls[0]
+    stack = banner.content
+    assert isinstance(stack, ft.Stack)
+    campus_image = stack.controls[0]
     assert campus_image.src == "uth_campus_banner.jpg"
-    name_block = identity.controls[1]
-    assert name_block.controls[0].value == "Nguyễn Văn A"
-    assert name_block.controls[1].value == "MSSV: SV001"
-    # "Hệ đào tạo" is the blue badge under the MSSV line.
-    badge = name_block.controls[2]
-    assert badge.content.controls[1].value == "Chưa rõ hệ đào tạo"
+    assert campus_image.fit == ft.BoxFit.FILL
+    assert campus_image.height == 180
 
-    # 2-column info grid split by a thin vertical rule: 4 rows on the left,
-    # the divider in the middle, 5 rows on the right.
-    info_grid = card.content.controls[1]
+    identity = stack.controls[2].content
+    assert len(identity.controls) == 4
+    assert identity.controls[0] is view._avatar
+    name_block = identity.controls[1]
+    assert name_block.controls[0] is view._name_text
+    assert name_block.controls[1] is view._sid_text
+    assert name_block.controls[2].content.controls[1].value
+    wordmark = identity.controls[3]
+    assert "UTH" == wordmark.content.controls[0].value
+
+    info_grid = card.content.controls[1].content
     assert len(info_grid.controls) == 3
     divider = info_grid.controls[1]
     assert isinstance(divider, ft.Container)
     assert divider.width == 1
-    assert divider.height == 128
+    assert divider.height == 148
     assert divider.bgcolor == C.BORDER_STRONG
     assert len(info_grid.controls[0].controls) == 4
     assert len(info_grid.controls[2].controls) == 5
     assert info_grid.controls[0].controls[0].controls[1].value == "Khoa:"
     assert info_grid.controls[2].controls[4].controls[1].value == "Email:"
 
-    # Active tab uses the same light-blue badge look as the selected pill.
     assert view._tab_tuition.bgcolor == ft.Colors.with_opacity(0.12, C.ACCENT)
     assert view._tab_tuition.content.controls[1].color == C.ACCENT
-
-    # Four summary tiles of identical height — the status tile included.
     tiles = view._data_host.controls[1].controls
     assert len(tiles) == 4
     assert len({tile.height for tile in tiles}) == 1
+
+
+def test_profile_view_keeps_student_card_and_avatar_mounted_when_switching_sections(
+    monkeypatch,
+):
+    from gui.components import profile_view as profile_view_module
+
+    snapshot = _make_snapshot()
+    snapshot = ProfileSnapshot(
+        **{**snapshot.__dict__, "avatar": "data:image/png;base64,QUJD"}
+    )
+    for mobile in (False, True):
+        monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", mobile)
+        view = _make_view()
+        view.update_snapshot(snapshot)
+        student_card = view._data_host.controls[0]
+        avatar = view._avatar
+        avatar_image = view._avatar_image
+
+        view.select_semester(SEMESTER_1)
+        view.select_tab(TAB_OTHER)
+        view.select_tab(TAB_TUITION)
+        view.select_semester(SEMESTER_2)
+
+        assert view._data_host.controls[0] is student_card
+        assert view._student_card is student_card
+        assert view._avatar is avatar
+        assert view._avatar_image is avatar_image
+        assert view._avatar_image.src == "data:image/png;base64,QUJD"
 
 
 def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):
