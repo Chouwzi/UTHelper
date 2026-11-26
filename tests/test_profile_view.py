@@ -355,6 +355,25 @@ def test_profile_view_uses_portal_avatar_and_falls_back_to_initials():
     assert view._avatar is avatar_shell
 
 
+def test_profile_view_photo_avatar_keeps_white_gap_inside_light_ring():
+    """The mockup shows ring → white gap → photo, not photo touching the ring."""
+    view = _make_view()
+    snapshot = _make_snapshot()
+    view.update_snapshot(
+        ProfileSnapshot(**{**snapshot.__dict__, "avatar": "data:image/png;base64,QUJD"})
+    )
+    assert view._avatar_image is not None
+    assert view._avatar.padding is not None
+    assert view._avatar.padding.left == 3
+    assert view._avatar.bgcolor == C.SURFACE
+
+    # Initials fallback keeps the solid accent circle (white letter, no gap).
+    view.update_snapshot(ProfileSnapshot(**{**snapshot.__dict__, "avatar": ""}))
+    assert view._avatar_text is not None
+    assert view._avatar.padding is None
+    assert view._avatar.bgcolor == C.ACCENT
+
+
 def test_profile_view_mobile_renders_tappable_cards_instead_of_table(
     monkeypatch,
 ):
@@ -526,6 +545,14 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     assert first_row[1].weight == ft.FontWeight.W_700
     assert first_row[1].color == C.TEXT_PRIMARY
     assert info_grid.controls[2].controls[4].controls[1].value == "Email:"
+    # Left-column icons follow the mockup: bank / layers / bookmark / people.
+    left_icons = [row.controls[0].icon for row in info_grid.controls[0].controls]
+    assert left_icons == [
+        ft.Icons.ACCOUNT_BALANCE_ROUNDED,
+        ft.Icons.LAYERS_ROUNDED,
+        ft.Icons.BOOKMARK_ROUNDED,
+        ft.Icons.GROUP_ROUNDED,
+    ]
 
     assert view._tab_tuition.bgcolor == ft.Colors.with_opacity(0.12, C.ACCENT)
     assert view._tab_tuition.content.controls[1].color == C.ACCENT

@@ -615,13 +615,22 @@ class ProfileView(ft.Container):
                 self._avatar_text.size = 18 if mobile else 26
                 self._avatar_text.color = C.ON_ACCENT
             avatar_content = self._avatar_text
+        # The mockup shows a white gap between the light ring and the photo.
+        photo_mode = (
+            self._avatar_image is not None and avatar_content is self._avatar_image
+        )
         if self._avatar is None:
             self._avatar = ft.Container(
                 content=avatar_content,
                 width=avatar_size,
                 height=avatar_size,
                 border_radius=avatar_size // 2,
-                bgcolor=C.ACCENT,
+                bgcolor=(
+                    C.SURFACE if (photo_mode and not mobile) else C.ACCENT
+                ),
+                padding=(
+                    ft.Padding.all(3) if (photo_mode and not mobile) else None
+                ),
                 alignment=ft.Alignment(0, 0),
                 key="profile-student-avatar",
                 border=(
@@ -639,7 +648,12 @@ class ProfileView(ft.Container):
             self._avatar.width = avatar_size
             self._avatar.height = avatar_size
             self._avatar.border_radius = avatar_size // 2
-            self._avatar.bgcolor = C.ACCENT
+            self._avatar.bgcolor = (
+                C.SURFACE if (photo_mode and not mobile) else C.ACCENT
+            )
+            self._avatar.padding = (
+                ft.Padding.all(3) if (photo_mode and not mobile) else None
+            )
             self._avatar.alignment = ft.Alignment(0, 0)
             self._avatar.border = (
                 ft.Border.all(3, ft.Colors.with_opacity(0.30, C.ACCENT))
@@ -685,9 +699,11 @@ class ProfileView(ft.Container):
         )
 
         left_items = [
-            (ft.Icons.WORK_ROUNDED, "Khoa", profile.faculty),
-            (ft.Icons.MENU_BOOK_ROUNDED, "Ngành", profile.major),
-            (ft.Icons.CATEGORY_ROUNDED, "Chuyên ngành", profile.specialization),
+            # Icon set mirrors the desktop mockup: bank / layers / bookmark /
+            # people (was briefcase / book / grid).
+            (ft.Icons.ACCOUNT_BALANCE_ROUNDED, "Khoa", profile.faculty),
+            (ft.Icons.LAYERS_ROUNDED, "Ngành", profile.major),
+            (ft.Icons.BOOKMARK_ROUNDED, "Chuyên ngành", profile.specialization),
             (ft.Icons.GROUP_ROUNDED, "Lớp", profile.class_name),
         ]
         right_items = [
@@ -786,11 +802,11 @@ class ProfileView(ft.Container):
                             end=ft.Alignment(1, 0),
                             colors=[
                                 ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.92, C.SURFACE),
-                                ft.Colors.with_opacity(0.18, C.SURFACE),
+                                ft.Colors.with_opacity(0.90, C.SURFACE),
+                                ft.Colors.with_opacity(0.14, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            stops=[0, 0.36, 0.50, 0.62],
+                            stops=[0, 0.34, 0.46, 0.56],
                         ),
                     ),
                     ft.Container(
