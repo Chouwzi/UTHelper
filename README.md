@@ -74,9 +74,9 @@ thay vì cố ghi dữ liệu qua API.
 
 | Nền tảng | Trạng thái | Gói phân phối |
 |---|---|---|
-| Windows 10/11 | Đường sử dụng chính | MSI và installer EXE |
-| Android 8 trở lên | Được build và kiểm tra bằng CI | APK |
-| iOS | Gói thiết bị không ký; người dùng phải tự ký lại | IPA không ký |
+| Windows 10/11 | Đường sử dụng chính | MSI và installer EXE (`exe_lts`), Microsoft Store MSIX (`msstore`) |
+| Android 8 trở lên | Được build và kiểm tra bằng CI | APK ARM64 & universal (`apk_lts`), Google Play AAB (`chplay`) |
+| iOS | Gói thiết bị không ký; người dùng phải tự ký lại | IPA không ký (`Sideloadly` / `AltStore`) |
 | Web | Dùng cho phát triển và chẩn đoán | Chạy từ source |
 
 Tải bản phát hành tại [GitHub Releases](https://github.com/Chouwzi/UTHelper/releases).
