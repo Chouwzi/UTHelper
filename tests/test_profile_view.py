@@ -459,14 +459,15 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     banner = card.content.controls[0]
     stack = banner.content
     assert isinstance(stack, ft.Stack)
-    campus_image = stack.controls[0]
+    campus_layer = stack.controls[0]
+    campus_image = campus_layer.content
     assert campus_image.src == "uth_profile_banner.jpg"
-    assert campus_image.fit == ft.BoxFit.COVER
-    assert campus_image.height == 196
+    assert campus_image.fit == ft.BoxFit.CONTAIN
+    assert campus_image.height == 220
+    assert abs(campus_image.width / campus_image.height - 560 / 292) < 0.01
+    assert campus_layer.right == 0
 
-    wordmark = stack.controls[2].content
-    assert wordmark.src == "uth_profile_wordmark.png"
-    identity = stack.controls[3].content
+    identity = stack.controls[2].content
     assert len(identity.controls) == 3
     assert identity.controls[0] is view._avatar
     name_block = identity.controls[1]

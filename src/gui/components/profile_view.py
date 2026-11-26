@@ -599,7 +599,7 @@ class ProfileView(ft.Container):
                 alignment=ft.Alignment(0, 0),
                 key="profile-student-avatar",
                 border=(
-                    ft.Border.all(3, "#B6D2FF")
+                    ft.Border.all(3, ft.Colors.with_opacity(0.30, C.ACCENT))
                     if not mobile
                     else None
                 ),
@@ -624,7 +624,9 @@ class ProfileView(ft.Container):
             self._avatar.bgcolor = C.ACCENT
             self._avatar.alignment = ft.Alignment(0, 0)
             self._avatar.border = (
-                ft.Border.all(3, "#B6D2FF") if not mobile else None
+                ft.Border.all(3, ft.Colors.with_opacity(0.30, C.ACCENT))
+                if not mobile
+                else None
             )
             self._avatar.shadow = (
                 ft.BoxShadow(
@@ -743,18 +745,24 @@ class ProfileView(ft.Container):
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        banner_height = 196
+        banner_height = 220
+        campus_width = 422  # preserve the source image's 560:292 aspect ratio
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
-                    ft.Image(
-                        src="uth_profile_banner.jpg",
-                        width=float("inf"),
+                    ft.Container(
+                        content=ft.Image(
+                            src="uth_profile_banner.jpg",
+                            width=campus_width,
+                            height=banner_height,
+                            fit=ft.BoxFit.CONTAIN,
+                            anti_alias=True,
+                            semantics_label="Khuôn viên UTH",
+                        ),
+                        width=campus_width,
                         height=banner_height,
-                        expand=True,
-                        fit=ft.BoxFit.COVER,
-                        anti_alias=True,
-                        semantics_label="Khuôn viên UTH",
+                        right=0,
+                        top=0,
                     ),
                     ft.Container(
                         width=float("inf"),
@@ -771,20 +779,6 @@ class ProfileView(ft.Container):
                             ],
                             stops=[0, 0.34, 0.55, 0.70],
                         ),
-                    ),
-                    ft.Container(
-                        content=ft.Image(
-                            src="uth_profile_wordmark.png",
-                            width=180,
-                            height=62,
-                            fit=ft.BoxFit.CONTAIN,
-                            anti_alias=True,
-                            semantics_label="Logo UTH",
-                        ),
-                        width=180,
-                        height=62,
-                        right=16,
-                        top=8,
                     ),
                     ft.Container(
                         content=identity,
@@ -843,7 +837,7 @@ class ProfileView(ft.Container):
             ),
             padding=5,
             border_radius=24,
-            border=ft.Border.all(1, "#C9DCFF"),
+            border=ft.Border.all(1, C.BORDER),
             bgcolor=C.SURFACE,
             shadow=ft.BoxShadow(
                 blur_radius=16,
