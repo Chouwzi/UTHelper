@@ -117,7 +117,7 @@ def _info_row(icon, label: str, value: str, *, desktop: bool = False) -> ft.Row:
         controls=[
             ft.Icon(
                 icon,
-                size=15,
+                size=16 if desktop else 15,
                 color=C.ACCENT,
             ),
             ft.Text(
@@ -125,7 +125,9 @@ def _info_row(icon, label: str, value: str, *, desktop: bool = False) -> ft.Row:
                 size=12.5,
                 weight=ft.FontWeight.W_700,
                 color=C.TEXT_PRIMARY,
-                width=112,
+                # Desktop mockup: a wide label column so every value lines up
+                # like the reference; the phone detail sheet stays compact.
+                width=170 if desktop else 112,
                 selectable=True,
             ),
             ft.Text(
@@ -694,7 +696,7 @@ class ProfileView(ft.Container):
                 tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             border_radius=999,
             border=ft.Border.all(1, ft.Colors.with_opacity(0.40, C.ACCENT)),
             bgcolor=ft.Colors.with_opacity(0.10, C.ACCENT),
@@ -760,7 +762,7 @@ class ProfileView(ft.Container):
                 self._avatar,
                 ft.Column(
                     controls=[self._name_text, self._sid_text, badge],
-                    spacing=6,
+                    spacing=8,
                     tight=True,
                     expand=True,
                 ),
@@ -860,25 +862,25 @@ class ProfileView(ft.Container):
             controls=[
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in left_items],
-                    spacing=9,
+                    spacing=14,
                     tight=True,
                     expand=True,
                 ),
                 ft.Container(
                     width=2,
-                    height=148,
+                    height=150,
                     # Soft slate hairline like the mockup, not a dark bar.
                     bgcolor=ft.Colors.with_opacity(0.65, C.BORDER_STRONG),
                     margin=ft.Margin.symmetric(horizontal=22),
                 ),
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in right_items],
-                    spacing=9,
+                    spacing=14,
                     tight=True,
                     expand=True,
                 ),
             ],
-            spacing=34,
+            spacing=12,
             tight=True,
         )
         self._student_card = ft.Container(

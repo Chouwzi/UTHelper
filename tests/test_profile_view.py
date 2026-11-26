@@ -535,7 +535,7 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     divider = info_grid.controls[1]
     assert isinstance(divider, ft.Container)
     assert divider.width == 2
-    assert divider.height == 148
+    assert divider.height == 150
     assert divider.bgcolor == ft.Colors.with_opacity(0.65, C.BORDER_STRONG)
     assert len(info_grid.controls[0].controls) == 4
     assert len(info_grid.controls[2].controls) == 5
