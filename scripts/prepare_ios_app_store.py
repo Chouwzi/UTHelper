@@ -77,18 +77,21 @@ def prepare_app_bundle(app_bundle: Path) -> Path:
     if transport_security.get("NSExceptionDomains"):
         raise IOSAppStorePreparationError("App Store builds cannot allow insecure domain exceptions")
 
-    read_privacy_manifest()
+    expected_manifest = read_privacy_manifest()
+    expected_bytes = PRIVACY_MANIFEST.read_bytes()
     manifests = [
         path
         for path in bundle.rglob("PrivacyInfo.xcprivacy")
         if not path.is_symlink() and path.is_file()
+        and path.read_bytes() == expected_bytes
     ]
     if not manifests:
         raise IOSAppStorePreparationError(
-            "app privacy manifest must be bundled before code signing"
+            "the app privacy manifest must be bundled before code signing"
         )
     for manifest in manifests:
-        read_privacy_manifest(manifest)
+        if read_privacy_manifest(manifest) != expected_manifest:
+            raise IOSAppStorePreparationError("bundled app privacy manifest does not match")
     return manifests[0]
 
 
