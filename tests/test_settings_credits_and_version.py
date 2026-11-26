@@ -243,7 +243,8 @@ def test_settings_hub_preserves_eight_cards_and_exposes_credits_entry_pill():
 
     pill_texts = _collect_text_values(view._credits_entry_pill)
     assert any("UTHelper v2.6.0" in text for text in pill_texts)
-    assert "Giới thiệu & Tác giả" in pill_texts
+    assert "Giới thiệu" in pill_texts
+    assert all("&" not in text and "\u2014" not in text and "\u2013" not in text for text in pill_texts)
 
 
 def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_hierarchy():
@@ -269,8 +270,8 @@ def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_h
 
     assert view._current_screen == "credits"
     assert view._active_category_id == "credits"
-    assert view._detail_title.value == "Giới thiệu & Đóng góp"
-    assert "UTHelper v2.6.0" in view._detail_subtitle.value
+    assert view._detail_title.value == "Giới thiệu"
+    assert view._detail_subtitle.value == "UTHelper v2.6.0 - Thông tin dự án"
     assert view._sticky_footer.visible is False
     assert view.has_changes() is False
     assert view._unsaved_dot.visible is False
@@ -287,18 +288,40 @@ def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_h
     assert "Microsoft Store" in identity_texts
 
     founder_texts = _collect_text_values(view._credits_founder_card)
-    assert "Sáng lập & Phát triển chính" in founder_texts
+    assert "Tác giả chính" in founder_texts
     assert "Nguyễn Trần Đình Chương" in founder_texts
     assert "@Chouwzi" in founder_texts
-    assert any("Khởi xướng dự án" in text for text in founder_texts)
+    assert any(
+        "Khởi xướng dự án - Kiến trúc hệ thống và phát triển chính" in text
+        for text in founder_texts
+    )
     assert any("03/2026" in text for text in founder_texts)
 
     contributor_texts = _collect_text_values(view._credits_contributors_card)
-    assert "Đóng góp từ cộng đồng" in contributor_texts
+    assert "Đóng góp cộng đồng" in contributor_texts
     assert any("@Baong123" in text and "Nguyễn Trương Bảo" in text for text in contributor_texts)
     assert "@nguyen2006-dev" in contributor_texts
     assert any("@ThienNguyen0210" in text and "ThienNguyen-Dev" in text for text in contributor_texts)
     assert "Nguyễn Trần Đình Chương" not in contributor_texts
+
+    # Strict copywriting hygiene: 0 ampersands (&) and 0 em/en dashes across all Credits labels.
+    all_credits_texts = [
+        *_collect_text_values(view._credits_entry_pill),
+        view._detail_title.value,
+        view._detail_subtitle.value,
+        *_collect_text_values(view._detail_content_holder),
+    ]
+    for rendered_text in all_credits_texts:
+        assert "&" not in rendered_text, f"Ampersand found in Credits UI: {rendered_text!r}"
+        assert "\u2014" not in rendered_text, f"Em-dash found in Credits UI: {rendered_text!r}"
+        assert "\u2013" not in rendered_text, f"En-dash found in Credits UI: {rendered_text!r}"
+
+    credits_source = (
+        ROOT / "src" / "gui" / "components" / "settings" / "credits_section.py"
+    ).read_text(encoding="utf-8")
+    assert "&" not in credits_source
+    assert "\u2014" not in credits_source
+    assert "\u2013" not in credits_source
 
     # Founder card uses accent-elevated border; contributor card stays visually subordinate.
     assert view._credits_founder_card.border != view._credits_contributors_card.border

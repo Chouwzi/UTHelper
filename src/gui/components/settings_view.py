@@ -463,7 +463,7 @@ class SettingsView(ft.Container):
             color=C.TEXT_SECONDARY,
         )
         self._credits_entry_label = ft.Text(
-            "Giới thiệu & Tác giả",
+            "Giới thiệu",
             size=11,
             weight=ft.FontWeight.W_500,
             color=C.ACCENT,
@@ -604,9 +604,9 @@ class SettingsView(ft.Container):
 
         # Update title and subtitle
         if cat_id == "credits":
-            self._detail_title.value = "Giới thiệu & Đóng góp"
+            self._detail_title.value = "Giới thiệu"
             self._detail_subtitle.value = (
-                f"UTHelper v{APP_VERSION} · Thông tin tác giả và dự án"
+                f"UTHelper v{APP_VERSION} - Thông tin dự án"
             )
         else:
             for cid, _, title, _, desc in self._category_defs:
