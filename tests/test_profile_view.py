@@ -503,16 +503,28 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     assert view._sid_text.size == 13
     assert name_block.controls[2].content.controls[1].size == 12
 
-    info_grid = card.content.controls[1].content
+    # One card: banner, edge-to-edge hairline, then the info grid.
+    hairline = card.content.controls[1]
+    assert isinstance(hairline, ft.Container)
+    assert hairline.height == 1
+    assert hairline.bgcolor == C.BORDER
+    assert card.border_radius == 16
+    assert not card.padding
+
+    info_grid = card.content.controls[2].content
     assert len(info_grid.controls) == 3
     divider = info_grid.controls[1]
     assert isinstance(divider, ft.Container)
     assert divider.width == 2
     assert divider.height == 148
-    assert divider.bgcolor == C.BORDER_STRONG
+    assert divider.bgcolor == ft.Colors.with_opacity(0.65, C.BORDER_STRONG)
     assert len(info_grid.controls[0].controls) == 4
     assert len(info_grid.controls[2].controls) == 5
-    assert info_grid.controls[0].controls[0].controls[1].value == "Khoa:"
+    first_row = info_grid.controls[0].controls[0].controls
+    assert first_row[0].color == C.ACCENT
+    assert first_row[1].value == "Khoa:"
+    assert first_row[1].weight == ft.FontWeight.W_700
+    assert first_row[1].color == C.TEXT_PRIMARY
     assert info_grid.controls[2].controls[4].controls[1].value == "Email:"
 
     assert view._tab_tuition.bgcolor == ft.Colors.with_opacity(0.12, C.ACCENT)

@@ -118,12 +118,13 @@ def _info_row(icon, label: str, value: str, *, desktop: bool = False) -> ft.Row:
             ft.Icon(
                 icon,
                 size=15,
-                color=C.TEXT_SECONDARY,
+                color=C.ACCENT,
             ),
             ft.Text(
                 f"{label}:",
                 size=12.5,
-                color=C.TEXT_SECONDARY,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
                 width=112,
                 selectable=True,
             ),
@@ -628,16 +629,8 @@ class ProfileView(ft.Container):
                     if not mobile
                     else None
                 ),
-                shadow=(
-                    ft.BoxShadow(
-                        blur_radius=12,
-                        spread_radius=1,
-                        color=ft.Colors.with_opacity(0.20, C.ACCENT),
-                        offset=ft.Offset(0, 3),
-                    )
-                    if not mobile
-                    else None
-                ),
+                # No glow: the mockup keeps a clean light ring around the photo.
+                shadow=None,
             )
         else:
             # Keep the same outer control mounted during semester/tab refreshes
@@ -653,16 +646,7 @@ class ProfileView(ft.Container):
                 if not mobile
                 else None
             )
-            self._avatar.shadow = (
-                ft.BoxShadow(
-                    blur_radius=12,
-                    spread_radius=1,
-                    color=ft.Colors.with_opacity(0.20, C.ACCENT),
-                    offset=ft.Offset(0, 3),
-                )
-                if not mobile
-                else None
-            )
+            self._avatar.shadow = None
         self._name_text = ft.Text(
             profile.full_name or "Chưa có dữ liệu sinh viên",
             size=15 if mobile else 21,
@@ -696,6 +680,7 @@ class ProfileView(ft.Container):
             ),
             padding=ft.Padding.symmetric(horizontal=10, vertical=4),
             border_radius=999,
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.40, C.ACCENT)),
             bgcolor=ft.Colors.with_opacity(0.10, C.ACCENT),
         )
 
@@ -801,16 +786,16 @@ class ProfileView(ft.Container):
                             end=ft.Alignment(1, 0),
                             colors=[
                                 ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.91, C.SURFACE),
-                                ft.Colors.with_opacity(0.28, C.SURFACE),
+                                ft.Colors.with_opacity(0.92, C.SURFACE),
+                                ft.Colors.with_opacity(0.18, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            stops=[0, 0.34, 0.55, 0.70],
+                            stops=[0, 0.36, 0.50, 0.62],
                         ),
                     ),
                     ft.Container(
                         content=identity,
-                        padding=ft.Padding.symmetric(horizontal=30, vertical=12),
+                        padding=ft.Padding.symmetric(horizontal=36, vertical=12),
                         alignment=ft.Alignment(-1, 0),
                         left=0,
                         right=0,
@@ -830,8 +815,8 @@ class ProfileView(ft.Container):
                         ),
                         width=168,
                         height=50,
-                        right=10,
-                        top=8,
+                        right=14,
+                        top=10,
                         bgcolor=C.SURFACE,
                         border_radius=25,
                         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
@@ -846,7 +831,9 @@ class ProfileView(ft.Container):
             height=banner_height,
             width=float("inf"),
             expand=True,
-            border_radius=14,
+            # Flush with the outer card: the parent's rounded clip shapes the
+            # corners so the banner and the info grid read as one card.
+            border_radius=0,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
         self._info_column = ft.Row(
@@ -860,7 +847,8 @@ class ProfileView(ft.Container):
                 ft.Container(
                     width=2,
                     height=148,
-                    bgcolor=C.BORDER_STRONG,
+                    # Soft slate hairline like the mockup, not a dark bar.
+                    bgcolor=ft.Colors.with_opacity(0.65, C.BORDER_STRONG),
                     margin=ft.Margin.symmetric(horizontal=22),
                 ),
                 ft.Column(
@@ -877,16 +865,22 @@ class ProfileView(ft.Container):
             content=ft.Column(
                 controls=[
                     banner,
+                    # Edge-to-edge hairline between the campus header and the
+                    # info grid — one card, as in the desktop mockup.
+                    ft.Container(
+                        height=1,
+                        width=float("inf"),
+                        bgcolor=C.BORDER,
+                    ),
                     ft.Container(
                         content=self._info_column,
-                        padding=ft.Padding.only(left=30, right=30, top=18, bottom=18),
+                        padding=ft.Padding.only(left=36, right=36, top=20, bottom=24),
                     ),
                 ],
                 spacing=0,
                 tight=True,
             ),
-            padding=5,
-            border_radius=24,
+            border_radius=16,
             border=ft.Border.all(1, C.BORDER),
             bgcolor=C.SURFACE,
             shadow=ft.BoxShadow(
