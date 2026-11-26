@@ -355,16 +355,20 @@ class SettingsView(ft.Container):
 
     def _init_layout(self):
         profile = self._get_distribution_profile()
+        is_win32 = sys.platform == "win32"
         system_subtitle = (
             "Khởi động · Cập nhật"
-            if profile.supports_github_self_update
+            if is_win32 and profile.supports_github_self_update
             else "Đồng bộ · Cập nhật"
         )
-        system_desc = (
-            "Khởi động cùng Windows và cập nhật"
-            if profile.supports_github_self_update
-            else "Cấu hình hệ thống và đồng bộ dữ liệu"
-        )
+        if profile.supports_github_self_update:
+            system_desc = (
+                "Khởi động cùng Windows và cập nhật"
+                if is_win32
+                else "Cấu hình hệ thống, đồng bộ nền và cập nhật"
+            )
+        else:
+            system_desc = "Cấu hình hệ thống và đồng bộ dữ liệu"
         self._category_defs = [
             ("account", ft.Icons.PERSON_ROUNDED, "Tài khoản", "Đăng nhập UTH", "Thông tin tài khoản và kết nối e-learning"),
             ("display", ft.Icons.VISIBILITY_ROUNDED, "Hiển thị", "Bộ lọc · Cửa sổ", "Tùy chỉnh hiển thị bài tập trên màn hình"),
@@ -1669,6 +1673,7 @@ class SettingsView(ft.Container):
                     if is_demo_account(user):
                         settings.MOODLE_WS_TOKEN = ""
                         settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                        settings.MOODLE_WS_TOKEN_USERNAME = ""
                     elif supports_persist:
                         settings.UTH_CREDENTIALS_ORIGIN = ""
                     has_persisted_auth = (
@@ -1750,6 +1755,7 @@ class SettingsView(ft.Container):
                 settings.UTH_CREDENTIALS_ORIGIN = ""
                 settings.MOODLE_WS_TOKEN = ""
                 settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                settings.MOODLE_WS_TOKEN_USERNAME = ""
                 settings.MOODLE_SESSION = ""
                 client = getattr(self._orchestrator, "client", None)
                 clear_fn = getattr(client, "clear_session", None)
@@ -1996,16 +2002,22 @@ class SettingsView(ft.Container):
         """Clear notification milestone cache (forces re-notification)."""
         try:
             from config import _USER_DATA_DIR
-            import os
-            cache_path = _USER_DATA_DIR / "notifications_cache.json"
-            if cache_path.exists():
-                os.remove(str(cache_path))
+            for pattern in ("notifications_cache*.json", "notifications_cache*.lock"):
+                for cache_path in _USER_DATA_DIR.glob(pattern):
+                    if cache_path.is_file():
+                        try:
+                            cache_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
             self._debug_info_text.value = "Cache thông báo đã xóa. Tất cả milestones sẽ được gửi lại."
             self._debug_info_text.color = C.SAFE
         except Exception as ex:
             self._debug_info_text.value = f"Lỗi xóa cache: {ex}"
             self._debug_info_text.color = C.CRITICAL
-        self._debug_info_text.update()
+        try:
+            self._debug_info_text.update()
+        except Exception:
+            pass
 
     def _do_clear_notif_history(self):
         """Clear notification history log."""
@@ -2044,6 +2056,8 @@ class SettingsView(ft.Container):
                             except OSError:
                                 pass
             for pattern in (
+                "activities_cache*.json",
+                "activities_cache*.lock",
                 "courses_catalog_*.json",
                 "course_tree_*.json",
                 "courses_cache_*.json",
@@ -2560,18 +2574,36 @@ class SettingsView(ft.Container):
                 return 0
 
         stats = []
-        for label, fname in [("Cache thông báo", "notifications_cache.json"),
-                              ("Lịch sử thông báo", "notification_history.json"),
-                              ("Cache offline", "activities_cache.json")]:
-            path = _USER_DATA_DIR / fname
-            if path.exists():
-                size = os.path.getsize(str(path))
-                try:
-                    data = SafeFileIO.read_json_safe(path, dict)
-                    count = len(data) if isinstance(data, (list, dict)) else "?"
-                    stats.append(f"{label}: {count} mục ({size:,} B)")
-                except Exception:
-                    stats.append(f"{label}: {size:,} B")
+        for label, pattern in [
+            ("Cache thông báo", "notifications_cache*.json"),
+            ("Lịch sử thông báo", "notification_history.json"),
+            ("Cache offline", "activities_cache*.json"),
+        ]:
+            matched = sorted(p for p in _USER_DATA_DIR.glob(pattern) if p.is_file())
+            if matched:
+                total_size = sum(_safe_file_size(p) for p in matched)
+                total_count = 0
+                count_ok = True
+                for path in matched:
+                    try:
+                        data = SafeFileIO.read_json_safe(path, dict)
+                        if isinstance(data, dict):
+                            acts = data.get("activities")
+                            total_count += len(acts) if isinstance(acts, list) else len(data)
+                        elif isinstance(data, list):
+                            total_count += len(data)
+                        else:
+                            count_ok = False
+                    except Exception:
+                        count_ok = False
+                if len(matched) == 1 and count_ok:
+                    stats.append(f"{label}: {total_count} mục ({total_size:,} B)")
+                elif count_ok:
+                    stats.append(
+                        f"{label}: {len(matched)} tệp · {total_count} mục ({total_size:,} B)"
+                    )
+                else:
+                    stats.append(f"{label}: {len(matched)} tệp ({total_size:,} B)")
             else:
                 stats.append(f"{label}: trống")
 
@@ -2669,8 +2701,9 @@ class SettingsView(ft.Container):
 
             if confirmed[0]:
                 try:
-                    from config import _USER_DATA_DIR
+                    from config import _USER_DATA_DIR, clear_persisted_secrets
                     import os
+                    clear_persisted_secrets()
                     sp = _USER_DATA_DIR / "settings.json"
                     if sp.exists():
                         os.remove(str(sp))
@@ -2679,7 +2712,10 @@ class SettingsView(ft.Container):
                 except Exception as ex:
                     self._debug_info_text.value = f"Lỗi reset: {ex}"
                     self._debug_info_text.color = C.CRITICAL
-                self._debug_info_text.update()
+                try:
+                    self._debug_info_text.update()
+                except Exception:
+                    pass
         self._page.run_task(_confirm)
 
     def _sync_autostart_dependency(self):
@@ -2931,11 +2967,16 @@ class SettingsView(ft.Container):
     def _persist_snapshot_to_settings(self, snapshot: SettingsFormSnapshot) -> bool:
         """Persist a complete snapshot and restore in-memory state on failure."""
         previous = SettingsFormSnapshot.from_settings(settings)
+        had_ws_token_username = hasattr(settings, "MOODLE_WS_TOKEN_USERNAME")
         previous_provenance = {
-            "UTH_CREDENTIALS_ORIGIN": settings.UTH_CREDENTIALS_ORIGIN,
-            "MOODLE_WS_TOKEN": settings.MOODLE_WS_TOKEN,
-            "MOODLE_WS_TOKEN_ORIGIN": settings.MOODLE_WS_TOKEN_ORIGIN,
+            "UTH_CREDENTIALS_ORIGIN": getattr(settings, "UTH_CREDENTIALS_ORIGIN", ""),
+            "MOODLE_WS_TOKEN": getattr(settings, "MOODLE_WS_TOKEN", ""),
+            "MOODLE_WS_TOKEN_ORIGIN": getattr(settings, "MOODLE_WS_TOKEN_ORIGIN", ""),
         }
+        if had_ws_token_username:
+            previous_provenance["MOODLE_WS_TOKEN_USERNAME"] = getattr(
+                settings, "MOODLE_WS_TOKEN_USERNAME", ""
+            )
         credentials_changed = (
             snapshot.uth_username != previous.uth_username
             or snapshot.uth_password != previous.uth_password
@@ -2946,6 +2987,8 @@ class SettingsView(ft.Container):
             settings.UTH_CREDENTIALS_ORIGIN = ""
             settings.MOODLE_WS_TOKEN = ""
             settings.MOODLE_WS_TOKEN_ORIGIN = ""
+            if had_ws_token_username:
+                settings.MOODLE_WS_TOKEN_USERNAME = ""
         try:
             if save_settings():
                 return True

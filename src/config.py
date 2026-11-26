@@ -362,6 +362,7 @@ class Settings(BaseModel):
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)
+    MOODLE_WS_TOKEN_USERNAME: str = Field(default="", description="Username (MSSV) that owns the cached Web Services token")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
@@ -670,5 +671,56 @@ def save_settings() -> bool:
     if json_ok:
         _notify_settings_saved()
     return json_ok
+
+
+def clear_persisted_secrets() -> bool:
+    """Erase all persisted secrets from secure storage and in-memory settings."""
+    _logger = logging.getLogger(__name__)
+    ok = True
+    with _settings_io_lock:
+        backend = _resolve_secret_backend()
+        with _settings_save_lock:
+            if backend is None:
+                backend = _secret_backend
+            prev_username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+            _pending_plaintext_migration.clear()
+            for attr in _SECRET_FIELDS:
+                setattr(settings, attr, "")
+            settings.MOODLE_WS_TOKEN_USERNAME = ""
+            settings.UTH_CREDENTIALS_ORIGIN = ""
+
+        empty_secrets = {key_suffix: "" for key_suffix in _SECRET_FIELDS.values()}
+        if backend is not None:
+            try:
+                if not bool(backend.write_all(empty_secrets)):
+                    ok = False
+            except Exception as exc:
+                _logger.warning(
+                    "Native secret backend clear failed: %s",
+                    type(exc).__name__,
+                )
+                for key_suffix in _SECRET_FIELDS.values():
+                    try:
+                        if not bool(backend.write_secret(key_suffix, "")):
+                            ok = False
+                    except Exception:
+                        ok = False
+        if _HAS_KEYRING:
+            for key_suffix in _SECRET_FIELDS.values():
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, key_suffix)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception as exc:
+                    _logger.warning("Keyring delete failed for %s: %s", key_suffix, exc)
+                    ok = False
+            if prev_username:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, prev_username)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception:
+                    pass
+    return ok
 
 

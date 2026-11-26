@@ -755,16 +755,40 @@ class MoodleClient:
         """The immutable trusted origin this client was configured to use."""
         return self._moodle_site.origin if self._moodle_site else ""
 
+    @staticmethod
+    def _clean_setting_str(attr: str) -> str:
+        raw = getattr(settings, attr, "")
+        return raw.strip() if isinstance(raw, str) else ""
+
+    def _cached_ws_token_matches_active_account(
+        self, *, backfill_owner: bool = False
+    ) -> bool:
+        """Return True if cached MOODLE_WS_TOKEN matches site origin and active username."""
+        token = self._clean_setting_str("MOODLE_WS_TOKEN")
+        if not token or not self.moodle_site_origin:
+            return False
+        if self._clean_setting_str("MOODLE_WS_TOKEN_ORIGIN") != self.moodle_site_origin:
+            return False
+        active_user = self._clean_setting_str("UTH_USERNAME")
+        if not active_user or is_demo_account(active_user):
+            return False
+        token_owner = self._clean_setting_str("MOODLE_WS_TOKEN_USERNAME")
+        if token_owner:
+            return token_owner.casefold() == active_user.casefold()
+        if backfill_owner:
+            try:
+                settings.MOODLE_WS_TOKEN_USERNAME = active_user
+            except Exception:
+                pass
+        return True
+
     @property
     def has_site_credentials(self) -> bool:
         """Whether this client can authenticate only to its configured site."""
         if self._is_demo_mode():
             return self._moodle_site is not None and self._has_valid_demo_credentials()
         return bool(
-            (
-                settings.MOODLE_WS_TOKEN
-                and settings.MOODLE_WS_TOKEN_ORIGIN == self.moodle_site_origin
-            )
+            self._cached_ws_token_matches_active_account()
             or self._stored_credentials_match_site()
         )
 
@@ -1565,6 +1589,7 @@ class MoodleClient:
                 ):
                     settings.MOODLE_WS_TOKEN = ""
                     settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                    settings.MOODLE_WS_TOKEN_USERNAME = ""
                 if not is_mismatched_probe:
                     self._cookie_jar = CookieJar()
                     self._html_opener = None
@@ -2131,15 +2156,15 @@ class MoodleClient:
                     ):
                         settings.MOODLE_WS_TOKEN = ""
                         settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                        settings.MOODLE_WS_TOKEN_USERNAME = ""
                 return ""
 
-            # Reuse only a token whose issuing Moodle origin is recorded exactly.
+            # Reuse only a token whose issuing Moodle origin and owning account match.
             if (
                 persist
                 and not force
                 and not credentials_are_explicit
-                and settings.MOODLE_WS_TOKEN
-                and settings.MOODLE_WS_TOKEN_ORIGIN == self.moodle_site_origin
+                and self._cached_ws_token_matches_active_account(backfill_owner=True)
             ):
                 return settings.MOODLE_WS_TOKEN
 
@@ -2159,6 +2184,10 @@ class MoodleClient:
                 self._last_login_error = "missing_credentials"
                 return ""
 
+            with self._get_lock("_session_lock", reentrant=True):
+                start_gen = int(getattr(self, "_session_generation", 0))
+                start_active_norm = self._clean_setting_str("UTH_USERNAME").casefold()
+
             try:
                 status, data = self._post(
                     f"{self.moodle_site_origin}/login/token.php",
@@ -2167,18 +2196,45 @@ class MoodleClient:
                 )
 
                 if data and 'token' in data:
-                    if persist:
-                        if credentials_are_explicit:
-                            settings.UTH_USERNAME = user
-                            settings.UTH_PASSWORD = pwd
-                        settings.UTH_CREDENTIALS_ORIGIN = self.moodle_site_origin
-                        settings.MOODLE_WS_TOKEN = data['token']
-                        settings.MOODLE_WS_TOKEN_ORIGIN = self.moodle_site_origin
+                    token_val = str(data['token'] or "")
+                    if not token_val:
+                        self._last_login_error = "server_error"
+                        return ""
+                    should_save = False
+                    with self._get_lock("_session_lock", reentrant=True):
+                        current_gen = int(getattr(self, "_session_generation", 0))
+                        current_active_raw = self._clean_setting_str("UTH_USERNAME")
+                        current_active_norm = current_active_raw.casefold()
+                        session_valid = current_gen == start_gen
+                        if session_valid:
+                            if not credentials_are_explicit:
+                                session_valid = (
+                                    bool(current_active_norm)
+                                    and not is_demo_account(current_active_raw)
+                                    and current_active_norm == user.strip().casefold()
+                                )
+                            elif persist:
+                                session_valid = current_active_norm == start_active_norm
+                        if not session_valid:
+                            logger.info(
+                                "Discarding in-flight WS token: session or active account changed."
+                            )
+                            return ""
+                        if persist:
+                            if credentials_are_explicit:
+                                settings.UTH_USERNAME = user
+                                settings.UTH_PASSWORD = pwd
+                            settings.UTH_CREDENTIALS_ORIGIN = self.moodle_site_origin
+                            settings.MOODLE_WS_TOKEN = token_val
+                            settings.MOODLE_WS_TOKEN_ORIGIN = self.moodle_site_origin
+                            settings.MOODLE_WS_TOKEN_USERNAME = user.strip()
+                            should_save = True
+                    if should_save:
                         from config import save_settings
                         save_settings()
                     logger.info("Lấy WS API token thành công.")
                     self._last_login_error = ""
-                    return data['token']
+                    return token_val
                 elif data:
                     error = data.get('error', 'Unknown error')
                     logger.warning(f"Không lấy được WS token: {error}")
@@ -2240,12 +2296,14 @@ class MoodleClient:
                     settings.UTH_CREDENTIALS_ORIGIN = self.moodle_site_origin
                 settings.MOODLE_WS_TOKEN = ""
                 settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                settings.MOODLE_WS_TOKEN_USERNAME = ""
             self._last_login_error = ""
             return True
 
         if force and persist:
             settings.MOODLE_WS_TOKEN = ""
             settings.MOODLE_WS_TOKEN_ORIGIN = ""
+            settings.MOODLE_WS_TOKEN_USERNAME = ""
         token = self._get_ws_token(username, password, force=force, persist=persist)
         return bool(token)
     
@@ -2300,9 +2358,11 @@ class MoodleClient:
             # Kiểm tra xem token hết hạn hoặc không hợp lệ
             if isinstance(result, dict) and result.get('errorcode') in ('invalidtoken', 'accessexception'):
                 logger.warning(f"WS token hết hạn hoặc không hợp lệ: {result.get('error', '')}")
-                # Token đã hết hạn → bắt buộc làm mới (force refresh)
-                settings.MOODLE_WS_TOKEN = ""
-                settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                # Token đã hết hạn → bắt buộc làm mới (force refresh) nếu vẫn thuộc phiên hiện tại
+                if getattr(settings, "MOODLE_WS_TOKEN", "") in ("", token):
+                    settings.MOODLE_WS_TOKEN = ""
+                    settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                    settings.MOODLE_WS_TOKEN_USERNAME = ""
                 token = self._get_ws_token(force=True)
                 if token:
                     request_params['wstoken'] = token

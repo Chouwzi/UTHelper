@@ -831,6 +831,18 @@ class AppController:
         if reset_moodle_and_caches or account_switched_or_logged_out:
             try:
                 settings.MOODLE_SESSION = ""
+                if account_switched_or_logged_out:
+                    raw_owner = getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+                    token_owner = raw_owner.strip() if isinstance(raw_owner, str) else ""
+                    clean_new = str(new_username or "").strip()
+                    if (
+                        not clean_new
+                        or is_demo_account(clean_new)
+                        or (token_owner and token_owner.casefold() != clean_new.casefold())
+                    ):
+                        settings.MOODLE_WS_TOKEN = ""
+                        settings.MOODLE_WS_TOKEN_ORIGIN = ""
+                        settings.MOODLE_WS_TOKEN_USERNAME = ""
             except Exception:
                 pass
 
@@ -1216,6 +1228,16 @@ class AppController:
                     clear_overlays()
                 except Exception:
                     logger.debug("Pre-mutation overlay clear skipped", exc_info=True)
+        orchestrator_pre = getattr(self, "orchestrator", None)
+        if orchestrator_pre is not None:
+            for client_attr in ("client", "thnn_client"):
+                client_obj = getattr(orchestrator_pre, client_attr, None)
+                clear_session = getattr(client_obj, "clear_session", None)
+                if callable(clear_session):
+                    try:
+                        clear_session()
+                    except Exception:
+                        logger.debug("Pre-mutation Moodle session clear skipped", exc_info=True)
         for portal_attr in ("_portal_client", "_portal_week_client"):
             portal_obj = getattr(self, portal_attr, None)
             clear_token = getattr(portal_obj, "clear_token", None)
@@ -1242,6 +1264,7 @@ class AppController:
         settings.UTH_CREDENTIALS_ORIGIN = ""
         settings.MOODLE_WS_TOKEN = ""
         settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        settings.MOODLE_WS_TOKEN_USERNAME = ""
         settings.MOODLE_SESSION = ""
         orchestrator = getattr(self, "orchestrator", None)
         if orchestrator is not None and hasattr(orchestrator, "is_logged_in"):
@@ -1257,6 +1280,7 @@ class AppController:
         settings.UTH_CREDENTIALS_ORIGIN = ""
         settings.MOODLE_WS_TOKEN = ""
         settings.MOODLE_WS_TOKEN_ORIGIN = ""
+        settings.MOODLE_WS_TOKEN_USERNAME = ""
         settings.MOODLE_SESSION = ""
         await asyncio.to_thread(save_settings)
 
@@ -1578,6 +1602,11 @@ class AppController:
     def _native_background_credentials(self) -> tuple[str, str]:
         """Return only a token proven to belong to the active Moodle client."""
         if is_demo_account(settings.UTH_USERNAME):
+            return "", ""
+        raw_owner = getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+        token_owner = raw_owner.strip() if isinstance(raw_owner, str) else ""
+        active_user = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        if token_owner and token_owner.casefold() != active_user.casefold():
             return "", ""
         configured_site = moodle_site_from_origin(settings.MOODLE_BASE_URL)
         client_site = moodle_site_from_origin(
@@ -4610,9 +4639,21 @@ class AppController:
     @staticmethod
     def _has_sync_credentials() -> bool:
         username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        if not username:
+            return False
         password = str(getattr(settings, "UTH_PASSWORD", "") or "")
+        if password:
+            return True
+        if is_demo_account(username):
+            return False
         ws_token = str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
-        return bool((username and password) or ws_token)
+        if not ws_token:
+            return False
+        raw_owner = getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
+        token_owner = raw_owner.strip() if isinstance(raw_owner, str) else ""
+        if token_owner and token_owner.casefold() != username.casefold():
+            return False
+        return True
 
     async def _perform_data_sync(self, trigger: str = "timer"):
         if self._is_loading:
