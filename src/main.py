@@ -1,20 +1,148 @@
+import asyncio
+import inspect
 import logging
 import os
 import sys
-import asyncio
-import inspect
+import threading
+import time
 from pathlib import Path
 
-from diagnostics.logging_setup import (
+
+_EARLY_HIDE_GUARD_LOCK = threading.Lock()
+_EARLY_HIDE_GUARD_STOP = threading.Event()
+_EARLY_HIDE_GUARD_THREAD: threading.Thread | None = None
+
+
+def _is_source_checkout(module_path: Path) -> bool:
+    try:
+        return (module_path.resolve().parents[1] / "pyproject.toml").is_file()
+    except IndexError:
+        return False
+
+
+def _detect_embedded_windows_runner_early() -> bool:
+    if sys.platform != "win32" or os.environ.get("UTH_TEST_MODE") == "1":
+        return False
+    if not (
+        os.environ.get("FLET_DART_BRIDGE_EXIT_PORT")
+        or os.environ.get("FLET_DART_BRIDGE_PORT")
+    ):
+        return False
+    return not _is_source_checkout(Path(__file__))
+
+
+def _start_early_flutter_window_hide_guard() -> None:
+    """Suppress premature 1280x720 runner visibility until prevent_close latches."""
+    global _EARLY_HIDE_GUARD_THREAD
+    if sys.platform != "win32":
+        return
+    with _EARLY_HIDE_GUARD_LOCK:
+        if _EARLY_HIDE_GUARD_THREAD is not None and _EARLY_HIDE_GUARD_THREAD.is_alive():
+            return
+        _EARLY_HIDE_GUARD_STOP.clear()
+
+        def _worker() -> None:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                user32.FindWindowExW.argtypes = [
+                    wintypes.HWND,
+                    wintypes.HWND,
+                    wintypes.LPCWSTR,
+                    wintypes.LPCWSTR,
+                ]
+                user32.FindWindowExW.restype = wintypes.HWND
+                user32.GetWindowThreadProcessId.argtypes = [
+                    wintypes.HWND,
+                    ctypes.POINTER(wintypes.DWORD),
+                ]
+                user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+                user32.IsWindowVisible.argtypes = [wintypes.HWND]
+                user32.IsWindowVisible.restype = wintypes.BOOL
+                user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+                user32.ShowWindow.restype = wintypes.BOOL
+                user32.IsWindow.argtypes = [wintypes.HWND]
+                user32.IsWindow.restype = wintypes.BOOL
+
+                current_pid = os.getpid()
+                seen_hwnd = 0
+                deadline = time.monotonic() + 20.0
+
+                while not _EARLY_HIDE_GUARD_STOP.is_set() and time.monotonic() < deadline:
+                    child_after = 0
+                    visited: set[int] = set()
+                    while not _EARLY_HIDE_GUARD_STOP.is_set():
+                        hwnd = user32.FindWindowExW(
+                            None,
+                            child_after,
+                            "FLUTTER_RUNNER_WIN32_WINDOW",
+                            None,
+                        )
+                        hwnd_int = int(hwnd or 0)
+                        if not hwnd_int or hwnd_int in visited:
+                            break
+                        visited.add(hwnd_int)
+                        child_after = hwnd_int
+                        owner_pid = wintypes.DWORD(0)
+                        user32.GetWindowThreadProcessId(
+                            hwnd_int, ctypes.byref(owner_pid)
+                        )
+                        if owner_pid.value == current_pid:
+                            seen_hwnd = hwnd_int
+                            if user32.IsWindowVisible(hwnd_int):
+                                user32.ShowWindow(hwnd_int, 0)
+
+                    if (
+                        seen_hwnd != 0
+                        and not _EARLY_HIDE_GUARD_STOP.is_set()
+                        and not user32.IsWindow(seen_hwnd)
+                    ):
+                        _terminate_embedded_windows_process(0)
+                        return
+
+                    _EARLY_HIDE_GUARD_STOP.wait(0.001)
+            except Exception:
+                pass
+
+        thread = threading.Thread(
+            target=_worker,
+            name="uth-early-window-hide-guard",
+            daemon=True,
+        )
+        _EARLY_HIDE_GUARD_THREAD = thread
+        thread.start()
+
+
+def _release_early_flutter_window_hide_guard() -> None:
+    """Stop and join the early runner hide-guard before publishing the splash UI."""
+    global _EARLY_HIDE_GUARD_THREAD
+    _EARLY_HIDE_GUARD_STOP.set()
+    with _EARLY_HIDE_GUARD_LOCK:
+        thread = _EARLY_HIDE_GUARD_THREAD
+        _EARLY_HIDE_GUARD_THREAD = None
+    if (
+        thread is not None
+        and thread.is_alive()
+        and thread is not threading.current_thread()
+    ):
+        thread.join(timeout=0.5)
+
+
+if _detect_embedded_windows_runner_early():
+    _start_early_flutter_window_hide_guard()
+
+from diagnostics.logging_setup import (  # noqa: E402
     configure_dependency_logging,
     configure_logging,
     startup_debug_enabled,
 )
-from diagnostics.models import AppPhase
-from diagnostics.runtime import create_default_runtime
-from gui.controllers.startup_visibility import is_autostart_launch
-from platform_utils import quiz_client_bootstrap
-from platform_utils.single_instance import bootstrap_windows_instance
+from diagnostics.models import AppPhase  # noqa: E402
+from diagnostics.runtime import create_default_runtime  # noqa: E402
+from gui.controllers.startup_visibility import is_autostart_launch  # noqa: E402
+from platform_utils import quiz_client_bootstrap  # noqa: E402
+from platform_utils.single_instance import bootstrap_windows_instance  # noqa: E402
 
 # Force stdout/stderr to be unbuffered/line-buffered
 if hasattr(sys.stdout, "reconfigure"):
@@ -163,13 +291,6 @@ def _is_web_mode(argv, environ) -> bool:
     )
 
 
-def _is_source_checkout(module_path: Path) -> bool:
-    try:
-        return (module_path.resolve().parents[1] / "pyproject.toml").is_file()
-    except IndexError:
-        return False
-
-
 def _is_embedded_windows_runner(
     *,
     development: bool | None = None,
@@ -261,6 +382,7 @@ def _terminate_embedded_windows_process(exit_code: int) -> None:
     Matching upstream ``dart_bridge``'s ``serious_python_hard_exit``, flush all Python
     streams/logs first and terminate the kernel process directly with ``exit_code``.
     """
+    _EARLY_HIDE_GUARD_STOP.set()
     _hide_current_process_flutter_windows()
     try:
         logging.shutdown()
@@ -549,7 +671,30 @@ def main() -> int:
 
                 window_obj.destroy = _safe_embedded_destroy
                 window_obj.prevent_close = True
+                window_obj.visible = False
+                window_obj.width = 1120
+                window_obj.height = 760
                 window_obj.on_event = _early_splash_window_event
+                page.update()
+                wait_ready = getattr(window_obj, "wait_until_ready_to_show", None)
+                if callable(wait_ready):
+                    try:
+                        ready_res = wait_ready()
+                        if inspect.isawaitable(ready_res):
+                            await asyncio.wait_for(ready_res, timeout=3.0)
+                    except Exception:
+                        pass
+                center_fn = getattr(window_obj, "center", None)
+                if callable(center_fn):
+                    try:
+                        center_res = center_fn()
+                        if inspect.isawaitable(center_res):
+                            await asyncio.wait_for(center_res, timeout=3.0)
+                    except Exception:
+                        pass
+            _release_early_flutter_window_hide_guard()
+            if destroy_started:
+                return
 
         try:
             # Load the persisted launch preference before deciding whether the
@@ -576,6 +721,8 @@ def main() -> int:
                 # former 600 ms floor made every launch feel slow, especially
                 # with embedded Python on older Android devices.
                 await asyncio.sleep(0.05)
+            if destroy_started:
+                return
             logger.info("Starting app imports...")
             
             # Flet compatibility shim (MUST run before any GUI imports)
@@ -669,6 +816,7 @@ def main() -> int:
         clean_exit = True
         exit_code = 1
     finally:
+        _release_early_flutter_window_hide_guard()
         _close_broker_and_runtime(clean=clean_exit)
     return exit_code
 

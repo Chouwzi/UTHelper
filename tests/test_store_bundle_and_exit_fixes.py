@@ -298,6 +298,19 @@ def test_verify_windows_bundle_pe_scanner_rejects_debug_crt_imports(
 # ---------------------------------------------------------------------------
 
 
+def test_pyproject_windows_app_enables_hide_window_on_start() -> None:
+    import tomllib
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    win_app = (
+        pyproject.get("tool", {})
+        .get("flet", {})
+        .get("windows", {})
+        .get("app", {})
+    )
+    assert win_app.get("hide_window_on_start") is True
+
+
 def test_is_embedded_windows_runner_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(application.sys, "platform", "win32")
     monkeypatch.setattr(application, "_TEST_MODE", False)
@@ -507,6 +520,284 @@ def test_embedded_windows_primary_destroy_cleans_up_before_hard_exit(
     assert "runtime.close:True" in events
     assert events[-1] == "hard_exit:0"
     assert "original_window.destroy" not in events
+
+
+def test_early_flutter_window_hide_guard_hides_owned_hwnd_and_hard_exits_on_premature_destroy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+    import os
+    import time
+
+    current_pid = os.getpid()
+    shown_calls: list[tuple[int, int]] = []
+    hard_exits: list[int] = []
+    hwnd_owned = 0x12340001
+    hwnd_foreign = 0x12340002
+    state = {"visible": 1, "alive": 1}
+
+    class FakeFn:
+        def __init__(self, impl):
+            self._impl = impl
+            self.argtypes = None
+            self.restype = ctypes.c_int
+
+        def __call__(self, *args):
+            return self._impl(*args)
+
+    def _find_window_ex(_parent, child_after, class_name, _title):
+        assert class_name == "FLUTTER_RUNNER_WIN32_WINDOW"
+        after_val = int(child_after or 0)
+        if after_val == 0:
+            return hwnd_foreign
+        if after_val == hwnd_foreign and state["alive"]:
+            return hwnd_owned
+        return 0
+
+    def _get_window_thread_pid(hwnd, pid_ptr):
+        pid_obj = ctypes.cast(pid_ptr, ctypes.POINTER(ctypes.c_ulong)).contents
+        pid_obj.value = current_pid if int(hwnd) == hwnd_owned else current_pid + 999
+        return 1
+
+    def _is_window_visible(hwnd):
+        return state["visible"] if int(hwnd) == hwnd_owned else 1
+
+    def _show_window(hwnd, cmd):
+        shown_calls.append((int(hwnd), int(cmd)))
+        if int(hwnd) == hwnd_owned and int(cmd) == 0:
+            state["visible"] = 0
+        return 1
+
+    def _is_window(hwnd):
+        return state["alive"] if int(hwnd) == hwnd_owned else 1
+
+    fake_user32 = SimpleNamespace(
+        FindWindowExW=FakeFn(_find_window_ex),
+        GetWindowThreadProcessId=FakeFn(_get_window_thread_pid),
+        IsWindowVisible=FakeFn(_is_window_visible),
+        ShowWindow=FakeFn(_show_window),
+        IsWindow=FakeFn(_is_window),
+    )
+
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ctypes,
+        "WinDLL",
+        lambda name, **_kw: fake_user32 if name == "user32" else SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        application,
+        "_terminate_embedded_windows_process",
+        lambda code: hard_exits.append(code),
+    )
+
+    application._release_early_flutter_window_hide_guard()
+    application._start_early_flutter_window_hide_guard()
+    try:
+        deadline = time.monotonic() + 1.0
+        while not shown_calls and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert shown_calls == [(hwnd_owned, 0)]
+        assert hard_exits == []
+
+        # Simulate premature native WM_CLOSE destroying the HWND while guard is active
+        state["alive"] = 0
+        deadline = time.monotonic() + 1.0
+        while not hard_exits and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert hard_exits == [0]
+    finally:
+        application._release_early_flutter_window_hide_guard()
+
+
+def test_embedded_windows_app_target_latches_prevent_close_before_releasing_guard_or_publishing_splash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.prevent_close = False
+            self.visible = True
+            self.width = 1280
+            self.height = 720
+            self.on_event = None
+
+        async def wait_until_ready_to_show(self) -> None:
+            assert self.prevent_close is True
+            assert self.visible is False
+            events.append("window.wait_until_ready_to_show")
+
+        async def center(self) -> None:
+            assert self.prevent_close is True
+            assert self.visible is False
+            events.append("window.center")
+
+        async def destroy(self) -> None:
+            events.append("original_window.destroy")
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.window = FakeWindow()
+            self.controls = []
+
+        def add(self, *_controls) -> None:
+            pass
+
+        def update(self) -> None:
+            events.append(
+                f"page.update:prevent_close={self.window.prevent_close},visible={self.window.visible}"
+            )
+
+    page = FakePage()
+
+    def fake_run(**kwargs) -> None:
+        coro = kwargs["main"](page)
+        if inspect.isawaitable(coro):
+            asyncio.run(coro)
+
+    fake_flet = SimpleNamespace(
+        Page=FakePage,
+        AppView=SimpleNamespace(
+            WEB_BROWSER="web-browser",
+            FLET_APP_HIDDEN="flet-app-hidden",
+        ),
+        run=fake_run,
+    )
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+    monkeypatch.setitem(
+        sys.modules,
+        "gui.compact_desktop",
+        SimpleNamespace(main=lambda *_a, **_kw: events.append("app_main") or SimpleNamespace()),
+    )
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda _p: False)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(
+        application,
+        "bootstrap_windows_instance",
+        lambda **_kw: SimpleNamespace(exit_code=None, broker=None, force_visible=False),
+    )
+    monkeypatch.setattr(application, "create_default_runtime", lambda *_a, **_kw: None)
+    monkeypatch.setattr(application, "_is_embedded_windows_runner", lambda **_kw: True)
+    monkeypatch.setattr(
+        application,
+        "_release_early_flutter_window_hide_guard",
+        lambda: events.append("release_hide_guard"),
+    )
+    monkeypatch.setattr(
+        application,
+        "_show_startup_screen",
+        lambda _p, _ft, *, publish, compact_desktop: events.append(
+            f"show_startup_screen:publish={publish},compact={compact_desktop}"
+        ),
+    )
+
+    assert application.main() == 0
+    assert "page.update:prevent_close=True,visible=False" in events
+    idx_update = events.index("page.update:prevent_close=True,visible=False")
+    idx_ready = events.index("window.wait_until_ready_to_show")
+    idx_center = events.index("window.center")
+    idx_release = events.index("release_hide_guard")
+    idx_splash = events.index("show_startup_screen:publish=True,compact=True")
+    idx_app_main = events.index("app_main")
+    assert idx_update < idx_ready < idx_center < idx_release < idx_splash < idx_app_main
+
+
+def test_embedded_windows_early_splash_close_event_aborts_before_app_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeBroker:
+        def close(self, *, timeout_seconds: float = 1.0) -> bool:
+            events.append(f"broker.close:{timeout_seconds}")
+            return True
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            self.prevent_close = False
+            self.visible = True
+            self.on_event = None
+
+        async def wait_until_ready_to_show(self) -> None:
+            events.append("window.wait_until_ready_to_show")
+
+        async def center(self) -> None:
+            events.append("window.center")
+
+        async def destroy(self) -> None:
+            events.append("original_window.destroy")
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.window = FakeWindow()
+            self.controls = []
+
+        def add(self, *_controls) -> None:
+            pass
+
+        def update(self) -> None:
+            pass
+
+    page = FakePage()
+
+    def _show_splash_and_schedule_close(_p, _ft, *, publish, compact_desktop) -> None:
+        events.append(f"splash:{publish}:{compact_desktop}")
+
+        async def _fire_close() -> None:
+            assert callable(page.window.on_event)
+            await page.window.on_event(SimpleNamespace(type="close", data="close"))
+
+        asyncio.get_running_loop().create_task(_fire_close())
+
+    def fake_run(**kwargs) -> None:
+        coro = kwargs["main"](page)
+        if inspect.isawaitable(coro):
+            asyncio.run(coro)
+
+    fake_flet = SimpleNamespace(
+        Page=FakePage,
+        WindowEventType=SimpleNamespace(CLOSE="close"),
+        AppView=SimpleNamespace(
+            WEB_BROWSER="web-browser",
+            FLET_APP_HIDDEN="flet-app-hidden",
+        ),
+        run=fake_run,
+    )
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+    monkeypatch.setitem(
+        sys.modules,
+        "gui.compact_desktop",
+        SimpleNamespace(main=lambda *_a, **_kw: events.append("app_main_should_not_run")),
+    )
+    monkeypatch.setattr(application.sys, "platform", "win32")
+    monkeypatch.setattr(application.sys, "argv", ["main.py"])
+    monkeypatch.delenv("FLET_WEB", raising=False)
+    monkeypatch.setattr(application, "_is_source_checkout", lambda _p: False)
+    monkeypatch.setattr(application, "is_autostart_launch", lambda: False)
+    monkeypatch.setattr(
+        application,
+        "bootstrap_windows_instance",
+        lambda **_kw: SimpleNamespace(exit_code=None, broker=FakeBroker(), force_visible=False),
+    )
+    monkeypatch.setattr(application, "create_default_runtime", lambda *_a, **_kw: None)
+    monkeypatch.setattr(application, "_is_embedded_windows_runner", lambda **_kw: True)
+    monkeypatch.setattr(application, "_release_early_flutter_window_hide_guard", lambda: None)
+    monkeypatch.setattr(application, "_hide_current_process_flutter_windows", lambda: events.append("hide"))
+    monkeypatch.setattr(application, "_show_startup_screen", _show_splash_and_schedule_close)
+    monkeypatch.setattr(
+        application,
+        "_terminate_embedded_windows_process",
+        lambda code: events.append(f"hard_exit:{code}"),
+    )
+
+    assert application.main() == 0
+    assert "broker.close:1.0" in events
+    assert "hard_exit:0" in events
+    assert "app_main_should_not_run" not in events
 
 
 @pytest.mark.parametrize(
