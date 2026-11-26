@@ -1,4 +1,4 @@
-"""Refined Credits & About detail view for SettingsView."""
+"""Refined About and Credits detail view for SettingsView."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ PROJECT_GITHUB_URL = "https://github.com/Chouwzi/UTHelper"
 COMMUNITY_CONTRIBUTORS: tuple[tuple[str, str], ...] = (
     (
         "Nguyễn Trương Bảo (@Baong123)",
-        "Đóng góp nhánh thử nghiệm nhắc lịch học & hồ sơ học phí",
+        "Đóng góp nhánh thử nghiệm nhắc lịch học và hồ sơ học phí",
     ),
     (
         "@nguyen2006-dev",
@@ -114,7 +114,7 @@ def refresh_credits_section_colors(view) -> None:
 
 
 def build_credits_section(view) -> ft.Control:
-    """Build the subtle, Apple-HIG inspired About & Credits detail view."""
+    """Build the subtle, Apple-HIG inspired About detail view."""
     profile = _get_distribution_profile(view)
 
     primary_texts: list[ft.Text] = []
@@ -222,9 +222,9 @@ def build_credits_section(view) -> ft.Control:
         padding=16,
     )
 
-    # 2. Prominent Primary Card — Founder & Lead Architect
+    # 2. Prominent Primary Card - Founder and Lead Architect
     founder_section_label = ft.Text(
-        "Sáng lập & Phát triển chính",
+        "Tác giả chính",
         size=11.5,
         weight=ft.FontWeight.W_600,
         color=C.ACCENT,
@@ -269,7 +269,7 @@ def build_credits_section(view) -> ft.Control:
     )
 
     founder_role = ft.Text(
-        "Khởi xướng dự án · Kiến trúc hệ thống & Phát triển chính",
+        "Khởi xướng dự án - Kiến trúc hệ thống và phát triển chính",
         size=12,
         weight=ft.FontWeight.W_600,
         color=C.TEXT_PRIMARY,
@@ -339,9 +339,9 @@ def build_credits_section(view) -> ft.Control:
         padding=16,
     )
 
-    # 3. Subordinate Secondary Card — Community Feature Contributors
+    # 3. Subordinate Secondary Card - Community Feature Contributors
     contributors_title = ft.Text(
-        "Đóng góp từ cộng đồng",
+        "Đóng góp cộng đồng",
         size=12.5,
         weight=ft.FontWeight.W_600,
         color=C.TEXT_PRIMARY,
@@ -349,7 +349,7 @@ def build_credits_section(view) -> ft.Control:
     primary_texts.append(contributors_title)
 
     contributors_caption = ft.Text(
-        "Đóng góp tính năng & thử nghiệm",
+        "Đóng góp tính năng thử nghiệm",
         size=11.5,
         weight=ft.FontWeight.W_600,
         color=C.TEXT_SECONDARY,
@@ -429,7 +429,7 @@ def build_credits_section(view) -> ft.Control:
         padding=ft.Padding.symmetric(horizontal=14, vertical=12),
     )
 
-    # 4. Quiet Project & License Footer
+    # 4. Quiet Project and License Footer
     project_github_btn = ft.TextButton(
         "Mã nguồn dự án trên GitHub",
         icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
@@ -463,7 +463,7 @@ def build_credits_section(view) -> ft.Control:
         alignment=ft.Alignment(0, 0),
     )
 
-    # Expose semantic refs for deterministic live theme refresh & test verification.
+    # Expose semantic refs for deterministic live theme refresh and test verification.
     view._credits_identity_card = identity_card
     view._credits_founder_card = founder_card
     view._credits_contributors_card = contributors_card
