@@ -1882,21 +1882,11 @@ class ProfileView(ft.Container):
             ]
             data_rows.append(ft.DataRow(cells=cells))
 
-        if not rows:
-            data_rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(
-                            ft.Text(
-                                "Không có học phí trong lựa chọn này.",
-                                size=12,
-                                color=C.TEXT_SECONDARY,
-                            )
-                        )
-                    ]
-                )
-            )
-        else:
+        # Empty selections never reach this builder — ``_build_table`` shows a
+        # dedicated notice frame instead — and a 1-cell DataRow would crash
+        # Flet (row/column mismatch), so only emit the totals row when there
+        # is real data.
+        if rows:
             totals = summarize_tuition(rows)
             total_style = dict(size=12.5, weight=ft.FontWeight.W_700)
             total_cells = [
@@ -1966,21 +1956,10 @@ class ProfileView(ft.Container):
                 )
             )
 
-        if not rows:
-            data_rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(
-                            ft.Text(
-                                "Không có khoản thu khác.",
-                                size=12,
-                                color=C.TEXT_SECONDARY,
-                            )
-                        )
-                    ]
-                )
-            )
-        else:
+        # Same guard as the tuition table: an empty selection is handled by
+        # ``_build_table`` with a notice frame, and a short DataRow would
+        # mismatch the 7 columns and crash the desktop layout.
+        if rows:
             amount = sum(row.amount for row in rows)
             paid = sum(row.paid_amount for row in rows)
             debt = sum(row.debt for row in rows)

@@ -394,6 +394,22 @@ def test_profile_view_desktop_empty_fee_states_do_not_build_malformed_rows():
     assert "Không có khoản thu khác" in empty_other.content.value
 
 
+def test_profile_view_fee_builders_never_emit_short_rows_when_empty():
+    """Review #129: a 1-cell DataRow mismatches the columns and crashes Flet."""
+    view = _make_view()
+    view.update_snapshot(_make_snapshot(empty=True))
+
+    tuition = view._build_tuition_table()
+    assert isinstance(tuition, ft.DataTable)
+    assert len(tuition.columns) == 8
+    assert tuition.rows == []
+
+    other = view._build_other_fee_table()
+    assert isinstance(other, ft.DataTable)
+    assert len(other.columns) == 7
+    assert other.rows == []
+
+
 def test_profile_view_mobile_detail_sheet_shows_money_and_status(monkeypatch):
     from gui.components import profile_view as profile_view_module
 
