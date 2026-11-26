@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import inspect
 import logging
 import math
 from pathlib import Path
@@ -20,6 +21,28 @@ from platform_utils.update_packages import PackageLauncher, PackageVerifier
 
 
 logger = logging.getLogger(__name__)
+
+
+_NON_RETRYABLE_INSTALL_PACKAGE_ERRORS = frozenset(
+    {
+        "sha256_mismatch",
+        "size_mismatch",
+        "invalid_apk",
+        "package_mismatch",
+        "release_version_mismatch",
+        "installed_signer_mismatch",
+        "manifest_signer_mismatch",
+        "apk_signature_invalid",
+        "release_metadata_invalid",
+    }
+)
+_UNAVAILABLE_INSTALL_PACKAGE_ERRORS = frozenset(
+    {
+        "source_unavailable",
+        "installer_unavailable",
+        "Windows installer is unavailable",
+    }
+)
 
 
 class ReleaseClient(Protocol):
@@ -50,8 +73,12 @@ class UpdateEventKind(str, Enum):
     UP_TO_DATE = "up_to_date"
     DOWNLOADING = "downloading"
     DOWNLOAD_PROGRESS = "download_progress"
+    VERIFYING = "verifying"
     READY_TO_INSTALL = "ready_to_install"
     MANUAL_DOWNLOAD_REQUIRED = "manual_download_required"
+    INSTALLING = "installing"
+    INSTALL_PERMISSION_REQUIRED = "install_permission_required"
+    INSTALL_FAILED = "install_failed"
     INSTALL_LAUNCHED = "install_launched"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -116,12 +143,18 @@ class UpdateCoordinator:
         self._automatic_check_queued = False
         self._manual_check_queued = False
         self._download_queued = False
+        self._download_in_progress = False
         self._confirm_queued = False
         self._preference_queued = False
         self._candidate: UpdateCandidate | None = None
         self._ready_path: Path | None = None
         self._ready_external_url: str | None = None
         self._install_handed_off = False
+        self._detached_downloader = False
+
+    def current_candidate(self) -> UpdateCandidate | None:
+        with self._lock:
+            return self._candidate
 
     def start(self) -> None:
         with self._lock:
@@ -168,12 +201,24 @@ class UpdateCoordinator:
                 else:
                     self._ready_path = None
             if ready_event is None:
-                if self._candidate is None or self._download_queued:
+                if (
+                    self._candidate is None
+                    or self._download_queued
+                    or self._download_in_progress
+                ):
                     return
                 if self._enqueue_locked(self._DOWNLOAD):
                     self._download_queued = True
         if ready_event is not None:
             self._emit(ready_event, candidate=ready_candidate, progress=1.0)
+
+    def cancel_download(self) -> None:
+        """Cooperatively cancel the current user-requested package download."""
+        with self._lock:
+            if self._closed:
+                return
+            if self._download_in_progress:
+                self._cancel_download.set()
 
     def confirm_install(self) -> None:
         with self._lock:
@@ -195,14 +240,25 @@ class UpdateCoordinator:
         with self._lock:
             if self._closed:
                 thread = self._thread
+                first_shutdown = False
             else:
                 self._closed = True
+                if callable(getattr(self._downloader, "detach", None)):
+                    self._detached_downloader = True
                 self._stop.set()
-                self._cancel_download.set()
+                first_shutdown = True
                 if self._started and not self._install_handed_off:
                     self._cancel_launcher()
-                self._enqueue_locked(self._SHUTDOWN)
                 thread = self._thread
+        if first_shutdown:
+            self._detach_downloader()
+            with self._lock:
+                self._cancel_download.set()
+            self._cancel_client()
+            self._cancel_verifier()
+            self._cancel_active_downloader()
+            with self._lock:
+                self._enqueue_locked(self._SHUTDOWN)
         if thread is None or thread is threading.current_thread():
             return True
         thread.join(timeout)
@@ -283,7 +339,13 @@ class UpdateCoordinator:
             elif command == self._DOWNLOAD:
                 with self._lock:
                     self._download_queued = False
-                self._perform_download()
+                    self._cancel_download.clear()
+                    self._download_in_progress = True
+                try:
+                    self._perform_download()
+                finally:
+                    with self._lock:
+                        self._download_in_progress = False
             elif command == self._CONFIRM:
                 with self._lock:
                     self._confirm_queued = False
@@ -294,25 +356,60 @@ class UpdateCoordinator:
             return
         self._emit(UpdateEventKind.CHECKING)
         try:
-            candidate = self._client.fetch_candidate(
-                self._current_version,
-                self._target,
-            )
+            fetch = self._client.fetch_candidate
+            try:
+                accepts_cancel = "cancel" in inspect.signature(fetch).parameters
+            except (TypeError, ValueError):
+                accepts_cancel = False
+            if accepts_cancel:
+                candidate = fetch(
+                    self._current_version,
+                    self._target,
+                    cancel=self._stop,
+                )
+            else:
+                candidate = fetch(
+                    self._current_version,
+                    self._target,
+                )
         except Exception as exc:
+            if self._stop.is_set():
+                return
             logger.warning("Update discovery failed", exc_info=True)
             self._emit(UpdateEventKind.FAILED, message=str(exc))
             return
         if self._stop.is_set():
             return
         with self._lock:
-            self._candidate = candidate
-            self._ready_path = None
-            self._ready_external_url = None
-            self._install_handed_off = False
+            if candidate != self._candidate:
+                self._candidate = candidate
+                self._ready_path = None
+                self._ready_external_url = None
+                self._install_handed_off = False
+            elif candidate is None:
+                self._ready_path = None
+                self._ready_external_url = None
+                self._install_handed_off = False
+            elif self._ready_path is not None and not self._ready_path.is_file():
+                self._ready_path = None
         if candidate is None:
             self._emit(UpdateEventKind.UP_TO_DATE)
         else:
             self._emit(UpdateEventKind.UPDATE_AVAILABLE, candidate=candidate)
+            has_pending_download = getattr(
+                self._downloader, "has_pending_download", None
+            )
+            if candidate.automatic_install_allowed and callable(has_pending_download):
+                try:
+                    pending = bool(has_pending_download(candidate.package))
+                except Exception:
+                    logger.warning(
+                        "Could not inspect a pending update download",
+                        exc_info=True,
+                    )
+                    pending = False
+                if pending and not self._stop.is_set():
+                    self.request_download(candidate)
 
     def _perform_download(self) -> None:
         with self._lock:
@@ -322,6 +419,7 @@ class UpdateCoordinator:
         if candidate.manifest.schema_version == 1:
             with self._lock:
                 self._ready_external_url = candidate.manifest.release_notes_url
+            self._finish_download()
             self._emit(
                 UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
                 candidate=candidate,
@@ -341,6 +439,7 @@ class UpdateCoordinator:
                     or set(package.install_strategy) != {"kind"}
                     or candidate.manifest.release_notes_url != expected_url
                 ):
+                    self._finish_download()
                     self._emit(
                         UpdateEventKind.FAILED,
                         candidate=candidate,
@@ -349,6 +448,7 @@ class UpdateCoordinator:
                     return
                 with self._lock:
                     self._ready_external_url = expected_url
+                self._finish_download()
                 self._emit(
                     UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
                     candidate=candidate,
@@ -370,14 +470,42 @@ class UpdateCoordinator:
                 or port not in (None, 443)
                 or parsed.fragment
             ):
+                self._finish_download()
                 self._emit(UpdateEventKind.FAILED, candidate=candidate, message="missing store URL")
                 return
             with self._lock:
                 self._ready_external_url = store_url
+            self._finish_download()
             self._emit(UpdateEventKind.READY_TO_INSTALL, candidate=candidate)
             return
 
-        self._cancel_download.clear()
+        if (
+            not candidate.automatic_install_allowed
+            and candidate.manifest.schema_version == 3
+            and candidate.package.platform == "android"
+        ):
+            expected_url = (
+                "https://github.com/Chouwzi/UTHelper/releases/tag/"
+                f"v{candidate.manifest.release_version}"
+            )
+            release_url = candidate.manifest.release_notes_url
+            if release_url != expected_url:
+                self._finish_download()
+                self._emit(
+                    UpdateEventKind.FAILED,
+                    candidate=candidate,
+                    message="invalid manual release page",
+                )
+                return
+            with self._lock:
+                self._ready_external_url = release_url
+            self._finish_download()
+            self._emit(
+                UpdateEventKind.MANUAL_DOWNLOAD_REQUIRED,
+                candidate=candidate,
+            )
+            return
+
         self._emit(UpdateEventKind.DOWNLOADING, candidate=candidate, progress=0.0)
         downloaded_path: Path | None = None
         try:
@@ -392,30 +520,46 @@ class UpdateCoordinator:
             )
             if self._cancel_download.is_set() or self._stop.is_set():
                 raise DownloadCancelled("download cancelled")
+            self._emit(UpdateEventKind.VERIFYING, candidate=candidate)
             result = self._verifier.verify(downloaded_path, candidate)
             if not result.verified:
-                downloaded_path.unlink(missing_ok=True)
+                retryable = getattr(result, "retryable", False) or self._stop.is_set()
+                if not retryable:
+                    self._remove_downloaded_path(downloaded_path)
                 downloaded_path = None
-                self._emit(UpdateEventKind.FAILED, candidate=candidate, message=result.reason)
+                self._finish_download()
+                if self._stop.is_set():
+                    self._emit(UpdateEventKind.CANCELLED, candidate=candidate)
+                else:
+                    self._emit(UpdateEventKind.FAILED, candidate=candidate, message=result.reason)
                 return
             with self._lock:
                 self._ready_path = downloaded_path
+            self._finish_download()
             self._emit(UpdateEventKind.READY_TO_INSTALL, candidate=candidate, progress=1.0)
         except DownloadCancelled:
             self._remove_downloaded_path(downloaded_path)
+            self._finish_download()
             self._emit(UpdateEventKind.CANCELLED, candidate=candidate)
         except Exception as exc:
             self._remove_downloaded_path(downloaded_path)
-            if self._cancel_download.is_set():
+            self._finish_download()
+            if self._cancel_download.is_set() or self._stop.is_set():
                 self._emit(UpdateEventKind.CANCELLED, candidate=candidate)
             else:
                 logger.warning("Update download or verification failed", exc_info=True)
                 self._emit(UpdateEventKind.FAILED, candidate=candidate, message=str(exc))
 
-    @staticmethod
-    def _remove_downloaded_path(path: Path | None) -> None:
+    def _finish_download(self) -> None:
+        with self._lock:
+            self._download_in_progress = False
+
+    def _remove_downloaded_path(self, path: Path | None) -> None:
         if path is None:
             return
+        with self._lock:
+            if self._detached_downloader and self._stop.is_set():
+                return
         try:
             path.unlink(missing_ok=True)
         except OSError:
@@ -430,36 +574,146 @@ class UpdateCoordinator:
             return
         try:
             if external_url is not None:
+                self._emit(UpdateEventKind.INSTALLING, candidate=candidate)
                 acknowledged = bool(self._external_opener(external_url))
                 reason = ""
             elif path is not None:
-                verification = self._verifier.verify(path, candidate)
-                if not verification.verified:
-                    self._remove_downloaded_path(path)
-                    with self._lock:
-                        self._ready_path = None
+                skip_verify = (
+                    not path.exists()
+                    and getattr(self._launcher, "supports_cached_package_retry", False)
+                )
+                if not skip_verify:
+                    try:
+                        verification = self._verifier.verify(path, candidate)
+                    except Exception as exc:
+                        logger.warning("Update package re-verification failed", exc_info=True)
+                        self._emit(UpdateEventKind.FAILED, candidate=candidate, message=str(exc))
+                        return
+                    if not verification.verified:
+                        retryable = getattr(verification, "retryable", False) or self._stop.is_set()
+                        if not retryable:
+                            self._remove_downloaded_path(path)
+                            with self._lock:
+                                self._ready_path = None
+                        self._emit(
+                            UpdateEventKind.FAILED,
+                            candidate=candidate,
+                            message=verification.reason,
+                        )
+                        return
+                self._emit(UpdateEventKind.INSTALLING, candidate=candidate)
+                try:
+                    result = self._launcher.launch(path, candidate.package)
+                except Exception as exc:
+                    logger.warning("Update installer launch failed", exc_info=True)
                     self._emit(
-                        UpdateEventKind.FAILED,
+                        UpdateEventKind.INSTALL_FAILED,
                         candidate=candidate,
-                        message=verification.reason,
+                        message=str(exc),
                     )
                     return
-                result = self._launcher.launch(path, candidate.package)
-                acknowledged = result.acknowledged
-                reason = result.reason
+                if result.status == "permission_required":
+                    event_kind = UpdateEventKind.INSTALL_PERMISSION_REQUIRED
+                    reason = result.reason or result.status
+                elif result.acknowledged:
+                    event_kind = UpdateEventKind.INSTALL_LAUNCHED
+                    reason = result.reason or result.status
+                else:
+                    event_kind = UpdateEventKind.INSTALL_FAILED
+                    if result.status and result.status not in {"failed", "error"}:
+                        reason = result.status
+                    else:
+                        reason = result.reason or result.status
+                    invalid_staged_package = (
+                        result.reason in _NON_RETRYABLE_INSTALL_PACKAGE_ERRORS
+                        or reason in _NON_RETRYABLE_INSTALL_PACKAGE_ERRORS
+                    )
+                    unavailable_staged_package = (
+                        result.reason in _UNAVAILABLE_INSTALL_PACKAGE_ERRORS
+                        or result.status == "installer_unavailable"
+                        or reason in _UNAVAILABLE_INSTALL_PACKAGE_ERRORS
+                    )
+                    missing_uncacheable_package = (
+                        not path.exists()
+                        and not getattr(
+                            self._launcher,
+                            "supports_cached_package_retry",
+                            False,
+                        )
+                    )
+                    if invalid_staged_package:
+                        try:
+                            path.unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning(
+                                "Failed to remove invalid staged update package",
+                                exc_info=True,
+                            )
+                    if (
+                        invalid_staged_package
+                        or unavailable_staged_package
+                        or missing_uncacheable_package
+                    ):
+                        with self._lock:
+                            if self._ready_path == path:
+                                self._ready_path = None
             else:
                 return
-            if acknowledged:
+            if external_url is not None:
+                event_kind = (
+                    UpdateEventKind.INSTALL_LAUNCHED
+                    if acknowledged
+                    else UpdateEventKind.INSTALL_FAILED
+                )
+            if event_kind is UpdateEventKind.INSTALL_LAUNCHED:
                 with self._lock:
                     self._install_handed_off = True
-            self._emit(
-                UpdateEventKind.INSTALL_LAUNCHED if acknowledged else UpdateEventKind.FAILED,
-                candidate=candidate,
-                message=reason,
-            )
+            self._emit(event_kind, candidate=candidate, message=reason)
         except Exception as exc:
             logger.warning("Update installer launch failed", exc_info=True)
-            self._emit(UpdateEventKind.FAILED, candidate=candidate, message=str(exc))
+            self._emit(
+                UpdateEventKind.INSTALL_FAILED,
+                candidate=candidate,
+                message=str(exc),
+            )
+
+    def _cancel_client(self) -> None:
+        cancel = getattr(self._client, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            cancel()
+        except Exception:
+            logger.debug("Update client cancellation failed", exc_info=True)
+
+    def _cancel_verifier(self) -> None:
+        cancel = getattr(self._verifier, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            cancel()
+        except Exception:
+            logger.debug("Update verifier cancellation failed", exc_info=True)
+
+    def _cancel_active_downloader(self) -> None:
+        cancel_active = getattr(self._downloader, "cancel_active", None)
+        if not callable(cancel_active):
+            return
+        try:
+            cancel_active()
+        except Exception:
+            logger.debug("Update downloader socket cancellation failed", exc_info=True)
+
+    def _detach_downloader(self) -> None:
+        detach = getattr(self._downloader, "detach", None)
+        if not callable(detach):
+            return
+        with self._lock:
+            self._detached_downloader = True
+        try:
+            detach()
+        except Exception:
+            logger.warning("Update downloader detach failed", exc_info=True)
 
     def _cancel_launcher(self) -> None:
         try:

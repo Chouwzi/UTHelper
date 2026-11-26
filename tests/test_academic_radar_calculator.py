@@ -153,6 +153,8 @@ def test_hk2_official_fixture_scores_and_labels():
     assert profile.gpa_10 == 8.77
     assert profile.gpa_4 == 3.75
     assert profile.credits_earned == 18.0
+    assert profile.credits_registered is not None
+    assert profile.credits_registered >= profile.credits_earned
     assert profile.training_point == 83.0
     assert profile.classification == "Xuất sắc"
     assert profile.is_polygon_viable is True
@@ -331,3 +333,304 @@ def test_polygon_viability_threshold():
     profile = calculate_radar_profile(sem)
 
     assert profile.is_polygon_viable is False
+
+
+def test_current_semester_gpa_fallback_when_summary_empty_without_credit_grade():
+    """F10: empty summary computes weighted gpa_10, gpa_4 (via letter/final), and credits_earned."""
+    courses = [
+        CourseGradeItem(
+            course_id="1",
+            course_code="CS101",
+            course_name="DSA",
+            credits=4,
+            final_grade=8.5,
+            credit_grade=None,
+            letter_grade="A",
+            is_passed=True,
+        ),
+        CourseGradeItem(
+            course_id="2",
+            course_code="CS102",
+            course_name="OS",
+            credits=2,
+            final_grade=7.0,
+            credit_grade=None,
+            letter_grade="",
+            is_passed=True,
+        ),
+    ]
+    sem = SemesterGradeData(id=99, name="HK1 2026-2027", summary={}, courses=courses)
+    profile = calculate_radar_profile(sem)
+
+    # (8.5*4 + 7.0*2) / 6 = 48.0 / 6 = 8.0
+    assert profile.gpa_10 == pytest.approx(8.0)
+    # (4.0*4 + 3.0*2) / 6 = 22.0 / 6 = 3.6666...
+    assert profile.gpa_4 == pytest.approx(22.0 / 6.0)
+    assert profile.credits_earned == pytest.approx(6.0)
+    assert profile.credits_registered == pytest.approx(6.0)
+
+
+def test_current_semester_gpa_fallback_is_per_field_and_preserves_zero_summary_credits():
+    """F10: authoritative summary fields (including explicit 0) are preserved while None fields fall back."""
+    courses = [
+        CourseGradeItem(
+            course_id="1",
+            course_code="CS101",
+            course_name="DSA",
+            credits=3,
+            final_grade=9.0,
+            credit_grade=4.0,
+            letter_grade="A+",
+            is_passed=True,
+        ),
+    ]
+    sem = SemesterGradeData(
+        id=100,
+        name="HK1",
+        summary={
+            "diemTBHocLuc": 8.2,
+            "diemTBTinChi": None,
+            "stcdatHocKy": 0,
+            "soTCDat": 12,
+        },
+        courses=courses,
+    )
+    profile = calculate_radar_profile(sem)
+
+    assert profile.gpa_10 == pytest.approx(8.2)
+    assert profile.gpa_4 == pytest.approx(4.0)
+    assert profile.credits_earned == pytest.approx(0.0)
+
+
+def test_current_semester_gpa_fallback_excludes_failed_credits_and_handles_all_failed():
+    """F10: failed courses affect gpa_10/gpa_4 but contribute 0.0 to credits_earned."""
+    failed_only = SemesterGradeData(
+        id=101,
+        name="HK1",
+        summary={},
+        courses=[
+            CourseGradeItem(
+                course_id="1",
+                course_code="CS1",
+                course_name="Math",
+                credits=3,
+                final_grade=3.0,
+                credit_grade=0.0,
+                letter_grade="F",
+                is_passed=False,
+            ),
+        ],
+    )
+    failed_profile = calculate_radar_profile(failed_only)
+    assert failed_profile.gpa_10 == pytest.approx(3.0)
+    assert failed_profile.gpa_4 == pytest.approx(0.0)
+    assert failed_profile.credits_earned == pytest.approx(0.0)
+
+    mixed = SemesterGradeData(
+        id=102,
+        name="HK1",
+        summary={},
+        courses=[
+            CourseGradeItem(
+                course_id="1",
+                course_code="CS1",
+                course_name="Math",
+                credits=3,
+                final_grade=3.0,
+                credit_grade=0.0,
+                letter_grade="F",
+                is_passed=False,
+            ),
+            CourseGradeItem(
+                course_id="2",
+                course_code="CS2",
+                course_name="Algo",
+                credits=3,
+                final_grade=8.5,
+                credit_grade=4.0,
+                letter_grade="A",
+                is_passed=True,
+            ),
+        ],
+    )
+    mixed_profile = calculate_radar_profile(mixed)
+    assert mixed_profile.gpa_10 == pytest.approx(5.75)
+    assert mixed_profile.gpa_4 == pytest.approx(2.0)
+    assert mixed_profile.credits_earned == pytest.approx(3.0)
+
+
+def test_current_semester_gpa_fallback_excludes_conditional_and_transferred():
+    """F10: conditional (0 TC / GDTC) and transferred courses do not affect GPA fallback."""
+    courses = [
+        CourseGradeItem(
+            course_id="1",
+            course_code="CS1",
+            course_name="Core",
+            credits=3,
+            final_grade=8.0,
+            credit_grade=3.5,
+            is_passed=True,
+        ),
+        CourseGradeItem(
+            course_id="2",
+            course_code="GDTC1",
+            course_name="PE",
+            credits=2,
+            final_grade=4.0,
+            credit_grade=1.0,
+            eligibility=CourseEligibility(status="conditional", reason="GDTC"),
+        ),
+        CourseGradeItem(
+            course_id="3",
+            course_code="ENG1",
+            course_name="English",
+            credits=3,
+            final_grade=10.0,
+            credit_grade=4.0,
+            is_transferred=True,
+        ),
+    ]
+    sem = SemesterGradeData(id=103, name="HK1", summary={}, courses=courses)
+    profile = calculate_radar_profile(sem)
+
+    assert profile.gpa_10 == pytest.approx(8.0)
+    assert profile.gpa_4 == pytest.approx(3.5)
+    assert profile.credits_earned == pytest.approx(3.0)
+
+
+def test_current_semester_gpa_fallback_preserves_none_when_no_eligible_course_graded():
+    """F10: in-progress semester with no final grades keeps GPA KPIs as None."""
+    courses = [
+        CourseGradeItem("1", "C1", "Course 1", 3, process_grade=8.0, exam_grade=None, final_grade=None),
+        CourseGradeItem(
+            "2",
+            "TT04",
+            "English 0 TC",
+            0,
+            final_grade=9.0,
+            eligibility=CourseEligibility(status="conditional"),
+        ),
+    ]
+    sem = SemesterGradeData(id=104, name="In-progress", summary={}, courses=courses)
+    profile = calculate_radar_profile(sem)
+
+    assert profile.gpa_10 is None
+    assert profile.gpa_4 is None
+    assert profile.credits_earned is None
+
+
+def test_calculate_radar_profile_handles_none_summary_and_nonfinite_or_comma_gpa():
+    """F10: summary=None never crashes, and nan/inf/bool/comma-decimals match _optional_float."""
+    courses = [
+        CourseGradeItem(
+            course_id="1",
+            course_code="CS1",
+            course_name="Algo",
+            credits=3,
+            final_grade=8.0,
+            is_passed=True,
+        ),
+    ]
+
+    none_sem = SemesterGradeData(id=105, name="HK1", summary=None, courses=courses)  # type: ignore[arg-type]
+    none_profile = calculate_radar_profile(none_sem)
+    assert none_profile.gpa_10 == pytest.approx(8.0)
+    assert none_profile.gpa_4 == pytest.approx(3.5)
+    assert none_profile.credits_earned == pytest.approx(3.0)
+    assert none_profile.metrics["total_power"].score == pytest.approx(80.0)
+
+    tp_score, tp_cov = calculate_total_power(None, courses)
+    assert tp_score == pytest.approx(80.0)
+    assert tp_cov == pytest.approx(1.0)
+
+    for bad_val in (float("nan"), float("inf"), True, False):
+        bad_sem = SemesterGradeData(
+            id=106,
+            name="HK1",
+            summary={
+                "diemTBHocLuc": bad_val,
+                "diemTBTinChi": bad_val,
+                "stcdatHocKy": bad_val,
+            },
+            courses=courses,
+        )
+        bad_profile = calculate_radar_profile(bad_sem)
+        assert bad_profile.gpa_10 == pytest.approx(8.0)
+        assert bad_profile.metrics["total_power"].score == pytest.approx(80.0)
+        assert bad_profile.gpa_4 == pytest.approx(3.5)
+        assert bad_profile.credits_earned == pytest.approx(3.0)
+
+    comma_sem = SemesterGradeData(
+        id=107,
+        name="HK1",
+        summary={
+            "diemTBHocLuc": "7,5",
+            "diemTBTinChi": "3,25",
+            "stcdatHocKy": "3",
+        },
+        courses=courses,
+    )
+    comma_profile = calculate_radar_profile(comma_sem)
+    assert comma_profile.gpa_10 == pytest.approx(7.5)
+    assert comma_profile.metrics["total_power"].score == pytest.approx(75.0)
+    assert comma_profile.metrics["total_power"].coverage == pytest.approx(1.0)
+    assert comma_profile.gpa_4 == pytest.approx(3.25)
+    assert comma_profile.credits_earned == pytest.approx(3.0)
+
+
+def test_eligibility_resolver_checks_mahocphan_behind_section_code_and_truthy_transferred():
+    from core.academic_radar.eligibility_resolver import CourseEligibilityResolver
+
+    resolver = CourseEligibilityResolver()
+    gdtc = resolver.resolve(
+        {"maLopHocPhan": "0101GDTC101", "maHocPhan": "GDTC1", "soTinChi": 2}
+    )
+    assert gdtc.status == "conditional"
+
+    english = resolver.resolve(
+        {"maLopHocPhan": "202601TT0105", "maHocPhan": "TT01", "soTinChi": 3}
+    )
+    assert english.status == "conditional"
+
+    transferred_int = resolver.resolve(
+        {"maHocPhan": "CS201", "soTinChi": 3, "isChuyenDiem": 1}
+    )
+    transferred_str = resolver.resolve(
+        {"maHocPhan": "CS202", "soTinChi": 3, "isChuyenDiem": "true"}
+    )
+    assert transferred_int.status == "transferred"
+    assert transferred_str.status == "transferred"
+
+
+def test_total_power_excludes_transferred_and_parse_credit_progress_rejects_nan_inf_bool():
+    from core.academic_radar.gpa_planner import (
+        CreditProgress,
+        calculate_gpa_target,
+        calculate_graduation_target,
+        parse_credit_progress,
+    )
+
+    courses = [
+        CourseGradeItem("1", "CS1", "Core", 3.0, final_grade=7.0, is_transferred=False),
+        CourseGradeItem("2", "TR1", "Transfer", 3.0, final_grade=10.0, is_transferred=True),
+    ]
+    tp_score, tp_cov = calculate_total_power({}, courses)
+    assert tp_score == pytest.approx(70.0)
+    assert tp_cov == pytest.approx(1.0)
+
+    for bad_body in (
+        {"canDat": "nan", "hienTai": 60},
+        {"canDat": float("inf"), "hienTai": 60},
+        {"canDat": 120, "hienTai": float("nan")},
+        {"canDat": True, "hienTai": False},
+    ):
+        assert parse_credit_progress(bad_body) is None
+
+    valid_prog = parse_credit_progress({"canDat": "120,5", "hienTai": "60"})
+    assert valid_prog == CreditProgress(required_credits=120.5, earned_credits=60.0)
+
+    sem = SemesterGradeData(id=1, name="HK1", summary={"diemTBTinChiTichLuy": 3.2}, courses=courses)
+    assert calculate_gpa_target(sem, float("nan")).status == "invalid"
+    assert calculate_graduation_target([sem], valid_prog, float("nan")).status == "invalid"
+    bad_prog = CreditProgress(required_credits=float("nan"), earned_credits=60.0)
+    assert calculate_graduation_target([sem], bad_prog, 3.5).status == "no_progress"

@@ -5,6 +5,7 @@ buildscript {
     ext.kotlin_version = '2.1.10'
     repositories {
         google()
+        maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
         mavenCentral()
     }
     dependencies {
@@ -17,13 +18,48 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 apply plugin: 'kotlin-kapt'
 
+def uthDistributionChannel = (
+    project.findProperty('uthDistributionChannel')
+        ?: System.getenv('UTH_DISTRIBUTION_CHANNEL')
+        ?: 'apk_lts'
+).toString().trim().toLowerCase()
+def isChplayChannel = (uthDistributionChannel == 'chplay')
+
 android {
     namespace 'com.uthelper.backgroundsync'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         minSdk 23
         consumerProguardFiles 'consumer-rules.pro'
+    }
+
+    sourceSets {
+        main {
+            if (isChplayChannel) {
+                manifest.srcFile 'variants/chplay/AndroidManifest.xml'
+                kotlin.srcDirs = ['src/main/kotlin', 'variants/chplay/kotlin']
+                res.srcDirs = ['src/main/res']
+            } else {
+                kotlin.srcDirs = ['src/main/kotlin', 'variants/apk_lts/kotlin']
+                res.srcDirs = ['src/main/res', 'variants/apk_lts/res']
+            }
+        }
+        test {
+            if (isChplayChannel) {
+                kotlin.srcDirs = ['src/test/kotlin']
+            } else {
+                kotlin.srcDirs = ['src/test/kotlin', 'variants/apk_lts/test/kotlin']
+            }
+        }
+    }
+
+    if (isChplayChannel) {
+        packaging {
+            jniLibs {
+                useLegacyPackaging = false
+            }
+        }
     }
 
     compileOptions {
@@ -32,6 +68,22 @@ android {
     }
     kotlinOptions {
         jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
+}
+
+tasks.configureEach {
+    inputs.property('uthDistributionChannel', uthDistributionChannel)
+}
+
+tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+    systemProperty 'robolectric.dependency.repo.url', 'https://maven-central.storage-download.googleapis.com/maven2'
+    testLogging {
+        events "failed"
+        exceptionFormat "full"
     }
 }
 
@@ -45,4 +97,5 @@ dependencies {
     implementation 'androidx.room:room-ktx:2.8.4'
     kapt 'androidx.room:room-compiler:2.8.4'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
 }

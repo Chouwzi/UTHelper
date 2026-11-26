@@ -1,0 +1,4 @@
+# Keep pinned offline viewer bytes reproducible across Windows/Linux checkouts.
+src/assets/office_viewer/** text eol=lf
+src/assets/pdf_viewer/** text eol=lf
+tools/office-viewer/** text eol=lf

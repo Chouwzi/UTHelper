@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+import logging
+from typing import Any, Callable, Optional
 import flet as ft
 
 from core.academic_radar.models import RadarMetric, RadarProfile
 from gui.components.academic_radar.metric_detail_sheet import MetricDetailSheet
 from gui.components.academic_radar.radar_chart import AcademicRadarChart
 from gui.core.theme import C
+
+logger = logging.getLogger(__name__)
 
 
 class AcademicRadarCard(ft.Container):
@@ -18,6 +21,10 @@ class AcademicRadarCard(ft.Container):
         selected_index: int = 0,
         on_semester_change: Optional[Callable[[int], None]] = None,
         page: Optional[ft.Page] = None,
+        on_before_dialog: Optional[Callable[[], Any]] = None,
+        on_dialog_dismiss: Optional[Callable[[Any], None]] = None,
+        on_dialog_opened: Optional[Callable[[Any, Callable[[], None]], None]] = None,
+        on_dialog_closing: Optional[Callable[[Any], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -25,7 +32,13 @@ class AcademicRadarCard(ft.Container):
         self.selected_index = selected_index
         self.on_semester_change = on_semester_change
         self._page_ref = page
+        self._on_before_dialog = on_before_dialog
+        self._on_dialog_dismiss = on_dialog_dismiss
+        self._on_dialog_opened = on_dialog_opened
+        self._on_dialog_closing = on_dialog_closing
         self._is_comparing = False
+        self._viewport_width: float = 0.0
+        self._chart_width_used: float = 0.0
 
         self.bgcolor = C.SURFACE
         self.border_radius = 16
@@ -41,6 +54,34 @@ class AcademicRadarCard(ft.Container):
             return self.page
         except Exception:
             return None
+
+    def _resolve_page_width(self) -> float:
+        if self._viewport_width > 0:
+            return self._viewport_width
+        page = self._get_page()
+        try:
+            return float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def set_viewport_width(self, width: float) -> None:
+        try:
+            numeric = float(width or 0)
+        except (TypeError, ValueError):
+            numeric = 0.0
+        if numeric <= 0:
+            return
+        self._viewport_width = numeric
+        if self.current_profile is None:
+            return
+        new_chart_w = max(220.0, min(340.0, numeric - 68.0))
+        if abs(new_chart_w - self._chart_width_used) < 2.0:
+            return
+        self._build_ui()
+        try:
+            self.update()
+        except Exception:
+            pass
 
     @property
     def current_profile(self) -> Optional[RadarProfile]:
@@ -64,6 +105,18 @@ class AcademicRadarCard(ft.Container):
         except Exception:
             pass
 
+    def update_theme(self, *, update: bool = True) -> None:
+        """Refresh the card surface and all generated controls for the active theme."""
+        self.bgcolor = C.SURFACE
+        self.border = ft.Border.all(1, C.BORDER)
+        self._build_ui()
+        if not update:
+            return
+        try:
+            self.update()
+        except Exception:
+            pass
+
     def _toggle_compare(self, e: ft.ControlEvent | None) -> None:
         self._is_comparing = not self._is_comparing
         self._compare_btn.icon = ft.Icons.CHECK_CIRCLE_ROUNDED if self._is_comparing else ft.Icons.RADIO_BUTTON_UNCHECKED
@@ -82,21 +135,177 @@ class AcademicRadarCard(ft.Container):
     def _on_metric_click(self, metric: RadarMetric) -> None:
         p = self._get_page()
         if p is not None:
-            MetricDetailSheet.show(p, metric)
+            token = self._on_before_dialog() if callable(self._on_before_dialog) else None
+            closer = MetricDetailSheet.show(
+                p,
+                metric,
+                on_dismiss=(
+                    (lambda t=token: self._on_dialog_dismiss(t))
+                    if callable(self._on_dialog_dismiss)
+                    else None
+                ),
+                on_closing=(
+                    (lambda t=token: self._on_dialog_closing(t))
+                    if callable(self._on_dialog_closing)
+                    else None
+                ),
+            )
+            if closer is not None and callable(self._on_dialog_opened):
+                self._on_dialog_opened(token, closer)
+
+    def _show_radar_info(self, _event=None) -> None:
+        page = self._get_page()
+        if page is None:
+            return
+        try:
+            page_w = float(getattr(page, "width", 0) or 0)
+        except (TypeError, ValueError):
+            page_w = 0.0
+        is_narrow = 0 < page_w < 600
+        dialog_w = max(240.0, min(400.0, page_w - 64.0)) if page_w > 0 else 360.0
+        items = [
+            ("Tổng Lực", "Điểm trung bình có trọng số tín chỉ trong học kỳ."),
+            ("Nền Tảng", "Đánh giá điểm quá trình / chuyên cần."),
+            ("Bứt Phá", "Tỷ lệ môn đạt mức giỏi - xuất sắc."),
+            ("Giữ Nhịp", "Độ ổn định giữa điểm quá trình và điểm thi."),
+            ("Về Đích", "Tỷ lệ hoàn thành và qua môn trong kỳ."),
+            ("Trụ Vững", "Điểm của các môn nặng tín chỉ nhất."),
+        ]
+        token = self._on_before_dialog() if callable(self._on_before_dialog) else None
+        used_overlay = False
+        is_real_page = isinstance(page, ft.Page)
+
+        def _notify_dismiss(_event=None) -> None:
+            if callable(self._on_dialog_dismiss):
+                try:
+                    self._on_dialog_dismiss(token)
+                except Exception:
+                    logger.debug("Radar info on_dialog_dismiss failed", exc_info=True)
+
+        def _close_dialog(p: ft.Page, d: ft.AlertDialog) -> None:
+            if callable(self._on_dialog_closing):
+                try:
+                    self._on_dialog_closing(token)
+                except Exception:
+                    logger.debug("Radar info on_dialog_closing failed", exc_info=True)
+            if not used_overlay:
+                try:
+                    p.pop_dialog()
+                    if not is_real_page:
+                        _notify_dismiss()
+                    return
+                except Exception:
+                    pass
+            d.open = False
+            try:
+                d.update()
+            except Exception:
+                try:
+                    p.update()
+                except Exception:
+                    pass
+            _notify_dismiss()
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                _close_dialog(page, dialog)
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            semantics_label="Giải thích 6 chỉ số Radar học tập",
+            title=ft.Text(
+                "6 chỉ số Radar học tập",
+                size=16,
+                weight=ft.FontWeight.W_700,
+                color=C.TEXT_PRIMARY,
+                semantics_label="6 chỉ số Radar học tập",
+            ),
+            content=ft.KeyboardListener(
+                autofocus=False,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    width=dialog_w,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text(
+                                f"• {name}: {desc}",
+                                size=12.5,
+                                color=C.TEXT_PRIMARY,
+                            )
+                            for name, desc in items
+                        ],
+                        spacing=8,
+                        tight=True,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    "Đóng",
+                    height=44,
+                    on_click=lambda _: _close_dialog(page, dialog),
+                )
+            ],
+            on_dismiss=_notify_dismiss,
+            inset_padding=ft.Padding.symmetric(horizontal=16 if is_narrow else 40, vertical=24),
+            title_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=16, bottom=4),
+            content_padding=ft.Padding.only(left=16 if is_narrow else 24, right=16 if is_narrow else 24, top=12, bottom=8),
+            actions_padding=ft.Padding.only(left=16, right=16, top=0, bottom=8),
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+        try:
+            page.show_dialog(dialog)
+        except Exception:
+            used_overlay = True
+            overlay = getattr(page, "overlay", None)
+            if overlay is not None:
+                overlay.append(dialog)
+                dialog.open = True
+                try:
+                    page.update()
+                except Exception:
+                    pass
+        if callable(self._on_dialog_opened):
+            self._on_dialog_opened(token, lambda: _close_dialog(page, dialog))
 
     def _build_ui(self) -> None:
+        # Data-driven rebuilds can happen after a theme preview while this view
+        # is detached. Reapply the root surface as well as child control colors.
+        self.bgcolor = C.SURFACE
+        self.border = ft.Border.all(1, C.BORDER)
         profile = self.current_profile
         if not profile:
             self.content = ft.Text("Chưa có dữ liệu học kỳ", size=14, color=C.TEXT_SECONDARY)
             return
 
+        page_w = self._resolve_page_width()
+        is_narrow = 0 < page_w < 430
+
         # 1. Header: Title & Semester Selector
+        info_btn = ft.Semantics(
+            label="Giải thích 6 chỉ số Radar học tập",
+            button=True,
+            content=ft.IconButton(
+                icon=ft.Icons.INFO_OUTLINE_ROUNDED,
+                icon_size=18,
+                icon_color=C.TEXT_SECONDARY,
+                tooltip="Giải thích 6 chỉ số Radar học tập",
+                padding=0,
+                size_constraints=ft.BoxConstraints(
+                    min_width=36, max_width=36, min_height=44, max_height=44
+                ),
+                on_click=self._show_radar_info,
+            ),
+        )
         title = ft.Row(
             controls=[
-                ft.Text("Hồ sơ học tập", size=16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
-                ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, size=16, color=C.TEXT_SECONDARY),
+                ft.Text("Hồ sơ học tập", size=15 if is_narrow else 16, weight=ft.FontWeight.W_700, color=C.TEXT_PRIMARY),
+                info_btn,
             ],
-            spacing=6,
+            spacing=2,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         semester_options = [
@@ -120,12 +329,14 @@ class AcademicRadarCard(ft.Container):
             value=str(self.selected_index),
             on_select=_handle_dropdown,
             height=38,
-            text_size=12,
+            text_size=11.5 if is_narrow else 12,
             bgcolor=C.BG,
             border_color=C.BORDER,
             border_radius=8,
             dense=True,
-            content_padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+            enable_search=False,
+            expanded_insets=ft.Padding.zero(),
+            content_padding=ft.Padding.only(left=10, right=4, top=0, bottom=0),
             expand=True,
         )
 
@@ -135,6 +346,10 @@ class AcademicRadarCard(ft.Container):
             content="Đang so sánh" if self._is_comparing else "So sánh kỳ trước",
             icon=ft.Icons.CHECK_CIRCLE_ROUNDED if self._is_comparing else ft.Icons.RADIO_BUTTON_UNCHECKED,
             icon_color=C.ACCENT if self._is_comparing else C.TEXT_SECONDARY,
+            style=ft.ButtonStyle(
+                padding=ft.Padding.symmetric(horizontal=6, vertical=0),
+                text_style=ft.TextStyle(size=12 if is_narrow else 13),
+            ),
             on_click=self._toggle_compare,
             visible=has_previous,
         )
@@ -145,14 +360,21 @@ class AcademicRadarCard(ft.Container):
                 self._compare_btn,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4,
+            wrap=True,
+            run_spacing=2,
         )
 
-        # 2. Radar Chart
+        # 2. Radar Chart (scale cleanly on 360-390px mobile viewports)
+        chart_width = max(220.0, min(340.0, page_w - 68.0)) if page_w > 0 else 340.0
+        self._chart_width_used = chart_width
         self._radar_chart = AcademicRadarChart(
             profile=profile,
             previous_profile=self.previous_profile,
             is_comparing=self._is_comparing,
             on_metric_tap=self._on_metric_click,
+            width=chart_width,
             alignment=ft.Alignment(0, 0),
         )
 
@@ -239,7 +461,7 @@ class AcademicRadarCard(ft.Container):
         self.content = ft.Column(
             controls=[
                 header_row,
-                self._sem_dropdown,
+                ft.Row(controls=[self._sem_dropdown]),
                 self._radar_chart,
                 summary_box,
                 insight_pill,

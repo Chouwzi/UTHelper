@@ -1,15 +1,19 @@
 import asyncio
+import hashlib
 import inspect
 import logging
 import os
 import threading
 from datetime import datetime, timedelta
-from typing import List, Any, Dict
+from pathlib import Path
+from typing import List, Any, Dict, Optional
 
 from core.notification_policy import (
     ActivityNotificationPolicy,
     NotificationPolicyConfig,
 )
+from core.class_schedule_notifications import build_class_schedule_reminders
+from core.today_schedule import ScheduleAuthenticationError
 from core.notification_types import (
     ActivityNotification,
     DispatchResult,
@@ -17,8 +21,6 @@ from core.notification_types import (
     ScheduleResult,
 )
 from .base import BaseNotifier
-from notifiers.discord import DiscordNotifier
-from notifiers.email import EmailNotifier
 from config import settings as config
 
 logger = logging.getLogger(__name__)
@@ -26,20 +28,50 @@ logger = logging.getLogger(__name__)
 # Stale cache entries older than this are evicted
 _CACHE_TTL_DAYS = 90
 
+
+def _notif_namespace_digest(namespace: str) -> str:
+    return hashlib.sha256(namespace.strip().casefold().encode("utf-8")).hexdigest()[:12]
+
+
 class NotificationManager:
     """
     Bộ não quản lý thông báo: Xử lý vụ ngủ (DND), 
     các mốc quan trọng (Milestones) và ẩn mấy môn học không quan tâm.
     """
-    def __init__(self, tray_app=None, cache_file="notifications_cache.json"):
+    def __init__(
+        self,
+        tray_app=None,
+        cache_file="notifications_cache.json",
+        namespace: Optional[str] = None,
+    ):
         self.notifiers: List[BaseNotifier] = []
         # Store cache in AppData alongside settings.json
         from config import _USER_DATA_DIR
-        self._cache_path = str(_USER_DATA_DIR / cache_file)
-        self._cache_lock = threading.Lock()
+        self._base_dir = Path(_USER_DATA_DIR)
+        self._explicit_cache_file = cache_file != "notifications_cache.json"
+        resolved_ns = (
+            namespace
+            if namespace is not None
+            else (str(getattr(config, "UTH_USERNAME", "") or "").strip() or "__logged_out__")
+        )
+        if self._explicit_cache_file:
+            cache_candidate = Path(cache_file)
+            if not cache_candidate.is_absolute():
+                cache_candidate = self._base_dir / cache_candidate
+            self._cache_path = str(cache_candidate)
+            self._base_dir = cache_candidate.parent
+        else:
+            digest = _notif_namespace_digest(resolved_ns)
+            self._cache_path = str(self._base_dir / f"notifications_cache_{digest}.json")
+        self._cache_lock = threading.RLock()
+        self._namespace_generation: int = 0
+        self._dispatch_lock_state: tuple[Any, asyncio.Lock] | None = None
 
         from core.notification_history import NotificationHistory
-        self._history = NotificationHistory()
+        self._history = NotificationHistory(
+            history_dir=self._base_dir if self._explicit_cache_file else None,
+            namespace=None if self._explicit_cache_file and namespace is None else resolved_ns,
+        )
         self._diagnostics = NotificationDiagnostics()
 
         # Platform-aware notifier registration
@@ -61,6 +93,7 @@ class NotificationManager:
         # Auto-register integration channels when credentials are configured
         if getattr(config, 'DISCORD_WEBHOOK_URL', ''):
             try:
+                from notifiers.discord import DiscordNotifier
                 self.register(DiscordNotifier())
                 logger.info("Discord notifier registered")
             except Exception as exc:
@@ -76,10 +109,110 @@ class NotificationManager:
 
         if getattr(config, 'GMAIL_ADDRESS', '') and getattr(config, 'GMAIL_APP_PASSWORD', ''):
             try:
+                from notifiers.email import EmailNotifier
                 self.register(EmailNotifier())
                 logger.info("Email notifier registered")
             except Exception as exc:
                 logger.warning("Email notifier failed: %r", exc)
+
+    def _get_dispatch_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        cached = getattr(self, "_dispatch_lock_state", None)
+        if cached is None or cached[0] is not loop:
+            lock = asyncio.Lock()
+            self._dispatch_lock_state = (loop, lock)
+            return lock
+        return cached[1]
+
+    def _get_cache_lock(self) -> threading.RLock:
+        lock = getattr(self, "_cache_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._cache_lock = lock
+        return lock
+
+    def _current_namespace_generation(self) -> int:
+        with self._get_cache_lock():
+            return int(getattr(self, "_namespace_generation", 0))
+
+    def _record_history_if_current(
+        self,
+        items: List[Any],
+        channels: List[str],
+        expected_generation: Optional[int],
+    ) -> None:
+        with self._get_cache_lock():
+            if (
+                expected_generation is not None
+                and int(getattr(self, "_namespace_generation", 0)) != expected_generation
+            ):
+                return
+            history = getattr(self, "_history", None)
+            if history is not None:
+                history.add(items, channels)
+
+    def set_namespace(self, namespace: Optional[str]) -> None:
+        """Switch notification delivery cache and history to another account namespace."""
+        norm = str(namespace or "").strip() or "__logged_out__"
+        digest = _notif_namespace_digest(norm)
+        with self._get_cache_lock():
+            base_dir = getattr(self, "_base_dir", None)
+            if base_dir is None:
+                current_path = getattr(self, "_cache_path", "")
+                if current_path:
+                    base_dir = Path(current_path).parent
+                else:
+                    from config import _USER_DATA_DIR
+
+                    base_dir = Path(_USER_DATA_DIR)
+                self._base_dir = base_dir
+            self._namespace_generation = int(getattr(self, "_namespace_generation", 0)) + 1
+            self._cache_path = str(Path(base_dir) / f"notifications_cache_{digest}.json")
+            history = getattr(self, "_history", None)
+            if history is not None and hasattr(history, "set_namespace"):
+                history.set_namespace(norm)
+
+    def clear_account_state(self) -> None:
+        """Clear armed schedules/receipts on logout or account switch and detach namespace."""
+        for notifier in list(getattr(self, "notifiers", []) or []):
+            reconcile = getattr(notifier, "reconcile_schedules", None)
+            if callable(reconcile):
+                try:
+                    res = reconcile([])
+                    if inspect.isawaitable(res):
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(res)
+                        except RuntimeError:
+                            if hasattr(res, "close"):
+                                res.close()
+                except Exception as exc:
+                    logger.warning("Cannot clear scheduled reminders on %s: %s", notifier, exc)
+            reconcile_class = getattr(notifier, "reconcile_class_schedule_reminders", None)
+            if callable(reconcile_class):
+                try:
+                    reconcile_class([])
+                except Exception as exc:
+                    logger.warning("Cannot clear class reminders on %s: %s", notifier, exc)
+            consume = getattr(notifier, "consume_delivery_receipts", None)
+            if callable(consume):
+                try:
+                    discarded = consume()
+                    if inspect.isawaitable(discarded) and hasattr(discarded, "close"):
+                        discarded.close()
+                except Exception:
+                    pass
+        self.set_namespace("__logged_out__")
+
+    def close(self) -> None:
+        """Orderly shutdown of background scheduler resources owned by registered notifiers."""
+        for notifier in list(getattr(self, "notifiers", []) or []):
+            closer = getattr(notifier, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception as exc:
+                    logger.debug("Ignoring notifier close error: %s", exc)
         
     def register(self, notifier: BaseNotifier):
         self.notifiers.append(notifier)
@@ -217,85 +350,109 @@ class NotificationManager:
         excluded_channels: set[str] | None = None,
     ) -> DispatchResult:
         """Dispatch due activity reminders without blocking the Flet event loop."""
-        result = DispatchResult()
-        diagnostics = self._diagnostics_state()
-        diagnostics.last_fetch_at = datetime.now().isoformat()
-        diagnostics.activities_seen = len(assignments)
+        start_gen = self._current_namespace_generation()
+        async with self._get_dispatch_lock():
+            result = DispatchResult()
+            if self._current_namespace_generation() != start_gen:
+                return result
+            diagnostics = self._diagnostics_state()
+            diagnostics.last_fetch_at = datetime.now().isoformat()
+            diagnostics.activities_seen = len(assignments)
 
-        if self._is_in_dnd():
-            logger.info("Do Not Disturb is on. Skipping notifications.")
-            result.dnd_active = True
-            result.filtered = len(assignments)
-            diagnostics.skipped += len(assignments)
+            if self._is_in_dnd():
+                logger.info("Do Not Disturb is on. Skipping notifications.")
+                result.dnd_active = True
+                result.filtered = len(assignments)
+                diagnostics.skipped += len(assignments)
+                return result
+
+            # BUG-09 fix: Load cache once for the entire dispatch cycle off the event loop
+            cache = await asyncio.to_thread(self._load_cache)
+            if self._current_namespace_generation() != start_gen:
+                return result
+            await self._merge_native_receipts(cache, expected_generation=start_gen)
+            if self._current_namespace_generation() != start_gen:
+                return result
+
+            # A delivery receipt belongs to one channel. A successful desktop
+            # toast must not suppress retrying a failed Telegram/email delivery.
+            channel_items: list[tuple[Any, str, str, list[Dict]]] = []
+            matched_keys: set[tuple[str, int | str]] = set()
+            excluded = {value.strip().lower() for value in (excluded_channels or set())}
+            for notifier in self.notifiers:
+                channel = notifier.__class__.__name__
+                channel_key = self._channel_cache_key(notifier)
+                if channel_key in excluded:
+                    continue
+                items = self._filter_assignments(assignments, cache, channel=channel_key)
+                channel_items.append((notifier, channel, channel_key, items))
+                matched_keys.update((item["url"], item["milestone"]) for item in items)
+
+            result.filtered = len(assignments) - len({key for key, _ in matched_keys})
+            diagnostics.activities_matched = len(matched_keys)
+            diagnostics.skipped += result.filtered
+
+            if not matched_keys:
+                return result
+
+            result.attempted = len(matched_keys)
+            delivered_keys: set[tuple[str, int | str]] = set()
+            delivered_milestones: set[int | str] = set()
+            for notifier, channel, channel_key, to_notify_items in channel_items:
+                if not to_notify_items:
+                    continue
+                if self._current_namespace_generation() != start_gen:
+                    return result
+                notify_assignments = [item["assignment"] for item in to_notify_items]
+                try:
+                    if inspect.iscoroutinefunction(notifier.notify):
+                        channel_result = await notifier.notify(notify_assignments)
+                    else:
+                        channel_result = await asyncio.to_thread(
+                            notifier.notify, notify_assignments
+                        )
+                        if inspect.isawaitable(channel_result):
+                            channel_result = await channel_result
+                    if self._current_namespace_generation() != start_gen:
+                        logger.info(
+                            "Discarding stale notification post-delivery persistence: account changed"
+                        )
+                        return result
+                    if channel_result is True:
+                        result.successful_channels.append(channel)
+                        await asyncio.to_thread(
+                            self._mark_assignments_notified,
+                            to_notify_items,
+                            cache,
+                            channel=channel_key,
+                            expected_generation=start_gen,
+                        )
+                        await asyncio.to_thread(
+                            self._record_history_if_current,
+                            notify_assignments,
+                            [channel],
+                            start_gen,
+                        )
+                        delivered_keys.update(
+                            (item["url"], item["milestone"]) for item in to_notify_items
+                        )
+                        delivered_milestones.update(
+                            item["milestone"] for item in to_notify_items
+                        )
+                    else:
+                        result.failed_channels[channel] = "backend did not confirm delivery"
+                except Exception as exc:
+                    result.failed_channels[channel] = str(exc)
+                    diagnostics.last_error = f"{channel}: {exc}"
+                    logger.error("Failed via channel %s: %s", channel, exc)
+
+            if delivered_keys:
+                result.delivered = len(delivered_keys)
+                result.milestones = list(delivered_milestones)
+                diagnostics.delivered += result.delivered
+            else:
+                logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
             return result
-
-        # BUG-09 fix: Load cache once for the entire dispatch cycle
-        cache = self._load_cache()
-        await self._merge_native_receipts(cache)
-
-        # A delivery receipt belongs to one channel. A successful desktop
-        # toast must not suppress retrying a failed Telegram/email delivery.
-        channel_items: list[tuple[Any, str, str, list[Dict]]] = []
-        matched_keys: set[tuple[str, int | str]] = set()
-        excluded = {value.strip().lower() for value in (excluded_channels or set())}
-        for notifier in self.notifiers:
-            channel = notifier.__class__.__name__
-            channel_key = self._channel_cache_key(notifier)
-            if channel_key in excluded:
-                continue
-            items = self._filter_assignments(assignments, cache, channel=channel_key)
-            channel_items.append((notifier, channel, channel_key, items))
-            matched_keys.update((item["url"], item["milestone"]) for item in items)
-
-        result.filtered = len(assignments) - len({key for key, _ in matched_keys})
-        diagnostics.activities_matched = len(matched_keys)
-        diagnostics.skipped += result.filtered
-
-        if not matched_keys:
-            return result
-
-        result.attempted = len(matched_keys)
-        delivered_keys: set[tuple[str, int | str]] = set()
-        delivered_milestones: set[int | str] = set()
-        for notifier, channel, channel_key, to_notify_items in channel_items:
-            if not to_notify_items:
-                continue
-            notify_assignments = [item["assignment"] for item in to_notify_items]
-            try:
-                if inspect.iscoroutinefunction(notifier.notify):
-                    channel_result = await notifier.notify(notify_assignments)
-                else:
-                    channel_result = await asyncio.to_thread(
-                        notifier.notify, notify_assignments
-                    )
-                    if inspect.isawaitable(channel_result):
-                        channel_result = await channel_result
-                if channel_result is True:
-                    result.successful_channels.append(channel)
-                    self._mark_assignments_notified(
-                        to_notify_items, cache, channel=channel_key
-                    )
-                    self._history.add(notify_assignments, [channel])
-                    delivered_keys.update(
-                        (item["url"], item["milestone"]) for item in to_notify_items
-                    )
-                    delivered_milestones.update(
-                        item["milestone"] for item in to_notify_items
-                    )
-                else:
-                    result.failed_channels[channel] = "backend did not confirm delivery"
-            except Exception as exc:
-                result.failed_channels[channel] = str(exc)
-                diagnostics.last_error = f"{channel}: {exc}"
-                logger.error("Failed via channel %s: %s", channel, exc)
-
-        if delivered_keys:
-            result.delivered = len(delivered_keys)
-            result.milestones = list(delivered_milestones)
-            diagnostics.delivered += result.delivered
-        else:
-            logger.warning("Tất cả notification channels đều thất bại! Sẽ thử lại lần sau.")
-        return result
 
     async def dispatch_with_native_local(
         self,
@@ -311,7 +468,12 @@ class NotificationManager:
         result.attempted = max(result.attempted, len(assignments))
         return result
 
-    async def _merge_native_receipts(self, cache: Dict) -> None:
+    async def _merge_native_receipts(
+        self,
+        cache: Dict,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> None:
         """Merge receipts emitted while the foreground process was sleeping."""
         pending_receipts = []
         for notifier in self.notifiers:
@@ -333,43 +495,56 @@ class NotificationManager:
         if not pending_receipts:
             return
 
-        from core.safe_file_io import SafeFileIO
-        from pathlib import Path
-        with SafeFileIO.transaction(Path(self._cache_path)):
-            disk_cache = self._load_cache()
-            changed = False
-            for receipt in pending_receipts:
-                activity_key = str(receipt.get("activity_key", ""))
-                milestone = receipt.get("milestone")
-                if not activity_key or milestone is None:
-                    continue
-                entry = disk_cache.setdefault(
-                    activity_key,
-                    {"milestones": [], "updated_at": datetime.now().isoformat()},
-                )
-                revision = str(receipt.get("deadline_revision", ""))
-                if entry.get("deadline_revision") not in (None, "", revision):
-                    entry["milestones"] = []
-                    entry["channels"] = {}
-                entry["deadline_revision"] = revision
-                channel = str(receipt.get("channel", "") or "native").lower()
-                delivered = entry.setdefault("channels", {}).setdefault(channel, [])
-                if milestone not in delivered:
-                    delivered.append(milestone)
-                entry["updated_at"] = datetime.now().isoformat()
-                changed = True
+        def _persist_receipts() -> None:
+            from core.safe_file_io import SafeFileIO
 
-            if changed:
-                self._save_cache(disk_cache)
-                cache.update(disk_cache)
+            with self._get_cache_lock():
+                if (
+                    expected_generation is not None
+                    and int(getattr(self, "_namespace_generation", 0))
+                    != expected_generation
+                ):
+                    return
+                with SafeFileIO.transaction(Path(self._cache_path)):
+                    disk_cache = self._load_cache()
+                    changed = False
+                    for receipt in pending_receipts:
+                        activity_key = str(receipt.get("activity_key", ""))
+                        milestone = receipt.get("milestone")
+                        if not activity_key or milestone is None:
+                            continue
+                        entry = disk_cache.setdefault(
+                            activity_key,
+                            {"milestones": [], "updated_at": datetime.now().isoformat()},
+                        )
+                        revision = str(receipt.get("deadline_revision", ""))
+                        if entry.get("deadline_revision") not in (None, "", revision):
+                            entry["milestones"] = []
+                            entry["channels"] = {}
+                        entry["deadline_revision"] = revision
+                        channel = str(receipt.get("channel", "") or "native").lower()
+                        delivered = entry.setdefault("channels", {}).setdefault(channel, [])
+                        if milestone not in delivered:
+                            delivered.append(milestone)
+                        entry["updated_at"] = datetime.now().isoformat()
+                        changed = True
+
+                    if changed:
+                        self._save_cache(disk_cache)
+                        cache.update(disk_cache)
+
+        await asyncio.to_thread(_persist_receipts)
 
     async def reconcile_schedules(self, assignments: List[Any]) -> ScheduleResult:
         """Reconcile platform-native reminders after a successful activity fetch."""
+        start_gen = self._current_namespace_generation()
         activities = [ActivityNotification.from_value(value) for value in assignments]
         reminders = self._policy().desired_schedules(activities, datetime.now())
         aggregate = ScheduleResult(desired=len(reminders))
         diagnostics = self._diagnostics_state()
         for notifier in self.notifiers:
+            if self._current_namespace_generation() != start_gen:
+                return aggregate
             reconcile = getattr(notifier, "reconcile_schedules", None)
             if not reconcile:
                 continue
@@ -389,6 +564,164 @@ class NotificationManager:
         diagnostics.scheduled += aggregate.scheduled
         diagnostics.cancelled += aggregate.cancelled
         return aggregate
+
+    async def reconcile_class_schedule_notifications(
+        self,
+        sessions,
+        *,
+        clear_only: bool = False,
+        fetch_day=None,
+        identity_getter=None,
+        android_bridge=None,
+    ) -> None:
+        """Replace class-schedule reminders from the latest Portal snapshot.
+
+        The whole workflow runs under one lock so a slow ``fetch_day`` can
+        never race a newer reconcile (account switch/logout), and the account
+        identity is re-checked after every await: a task that started under
+        old credentials aborts instead of overwriting a ``clear_only`` run.
+
+        ``clear_only=True`` drops every class reminder without any network
+        call. ``fetch_day`` is an optional async callable receiving a
+        ``(username, password)`` snapshot and returning tomorrow's sessions,
+        ``identity_getter`` the current account identity, and
+        ``android_bridge`` the optional native scheduler.
+        """
+        # Snapshot the account at TASK CREATION — before waiting for the lock.
+        # A stale task queued by the previous account must notice the change
+        # and abort; capturing after the lock would let it read the NEW
+        # identity, pass its own check, and rebuild the old session list under
+        # the new account's name.
+        identity_before = identity_getter() if identity_getter else None
+        credentials_before = (
+            str(getattr(config, "UTH_USERNAME", "") or ""),
+            str(getattr(config, "UTH_PASSWORD", "") or ""),
+        )
+
+        def identity_changed() -> bool:
+            return (
+                identity_getter is not None
+                and identity_getter() != identity_before
+            )
+
+        def stale_task() -> bool:
+            # ``clear_only`` is a pure teardown of the previous account's
+            # reminders: an account flip must never cancel it, otherwise the
+            # reminders it exists to drop would outlive the logout.
+            return (not clear_only) and identity_changed()
+
+        lock = getattr(self, "_class_schedule_reconcile_lock", None)
+        if lock is None:
+            lock = self._class_schedule_reconcile_lock = asyncio.Lock()
+        async with lock:
+            if stale_task():
+                # A stale task spent its whole wait behind the lock; by now
+                # the account has moved on, so it must not even fetch.
+                logger.info(
+                    "Skipping class-schedule reconcile: account changed while queued"
+                )
+                return
+
+            session_snapshot = list(sessions)
+            username, password = credentials_before
+            # Credentials gate the RESULT, not only the fetch: without a usable
+            # Portal identity the reminders cannot be refreshed, so keeping the
+            # old ones armed would fire stale (possibly foreign) classes.
+            credentials_available = bool(username) and bool(password)
+            # clear_only is a pure teardown: it must never schedule, even if
+            # the enabled switch is still on in the freshly written settings.
+            enabled = (
+                (not clear_only)
+                and credentials_available
+                and bool(getattr(config, "NOTIFY_CLASS_SCHEDULE_ENABLED", False))
+            )
+            if enabled and fetch_day is not None:
+                # TodayScheduleCoordinator owns today's dashboard snapshot.
+                # Fetch tomorrow once during foreground scheduling as well, so
+                # a class beginning tomorrow can still have its alarm persisted
+                # before the app is suspended or the user leaves the device.
+                try:
+                    tomorrow_sessions = await fetch_day(credentials_before)
+                    if stale_task():
+                        logger.info(
+                            "Skipping class-schedule reconcile: account changed during fetch"
+                        )
+                        return
+                    session_snapshot.extend(tomorrow_sessions)
+                except ScheduleAuthenticationError:
+                    # The Portal session is gone: the cached sessions belong to
+                    # a login that no longer works, so drop them and clear the
+                    # previously armed reminders instead of rescheduling them.
+                    logger.warning(
+                        "Portal authentication failed while reconciling class reminders; "
+                        "clearing the previously scheduled class list"
+                    )
+                    enabled = False
+                    session_snapshot = []
+                except Exception:
+                    logger.warning(
+                        "Could not fetch tomorrow's Portal timetable for reminders",
+                        exc_info=True,
+                    )
+                    # The native and Windows schedulers replace their full
+                    # persisted set. Applying today's partial snapshot here
+                    # would silently cancel tomorrow's already-armed classes
+                    # during a transient Portal outage. Auth failures above
+                    # still clear the old account's reminders deliberately.
+                    return
+            if stale_task():
+                logger.info(
+                    "Skipping class-schedule reconcile: account changed before applying"
+                )
+                return
+
+            reminders = build_class_schedule_reminders(
+                session_snapshot,
+                enabled=enabled,
+                lead_hours=getattr(
+                    config, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", (1,)
+                ),
+                dnd_enabled=bool(getattr(config, "NOTIFY_DND_ENABLE", False)),
+                dnd_start=int(getattr(config, "NOTIFY_DND_START", 22)),
+                dnd_end=int(getattr(config, "NOTIFY_DND_END", 7)),
+            )
+            payload = [reminder.to_platform_payload() for reminder in reminders]
+
+            if android_bridge is not None and getattr(
+                android_bridge, "available", False
+            ):
+                try:
+                    result = await android_bridge.schedule_class_sessions(
+                        payload, enabled=enabled
+                    )
+                    logger.info(
+                        "Class-schedule reminders reconciled on mobile: desired=%s scheduled=%s cancelled=%s",
+                        len(payload),
+                        result.get("scheduled", 0) if isinstance(result, dict) else 0,
+                        result.get("cancelled", 0) if isinstance(result, dict) else 0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Cannot reconcile native class-schedule reminders",
+                        exc_info=True,
+                    )
+                return
+
+            # Windows uses the tray-owned durable scheduler; it remains
+            # available while the application is minimized to the tray.
+            for notifier in self.notifiers:
+                reconcile = getattr(
+                    notifier, "reconcile_class_schedule_reminders", None
+                )
+                if not callable(reconcile):
+                    continue
+                try:
+                    await asyncio.to_thread(reconcile, reminders)
+                except Exception:
+                    logger.warning(
+                        "Cannot reconcile Windows class-schedule reminders",
+                        exc_info=True,
+                    )
 
     async def cancel_activity(self, activity_id: str) -> int:
         """Cancel all native reminders associated with a Moodle activity ID."""
@@ -514,51 +847,59 @@ class NotificationManager:
         cache: Dict = None,
         *,
         channel: str | None = None,
+        expected_generation: Optional[int] = None,
     ):
         """Mark assignments as notified in cache."""
         from core.safe_file_io import SafeFileIO
         from pathlib import Path
-        
-        with SafeFileIO.transaction(Path(self._cache_path)):
-            disk_cache = self._load_cache()
-            updated = False
-            for item in items:
-                url = item["url"]
-                ms = item["milestone"]
-                deadline_revision = item.get("deadline_revision", "")
 
-                if url not in disk_cache:
-                    disk_cache[url] = {
-                        "milestones": [],
-                        "deadline_revision": deadline_revision,
-                        "updated_at": datetime.now().isoformat(),
-                    }
+        with self._get_cache_lock():
+            if (
+                expected_generation is not None
+                and int(getattr(self, "_namespace_generation", 0))
+                != expected_generation
+            ):
+                return
+            with SafeFileIO.transaction(Path(self._cache_path)):
+                disk_cache = self._load_cache()
+                updated = False
+                for item in items:
+                    url = item["url"]
+                    ms = item["milestone"]
+                    deadline_revision = item.get("deadline_revision", "")
 
-                entry = disk_cache[url]
-                # Backward compat: migrate list → dict in-place
-                if isinstance(entry, list):
-                    entry = {"milestones": entry, "updated_at": datetime.now().isoformat()}
-                    disk_cache[url] = entry
+                    if url not in disk_cache:
+                        disk_cache[url] = {
+                            "milestones": [],
+                            "deadline_revision": deadline_revision,
+                            "updated_at": datetime.now().isoformat(),
+                        }
 
-                if entry.get("deadline_revision") not in (None, "", deadline_revision):
-                    entry["milestones"] = []
-                    entry["channels"] = {}
-                entry["deadline_revision"] = deadline_revision
+                    entry = disk_cache[url]
+                    # Backward compat: migrate list → dict in-place
+                    if isinstance(entry, list):
+                        entry = {"milestones": entry, "updated_at": datetime.now().isoformat()}
+                        disk_cache[url] = entry
 
-                delivered = (
-                    entry.setdefault("channels", {}).setdefault(channel, [])
-                    if channel
-                    else entry.setdefault("milestones", [])
-                )
-                if ms not in delivered:
-                    delivered.append(ms)
-                    entry["updated_at"] = datetime.now().isoformat()
-                    updated = True
+                    if entry.get("deadline_revision") not in (None, "", deadline_revision):
+                        entry["milestones"] = []
+                        entry["channels"] = {}
+                    entry["deadline_revision"] = deadline_revision
 
-            if updated:
-                self._save_cache(disk_cache)
-                if cache is not None:
-                    cache.update(disk_cache)
+                    delivered = (
+                        entry.setdefault("channels", {}).setdefault(channel, [])
+                        if channel
+                        else entry.setdefault("milestones", [])
+                    )
+                    if ms not in delivered:
+                        delivered.append(ms)
+                        entry["updated_at"] = datetime.now().isoformat()
+                        updated = True
+
+                if updated:
+                    self._save_cache(disk_cache)
+                    if cache is not None:
+                        cache.update(disk_cache)
 
     @property
     def history(self):
@@ -574,53 +915,76 @@ class NotificationManager:
         if not grade_changes:
             return DispatchResult()
 
-        # Check DND
-        if self._is_in_dnd():
-            logger.info("DND active, skipping grade alerts.")
-            return DispatchResult(
-                filtered=len(grade_changes), dnd_active=True
-            )
+        start_gen = self._current_namespace_generation()
+        async with self._get_dispatch_lock():
+            if self._current_namespace_generation() != start_gen:
+                return DispatchResult()
+            # Check DND
+            if self._is_in_dnd():
+                logger.info("DND active, skipping grade alerts.")
+                return DispatchResult(
+                    filtered=len(grade_changes), dnd_active=True
+                )
 
-        # BUG-14 fix: define helper class once, outside the loop
-        class _GradeNotif:
-            def __init__(self, t, b, cn):
-                self.title = t
-                self.body = b
-                self.course_name = cn
-                self.url = ""
-                self.deadline_str = ""
+            # BUG-14 fix: define helper class once, outside the loop
+            class _GradeNotif:
+                is_grade_alert = True
 
-        notifications = []
-        for change in grade_changes:
-            title = f"📊 Điểm mới: {change.item_name}"
-            body_parts = [f"Môn: {change.course_name}"]
-            if change.old_grade:
-                body_parts.append(f"Điểm cũ: {change.old_grade}")
-            body_parts.append(f"Điểm mới: {change.new_grade}")
-            body = "\n".join(body_parts)
+                def __init__(self, t, b, cn, item="", old="", new=""):
+                    self.title = t
+                    self.body = b
+                    self.course_name = cn
+                    self.url = ""
+                    self.deadline_str = ""
+                    self.item_name = item
+                    self.old_grade = old
+                    self.new_grade = new
 
-            notifications.append(_GradeNotif(title, body, change.course_name))
+            notifications = []
+            for change in grade_changes:
+                title = f"📊 Điểm mới: {change.item_name}"
+                body_parts = [f"Môn: {change.course_name}"]
+                if change.old_grade:
+                    body_parts.append(f"Điểm cũ: {change.old_grade}")
+                body_parts.append(f"Điểm mới: {change.new_grade}")
+                body = "\n".join(body_parts)
 
-        result = DispatchResult(attempted=len(notifications))
-        for notifier in self.notifiers:
-            channel = notifier.__class__.__name__
-            try:
-                if inspect.iscoroutinefunction(notifier.notify):
-                    delivered = await notifier.notify(notifications)
-                else:
-                    delivered = await asyncio.to_thread(notifier.notify, notifications)
-                    if inspect.isawaitable(delivered):
-                        delivered = await delivered
-                if delivered is True:
-                    result.successful_channels.append(channel)
-                else:
-                    result.failed_channels[channel] = "backend did not confirm delivery"
-            except Exception as exc:
-                result.failed_channels[channel] = str(exc)
-                logger.error("Grade alert via %s failed: %s", channel, exc)
-        if result.successful_channels:
-            result.delivered = len(notifications)
-            if hasattr(self, "_history"):
-                self._history.add(notifications, result.successful_channels)
-        logger.info("Dispatched %d grade alerts", result.delivered)
-        return result
+                notifications.append(_GradeNotif(
+                    title, body, change.course_name,
+                    change.item_name, change.old_grade or "-", change.new_grade))
+
+            result = DispatchResult(attempted=len(notifications))
+            for notifier in self.notifiers:
+                if self._current_namespace_generation() != start_gen:
+                    return result
+                channel = notifier.__class__.__name__
+                try:
+                    if inspect.iscoroutinefunction(notifier.notify):
+                        delivered = await notifier.notify(notifications)
+                    else:
+                        delivered = await asyncio.to_thread(notifier.notify, notifications)
+                        if inspect.isawaitable(delivered):
+                            delivered = await delivered
+                    if self._current_namespace_generation() != start_gen:
+                        logger.info(
+                            "Discarding stale grade alert history write: account changed"
+                        )
+                        return result
+                    if delivered is True:
+                        result.successful_channels.append(channel)
+                    else:
+                        result.failed_channels[channel] = "backend did not confirm delivery"
+                except Exception as exc:
+                    result.failed_channels[channel] = str(exc)
+                    logger.error("Grade alert via %s failed: %s", channel, exc)
+            if result.successful_channels and self._current_namespace_generation() == start_gen:
+                result.delivered = len(notifications)
+                if hasattr(self, "_history"):
+                    await asyncio.to_thread(
+                        self._record_history_if_current,
+                        notifications,
+                        result.successful_channels,
+                        start_gen,
+                    )
+            logger.info("Dispatched %d grade alerts", result.delivered)
+            return result

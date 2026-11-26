@@ -8,13 +8,22 @@ from gui.components.terms_dialog import show_terms_dialog
 def init_privacy_controls(view) -> None:
     """Create the cross-platform crash-reporting consent control."""
     current = getattr(settings, "CRASH_REPORTING_CONSENT", "enabled")
+    options = [
+        ft.dropdown.Option("enabled", "Bật (mặc định)"),
+        ft.dropdown.Option("disabled", "Tắt"),
+    ]
+    if current == "not_asked":
+        options.insert(
+            0,
+            ft.dropdown.Option("not_asked", "Chưa chọn (đang tắt)"),
+        )
+        value = "not_asked"
+    else:
+        value = "disabled" if current == "disabled" else "enabled"
     view._dd_crash_reporting_consent = ft.Dropdown(
-        value="disabled" if current == "disabled" else "enabled",
+        value=value,
         label="Gửi chẩn đoán sự cố",
-        options=[
-            ft.dropdown.Option("enabled", "Bật (mặc định)"),
-            ft.dropdown.Option("disabled", "Tắt"),
-        ],
+        options=options,
         border_color=C.BORDER,
         focused_border_color=C.ACCENT,
         color=C.TEXT_PRIMARY,

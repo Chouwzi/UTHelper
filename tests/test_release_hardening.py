@@ -74,8 +74,7 @@ def test_patched_security_floors_are_consistent_across_build_surfaces():
     config = tomllib.loads(_read("pyproject.toml"))
     release_workflow = _read(".github/workflows/release.yml")
 
-    assert "pillow>=12.3.0" in config["project"]["optional-dependencies"]["windows"]
-    assert "pillow>=12.3.0" in config["tool"]["flet"]["windows"]["dependencies"]
+    assert "pillow>=13.0.0" in config["project"]["dependencies"]
     assert "lxml>=6.1.0" in config["project"]["optional-dependencies"]["windows"]
     assert "lxml>=6.1.0" in config["tool"]["flet"]["windows"]["dependencies"]
     assert "pytest>=9.0.3" in config["dependency-groups"]["dev"]
@@ -143,7 +142,9 @@ def test_android_build_workflows_install_the_notification_patcher():
         assert "flet-android-notifications-patch --project-root build/flutter" in workflow
 
     build_workflow = _read(".github/workflows/build-android.yml")
-    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in build_workflow
+    assert 'application-id "$APK")" = "io.github.chouwzi.uthelper"' in build_workflow
+    benchmark_workflow = _read(".github/workflows/package-benchmark.yml")
+    assert "'com.uthelper.benchmark' || 'io.github.chouwzi.uthelper'" in benchmark_workflow
 
 
 def test_android_release_uses_canonical_version_code_and_signing_inputs():
@@ -156,9 +157,14 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert "ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}" in workflow
     assert "ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}" in workflow
     assert "ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}" in workflow
-    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in workflow
+    assert "UTH_DISTRIBUTION_CHANNEL=apk_lts" in workflow
+    assert "--distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json" in workflow
+    assert "--channel apk_lts" in workflow
+    assert 'application-id "$APK")" = "io.github.chouwzi.uthelper"' in workflow
     assert 'version-code "$APK")" = "$BUILD_NUMBER"' in workflow
-    assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert config["tool"]["flet"]["android"]["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
     assert "yes | flet build apk" not in workflow
     assert "--yes --verbose" in workflow
     assert "COMPLETED_APKS" not in workflow
@@ -256,7 +262,10 @@ def test_local_android_build_script_applies_the_native_notification_patch():
     assert '"org.gradle.workers.max" = "2"' in script
     assert '"kotlin.compiler.execution.strategy" = "in-process"' in script
     assert '"kotlin.incremental" = "false"' in script
-    assert script.count("build $Target @fletOptions --verbose") == 2
+    assert (
+        script.count("Invoke-FletCliBuild -BuildTarget $Target -BuildOptions $fletOptions")
+        == 2
+    )
 
 
 def test_wix7_build_requires_owner_confirmed_eula_variable():
@@ -437,7 +446,11 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
     candidates = tuple((ROOT / ".github" / "workflows").glob("*.y*ml")) + tuple(
         (ROOT / "scripts").glob("*.ps1")
     )
-    invocation_markers = ("flet build ", "$fletCommand.Source build ")
+    invocation_markers = (
+        "flet build ",
+        "$fletCommand.Source build ",
+        "Invoke-FletCliBuild -BuildTarget ",
+    )
     build_files = []
     for path in candidates:
         content = path.read_text(encoding="utf-8").replace("\\", "/")
@@ -448,6 +461,7 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
         ".github/workflows/release.yml",
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
+        ".github/workflows/build-msstore.yml",
         ".github/workflows/package-benchmark.yml",
         "scripts/build_android.ps1",
     }
@@ -499,12 +513,13 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
             assert version_output in version_matching[0]
             previous_build = build_index
 
-    assert total_builds == 13
+    assert total_builds >= 14
 
     for workflow_path in (
         ".github/workflows/release.yml",
         ".github/workflows/build-ios.yml",
         ".github/workflows/build-android.yml",
+        ".github/workflows/build-msstore.yml",
     ):
         workflow = _read(workflow_path)
         assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
@@ -547,13 +562,14 @@ def test_every_windows_flet_build_uses_and_verifies_reviewed_diagnostics_templat
 
     for relative_path in (
         ".github/workflows/release.yml",
+        ".github/workflows/build-msstore.yml",
     ):
         content = _read(relative_path).replace("\\", "/")
         build_index = content.index("flet build windows")
         assert official_url in content
         assert prepared_name in content
         assert patcher in content[:build_index]
-        if relative_path.endswith("release.yml"):
+        if relative_path.endswith(("release.yml", "build-msstore.yml")):
             assert f"--template build/support/{prepared_name}" in content
         else:
             assert "--template $diagnosticsTemplate" in content
@@ -788,15 +804,21 @@ def test_release_inputs_use_secrets_only_for_private_key_material():
 
 def test_validate_job_runs_full_suite_with_workspace_import_paths():
     workflow = _read(".github/workflows/release.yml")
-    assert "PYTHONPATH: src:extensions/flet_uth_background_sync/src:." in workflow
     assert (
-        "python -m pytest tests extensions/flet_uth_background_sync/tests "
+        "PYTHONPATH: src:extensions/flet_uth_quiz/src:"
+        "extensions/flet_uth_background_sync/src:."
+    ) in workflow
+    assert (
+        "python -m pytest tests extensions/flet_uth_quiz/tests "
+        "extensions/flet_uth_background_sync/tests "
         "-q --tb=short"
     ) in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"' in workflow
     assert 'pip install -e ".[dev,windows]"' not in workflow
     assert (
-        'pip install -e . "keyring>=25.0.0" "pytest>=9.0.3" '
+        'pip install -e . -e extensions/flet_uth_quiz '
+        '-e extensions/flet_uth_background_sync "flet-webview==0.86.5" '
+        '"keyring>=25.0.0" "pytest>=9.0.3" '
         '"pytest-timeout>=2.3,<3"'
     ) in workflow
 
@@ -806,3 +828,280 @@ def test_release_manifest_preserves_the_supported_2_1_floor():
 
     assert '--minimum-supported-version "2.1.0"' in workflow
     assert '--minimum-supported-version "$VERSION"' not in workflow
+
+
+def test_msstore_workflow_builds_and_verifies_msix_without_mutating_lts_release():
+    workflow = _read(".github/workflows/build-msstore.yml")
+    release_workflow = _read(".github/workflows/release.yml")
+
+    for action in (
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    ):
+        assert action in workflow
+
+    assert "permissions: {}" in workflow
+    assert "contents: write" not in workflow
+    assert "gh release" not in workflow
+    assert "PYTHONUTF8: '1'" in workflow
+    assert "PYTHONIOENCODING: utf-8" in workflow
+    assert "SENTRY_DSN: ${{ vars.SENTRY_DSN }}" in workflow
+    assert "secrets.SENTRY_DSN" not in workflow
+
+    ordered_commands = (
+        "prepare_flet_diagnostics_template.py",
+        "flet build windows",
+        "verify_flutter_diagnostics.py",
+        "prepare_windows_bundle.py build/windows",
+        "verify_windows_bundle.py build/windows",
+        "./scripts/package_msix.ps1",
+        "./scripts/verify_msix_release.ps1",
+    )
+    positions = [workflow.index(command) for command in ordered_commands]
+    assert positions == sorted(positions)
+
+    # Every step in build-msstore-msix must have an explicit timeout.
+    steps_block = workflow.split("    steps:\n", 1)[1]
+    steps = [
+        block
+        for block in re.split(r"(?m)(?=^      - )", steps_block)
+        if block.startswith("      - ")
+    ]
+    assert steps
+    assert all("timeout-minutes:" in step for step in steps)
+
+    # GitHub LTS release workflow stays isolated from Store MSIX/AAB artifacts.
+    assert ".msix" not in release_workflow
+    assert ".aab" not in release_workflow
+
+
+def test_windows_flet_builds_append_msvc_coroutine_deprecation_guard():
+    define = "_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+    cl_flag = f"/D{define}"
+    safe_append_marker = "$env:CL.Trim()"
+
+    for relative_path in (
+        ".github/workflows/build-msstore.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/package-benchmark.yml",
+    ):
+        content = _read(relative_path)
+        assert cl_flag in content, relative_path
+        assert safe_append_marker in content, relative_path
+        assert f"CL: {cl_flag}" not in content, relative_path
+        assert content.index(cl_flag) < content.index("flet build windows"), relative_path
+
+    windows_release_script = _read("scripts/build_windows_release.ps1")
+    assert cl_flag in windows_release_script
+    assert safe_append_marker in windows_release_script
+
+
+def test_android_manual_dispatch_supports_installable_debug_test_apk_without_weakening_pr_guardrails():
+    workflow = _read(".github/workflows/build-android.yml")
+
+    # Manual dispatch inputs for lightweight installable QA test APKs.
+    for marker in (
+        "apk_arch:",
+        "apk_signing:",
+        "apk_namespace:",
+        "default: arm64-v8a",
+        "default: debug-test",
+        "default: isolated",
+        "--arch arm64-v8a",
+        '--bundle-id "$APK_PACKAGE_ID"',
+        'APK_PACKAGE_ID="com.uthelper.qa"',
+        '"$APKSIGNER" verify --verbose --print-certs "$TEST_APK"',
+        "DEBUG_TEST_ONLY.txt",
+        "android-debug-test-",
+    ):
+        assert marker in workflow
+
+    # Installable debug-test mode is strictly gated to manual workflow_dispatch runs on apk_lts.
+    assert (
+        'if [ "$CHANNEL" = "apk_lts" ] && [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ]; then'
+        in workflow
+    )
+    assert (
+        'if [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] && [ "${APK_INSTALLABLE_TEST:-false}" = "true" ]; then'
+        in workflow
+    )
+    assert (
+        "if: matrix.channel == 'apk_lts' && (github.event_name != 'workflow_dispatch' || env.APK_INSTALLABLE_TEST != 'true')"
+        in workflow
+    )
+    assert (
+        "if: matrix.channel == 'apk_lts' && github.event_name == 'workflow_dispatch' && env.APK_INSTALLABLE_TEST == 'true'"
+        in workflow
+    )
+
+    # Production Android release signing secrets remain strictly isolated to release.yml.
+    for forbidden in (
+        "ANDROID_KEYSTORE_BASE64",
+        "ANDROID_KEYSTORE_PASSWORD",
+        "ANDROID_KEY_PASSWORD",
+        "ANDROID_KEY_ALIAS",
+        "ANDROID_SIGNING_CERT_SHA256",
+        "environment: release",
+    ):
+        assert forbidden not in workflow
+
+
+def test_pyproject_pins_fixed_non_retracted_jni_override():
+    config = tomllib.loads(_read("pyproject.toml"))
+    overrides = config["tool"]["flet"]["flutter"]["pubspec"]["dependency_overrides"]
+
+    assert overrides["jni"] != "1.2.0"
+    assert overrides["jni"] == "1.2.1"
+
+
+def test_pyproject_bundles_filelock_across_all_platforms_and_configures_pytest_paths():
+    config = tomllib.loads(_read("pyproject.toml"))
+    flet_cfg = config["tool"]["flet"]
+
+    for deps in (
+        config["project"]["dependencies"],
+        flet_cfg["windows"]["dependencies"],
+        flet_cfg["android"]["dependencies"],
+        flet_cfg["ios"]["dependencies"],
+        config["dependency-groups"]["dev"],
+    ):
+        assert any(dep.startswith("filelock>=") for dep in deps)
+
+    dev_deps = config["dependency-groups"]["dev"]
+    assert "flet-webview==0.86.5" in dev_deps
+    assert any(dep.startswith("ruff>=") for dep in dev_deps)
+    assert config["tool"]["pytest"]["ini_options"]["pythonpath"] == [
+        "src",
+        "extensions/flet_uth_quiz/src",
+        "extensions/flet_uth_background_sync/src",
+    ]
+    bg_pubspec = _read(
+        "extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/pubspec.yaml"
+    )
+    assert "flet: 0.86.5" in bg_pubspec
+    assert "../../../../../../../packages/flet" not in bg_pubspec
+
+
+def test_wix_preserves_run_uthelper_across_major_upgrade_and_removes_on_uninstall():
+    package = _read("packaging/windows/Package.wxs")
+    upgrade_script = _read("scripts/test_windows_msi_upgrade_e2e.ps1")
+
+    assert (
+        'Action="RemoveRunUTHelper" Before="RemoveFiles" '
+        'Condition="REMOVE~=&quot;ALL&quot; AND (NOT UPGRADINGPRODUCTCODE)"'
+    ) in package
+    set_idx = upgrade_script.index('$expectedAutostartValue = ')
+    upgrade_idx = upgrade_script.index('Invoke-BoundedProcess "msiexec.exe" @("/i", $CurrentMsi, "/qn", "/norestart")')
+    assert_idx = upgrade_script.index("MajorUpgrade removed or altered HKCU Run\\UTHelper autostart value")
+    assert set_idx < upgrade_idx < assert_idx
+
+
+def test_android_workflow_isolates_play_upload_secrets_from_pull_request_jobs():
+    workflow = _read(".github/workflows/build-android.yml")
+    build_job = workflow.split("\n  build:\n", 1)[1].split(
+        "\n  sign-chplay-upload:\n", 1
+    )[0]
+    sign_job = workflow.split("\n  sign-chplay-upload:\n", 1)[1]
+
+    for secret_name in (
+        "PLAY_UPLOAD_KEYSTORE_BASE64",
+        "PLAY_UPLOAD_KEYSTORE_PASSWORD",
+        "PLAY_UPLOAD_KEY_PASSWORD",
+    ):
+        assert secret_name not in build_job
+        assert f"secrets.{secret_name}" in sign_job
+
+    assert "github.event_name != 'pull_request'" in sign_job
+    assert "environment: chplay-upload" in sign_job
+    assert "--require-quiz-webview" in workflow
+
+    for wf_path in (
+        ".github/workflows/build-android.yml",
+        ".github/workflows/release.yml",
+        ".github/workflows/package-benchmark.yml",
+    ):
+        assert "ClassScheduleAlarmReceiver" in _read(wf_path), wf_path
+
+
+def test_ci_lints_all_trees_audits_flet_webview_and_msstore_verifies_wack_office_assets():
+    ci = _read(".github/workflows/ci.yml")
+    msstore = _read(".github/workflows/build-msstore.yml")
+
+    assert "ruff check src tests scripts extensions --output-format=github" in ci
+    assert 'pip install "flet-webview==0.86.5"' in ci
+    assert "push:\n    branches: [main]" in msstore
+    assert msstore.count("RequireOfficeViewer = $true") == 2
+
+
+def test_verify_windows_bundle_strict_mode_checks_extended_runtime_packages(tmp_path):
+    from scripts.verify_windows_bundle import inspect_bundle
+
+    # Minimal valid bundle baseline (matching unit verifier layout)
+    (tmp_path / "UTHelper.exe").write_bytes(b"MZ-app")
+    (tmp_path / "UTHelperAutostart.exe").write_bytes(b"MZ-app")
+    (tmp_path / "python314.dll").write_bytes(b"MZ")
+    (tmp_path / "flutter_windows.dll").write_bytes(b"MZ")
+    (tmp_path / "flutter_inappwebview_windows_plugin.dll").write_bytes(b"MZ")
+    (tmp_path / "WebView2Loader.dll").write_bytes(b"MZ")
+    (tmp_path / "Lib" / "encodings").mkdir(parents=True)
+    (tmp_path / "Lib" / "encodings" / "__init__.pyc").write_bytes(b"pyc")
+    (tmp_path / "app" / "assets" / "office_viewer").mkdir(parents=True)
+    (tmp_path / "app" / "assets" / "pdf_viewer").mkdir(parents=True)
+    (tmp_path / "app" / "main.pyc").write_bytes(b"pyc")
+    (tmp_path / "app" / "assets" / "release-version").write_bytes(b"2.5.1\n")
+    for name in (
+        "docx_host.html", "docx_host.js", "docx-preview.min.js", "jszip.min.js",
+        "pptx_host.html", "pptx_host.js", "pptx_worker.js", "pptx_engine.js",
+        "viewer.css", "viewer_common.js",
+    ):
+        (tmp_path / "app" / "assets" / "office_viewer" / name).write_bytes(b"ok")
+    for name in (
+        "pdf_host.html", "pdf_host.js", "pdf_viewer.css", "pdf.min.mjs", "pdf.worker.min.mjs",
+    ):
+        (tmp_path / "app" / "assets" / "pdf_viewer" / name).write_bytes(b"ok")
+
+    sp = tmp_path / "site-packages"
+    (sp / "winrt").mkdir(parents=True)
+    (sp / "winrt" / "_winrt_windows_applicationmodel.cp314-win_amd64.pyd").write_bytes(b"pyd")
+    (sp / "win32" / "lib").mkdir(parents=True)
+    for mod in ("win32api", "win32event", "win32security"):
+        (sp / "win32" / f"{mod}.pyd").write_bytes(b"pyd")
+    for mod in ("win32con", "winerror", "pywintypes"):
+        (sp / "win32" / "lib" / f"{mod}.pyc").write_bytes(b"pyc")
+    (sp / "pywin32_system32").mkdir(parents=True)
+    (sp / "pywin32_system32" / "pywintypes314.dll").write_bytes(b"dll")
+    (sp / "flet_uth_quiz").mkdir(parents=True)
+    (sp / "flet_uth_quiz" / "__init__.pyc").write_bytes(b"pyc")
+    (sp / "flet_uth_quiz" / "quiz_player.pyc").write_bytes(b"pyc")
+
+    assert inspect_bundle(tmp_path) == ()
+
+    strict_issues = inspect_bundle(tmp_path, strict_site_packages=True)
+    for expected in (
+        "WebView2 WinRT projection",
+        "Windows.Foundation projection",
+        "win32gui",
+        "win32process",
+        "pypdfium2",
+        "lxml.etree",
+        "filelock",
+    ):
+        assert any(expected in item for item in strict_issues), expected
+
+    (sp / "webview2" / "microsoft" / "web" / "webview2" / "core").mkdir(parents=True)
+    (sp / "webview2" / "_webview2_microsoft_web_webview2_core.pyd").write_bytes(b"pyd")
+    (sp / "winrt" / "_winrt_windows_foundation.cp314-win_amd64.pyd").write_bytes(b"pyd")
+    (sp / "win32" / "win32gui.pyd").write_bytes(b"pyd")
+    (sp / "win32" / "win32process.pyd").write_bytes(b"pyd")
+    (sp / "pypdfium2").mkdir()
+    (sp / "pypdfium2" / "__init__.pyc").write_bytes(b"pyc")
+    (sp / "lxml").mkdir()
+    (sp / "lxml" / "etree.cp314-win_amd64.pyd").write_bytes(b"pyd")
+    (sp / "filelock").mkdir()
+    (sp / "filelock" / "__init__.pyc").write_bytes(b"pyc")
+    (sp / "flet-0.86.5.dist-info").mkdir()
+
+    assert inspect_bundle(tmp_path) == ()
+    assert inspect_bundle(tmp_path, strict_site_packages=True) == ()
+

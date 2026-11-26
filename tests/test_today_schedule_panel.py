@@ -418,3 +418,17 @@ def test_close_surface_after_snackbar_shown_closes_exact_dialog():
     # The actual schedule dialog must be closed!
     assert dialog.open is False
 
+
+def test_desktop_schedule_dialog_clamps_dimensions_on_420x560_minimum_window():
+    page = _Page()
+    page.width = 420
+    page.height = 560
+    panel = TodaySchedulePanel(page=page, mobile=False, on_need_data=lambda: None)
+    panel.set_state(_state(sessions=(_session(),)))
+    panel.open_schedule()
+
+    assert panel._surface_content is not None
+    assert panel._surface_content.width <= 380
+    assert panel._surface_content.height <= 480
+
+

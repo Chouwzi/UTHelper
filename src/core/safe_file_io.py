@@ -1,4 +1,5 @@
 import os
+import stat
 import sys
 import time
 import json
@@ -9,14 +10,25 @@ from typing import Callable, Any, Dict
 
 logger = logging.getLogger(__name__)
 
+# Threshold (seconds) after which an orphaned mobile SoftFileLock file may be
+# broken even if POSIX PID reuse causes filelock to see EPERM / "alive" PID.
+_MOBILE_SOFT_LOCK_STALE_SECONDS = 60.0
+
 # Quản lý locks trong bộ nhớ theo từng tệp (Intra-process)
 _file_locks: Dict[Path, threading.RLock] = {}
 _file_locks_lock = threading.Lock()
 _thread_local = threading.local()
 
+def _canonical_lock_path(filepath: Path) -> Path:
+    """Resolve parent directory only so transient leaf renames never alter lock identity."""
+    raw = Path(os.path.abspath(str(filepath)))
+    parent_resolved = raw.parent.resolve()
+    return Path(os.path.normcase(os.path.abspath(str(parent_resolved / raw.name))))
+
+
 def get_memory_lock(filepath: Path) -> threading.RLock:
     """Trả về hoặc tạo mới một RLock cho đường dẫn tệp cụ thể để bảo vệ đa luồng."""
-    resolved = filepath.resolve()
+    resolved = _canonical_lock_path(filepath)
     with _file_locks_lock:
         if resolved not in _file_locks:
             _file_locks[resolved] = threading.RLock()
@@ -65,75 +77,127 @@ class SafeFileIO:
             return SoftFileLock(lock_path)
 
     @staticmethod
+    def _maybe_break_stale_soft_lock(
+        file_lock: Any,
+        *,
+        stale_after_seconds: float = _MOBILE_SOFT_LOCK_STALE_SECONDS,
+    ) -> bool:
+        """Break an orphaned mobile ``SoftFileLock`` whose age exceeds ``stale_after_seconds``.
+
+        Never unlinks OS-level desktop ``FileLock`` files (``flock`` / ``LockFileEx``),
+        symlinks, or fresh lock files that may belong to an active writer.
+        """
+        try:
+            from filelock import SoftFileLock
+        except ImportError:
+            return False
+        if not isinstance(file_lock, SoftFileLock):
+            return False
+        lock_file = getattr(file_lock, "lock_file", None)
+        if not lock_file:
+            return False
+        lock_path = Path(lock_file)
+        try:
+            st = os.lstat(lock_path)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return False
+        if (time.time() - st.st_mtime) < stale_after_seconds:
+            return False
+        try:
+            # Re-verify identity right before unlink to avoid clobbering a freshly created lock.
+            st_check = os.lstat(lock_path)
+            if st_check.st_ino != st.st_ino or st_check.st_mtime_ns != st.st_mtime_ns:
+                return False
+            lock_path.unlink(missing_ok=True)
+            logger.warning(
+                "Broke stale mobile SoftFileLock %s (age=%.1fs)",
+                lock_path.name,
+                time.time() - st.st_mtime,
+            )
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
     def _write_unlocked_impl(filepath: Path, data: Any) -> bool:
-        """Ghi tệp tạm thời và đổi tên (không có lock, chỉ dùng nội bộ)."""
+        """Ghi tệp tạm thời và đổi tên nguyên tử (không có lock, chỉ dùng nội bộ)."""
         payload = data() if callable(data) else data
-        tmp_file = filepath.with_suffix(f".{threading.get_ident()}.tmp")
+        tmp_file = filepath.with_name(
+            f"{filepath.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-            
-        if sys.platform == 'win32' and filepath.exists():
-            trash_file = filepath.with_suffix(f".{threading.get_ident()}.trash")
-            try:
-                os.rename(str(filepath), str(trash_file))
-                os.rename(str(tmp_file), str(filepath))
-                try:
-                    os.remove(str(trash_file))
-                except Exception:
-                    pass
-            except Exception:
-                os.replace(str(tmp_file), str(filepath))
-        else:
+
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+
             os.replace(str(tmp_file), str(filepath))
+        except BaseException:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return True
 
     @staticmethod
     def write_json_atomic(filepath: Path, data: Any, max_retries: int = 10, initial_delay: float = 0.1) -> bool:
         """
         Ghi dữ liệu JSON nguyên tử và an toàn tuyệt đối.
-        Sử dụng Memory Lock + File Lock + Robust Retry Loop với Backoff + Dọn dẹp stale lock toàn cầu.
+        Sử dụng Memory Lock + File Lock + Retry Loop giải phóng mem_lock trước khi sleep.
         """
-        is_in_transaction = filepath in getattr(_thread_local, "_safe_io_transactions", set())
+        canonical = _canonical_lock_path(filepath)
+        is_in_transaction = canonical in getattr(_thread_local, "_safe_io_transactions", set())
 
-        mem_lock = get_memory_lock(filepath)
-        with mem_lock:
-            if is_in_transaction:
-                return SafeFileIO._write_unlocked_impl(filepath, data)
-
-            # Dọn dẹp stale SoftFileLock trên mọi nền tảng nếu lock bị kẹt quá 10 giây
-            lock_path = filepath.with_suffix(".lock")
-            if lock_path.exists():
-                try:
-                    mtime = os.path.getmtime(lock_path)
-                    if time.time() - mtime > 10.0:  # Lock bị treo hơn 10 giây
-                        os.remove(lock_path)
-                        logger.info(f"Đã dọn dẹp stale SoftFileLock: {lock_path.name}")
-                except Exception as le:
-                    logger.warning(f"Không thể kiểm tra/dọn dẹp stale lock: {le}")
-
-            file_lock = SafeFileIO.get_file_lock(filepath)
+        mem_lock = get_memory_lock(canonical)
+        if is_in_transaction:
             delay = initial_delay
-            
             for attempt in range(max_retries):
                 try:
-                    with file_lock.acquire(timeout=2):
+                    with mem_lock:
                         return SafeFileIO._write_unlocked_impl(filepath, data)
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(
-                            f"Lỗi truy cập file {filepath.name} (lần thử {attempt+1}): {e}. "
-                            f"Thử lại sau {delay}s..."
-                        )
-                        time.sleep(delay)
-                        delay *= 2
+                        time.sleep(min(delay, 0.05))
+                        delay = min(delay * 2, 0.05)
                     else:
-                        logger.error(f"Ghi file {filepath.name} thất bại hoàn toàn sau {max_retries} lần thử: {e}")
-                        break
+                        logger.error(
+                            f"Ghi file {filepath.name} trong transaction thất bại sau {max_retries} lần thử: {e}"
+                        )
+                        return False
             return False
+
+        file_lock = SafeFileIO.get_file_lock(filepath)
+        delay = initial_delay
+        acquire_timeout = min(max(initial_delay * 2.0, 0.05), 0.25)
+
+        for attempt in range(max_retries):
+            try:
+                with mem_lock:
+                    try:
+                        acquired = file_lock.acquire(timeout=acquire_timeout)
+                    except Exception:
+                        if not SafeFileIO._maybe_break_stale_soft_lock(file_lock):
+                            raise
+                        acquired = file_lock.acquire(timeout=acquire_timeout)
+                    with acquired:
+                        return SafeFileIO._write_unlocked_impl(filepath, data)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Lỗi truy cập file {filepath.name} (lần thử {attempt+1}): {e}. "
+                        f"Thử lại sau {delay}s..."
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 1.0)
+                else:
+                    logger.error(f"Ghi file {filepath.name} thất bại hoàn toàn sau {max_retries} lần thử: {e}")
+                    break
+        return False
 
     @staticmethod
     def read_json_safe(filepath: Path, default_factory: Callable[[], Any] = dict) -> Any:
@@ -141,11 +205,10 @@ class SafeFileIO:
         Đọc dữ liệu JSON an toàn sử dụng Memory Lock.
         Nếu đang trong transaction, file_lock đã được giữ nên việc đọc hoàn toàn an toàn khỏi tiến trình khác.
         """
-        if not filepath.exists():
-            return default_factory()
-            
         mem_lock = get_memory_lock(filepath)
         with mem_lock:
+            if not filepath.exists():
+                return default_factory()
             try:
                 # Đọc trực tiếp dưới sự bảo vệ của RLock bộ nhớ
                 with open(filepath, "r", encoding="utf-8") as f:
@@ -164,23 +227,22 @@ class SafeFileIO:
         
         @contextlib.contextmanager
         def _transaction():
-            lock_path = filepath.with_suffix(".lock")
-            if lock_path.exists():
-                try:
-                    if time.time() - os.path.getmtime(lock_path) > 10.0:
-                        os.remove(lock_path)
-                except Exception:
-                    pass
-
-            mem_lock = get_memory_lock(filepath)
+            canonical = _canonical_lock_path(filepath)
+            mem_lock = get_memory_lock(canonical)
             with mem_lock:
                 file_lock = SafeFileIO.get_file_lock(filepath)
-                with file_lock.acquire(timeout=timeout):
+                try:
+                    acquired = file_lock.acquire(timeout=timeout)
+                except Exception:
+                    if not SafeFileIO._maybe_break_stale_soft_lock(file_lock):
+                        raise
+                    acquired = file_lock.acquire(timeout=timeout)
+                with acquired:
                     if not hasattr(_thread_local, "_safe_io_transactions"):
                         _thread_local._safe_io_transactions = set()
-                    _thread_local._safe_io_transactions.add(filepath)
+                    _thread_local._safe_io_transactions.add(canonical)
                     try:
                         yield
                     finally:
-                        _thread_local._safe_io_transactions.remove(filepath)
+                        _thread_local._safe_io_transactions.discard(canonical)
         return _transaction()

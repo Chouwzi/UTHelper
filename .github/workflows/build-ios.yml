@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 concurrency:
@@ -35,6 +35,7 @@ jobs:
       - name: 📦 Install project and test tools
         run: |
           pip install -e . pytest
+          pip install "flet[cli]==0.86.5"
           flet --version
 
       - name: 🧪 Verify notification contracts
@@ -63,6 +64,7 @@ jobs:
           find build/ios-simulator -type d -name '*.app' -prune -print | sort > "$RUNNER_TEMP/ios-apps.txt"
           test "$(wc -l < "$RUNNER_TEMP/ios-apps.txt" | tr -d ' ')" -eq 1
           APP=$(sed -n '1p' "$RUNNER_TEMP/ios-apps.txt")
+          python -c "import sys; from pathlib import Path; from scripts.package_unsigned_ipa import verify_ios_app_office_viewer_assets; verify_ios_app_office_viewer_assets(Path(sys.argv[1]), require=True)" "$APP"
           DIAGNOSTIC="UTHelper-${GITHUB_SHA}-ios-unsigned-diagnostic.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIAGNOSTIC"
 

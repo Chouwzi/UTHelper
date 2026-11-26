@@ -52,3 +52,43 @@ def test_privacy_settings_default_to_enabled_and_include_terms_entry(monkeypatch
     terms_entry = controls[-1]
     terms_entry.on_click(None)
     page.show_dialog.assert_called_once()
+
+
+def test_privacy_controls_preserve_not_asked_consent_option(monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "CRASH_REPORTING_CONSENT", "not_asked")
+    view = Mock()
+    init_privacy_controls(view)
+
+    assert view._dd_crash_reporting_consent.value == "not_asked"
+    assert [option.key for option in view._dd_crash_reporting_consent.options] == [
+        "not_asked",
+        "enabled",
+        "disabled",
+    ]
+
+
+def test_terms_dialog_clamps_dimensions_on_420x560_desktop_and_360x800_mobile():
+    from types import SimpleNamespace
+
+    desktop_min_page = SimpleNamespace(
+        width=420,
+        height=560,
+        platform=ft.PagePlatform.WINDOWS,
+        pop_dialog=Mock(),
+    )
+    dlg_desktop = build_terms_dialog(desktop_min_page)
+    assert dlg_desktop.content.width <= 340
+    assert dlg_desktop.content.height <= 370
+
+    mobile_page = SimpleNamespace(
+        width=360,
+        height=800,
+        platform=ft.PagePlatform.ANDROID,
+        pop_dialog=Mock(),
+    )
+    dlg_mobile = build_terms_dialog(mobile_page)
+    assert dlg_mobile.content.width is None
+    assert dlg_mobile.content.height <= 590
+

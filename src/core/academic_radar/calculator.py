@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 from core.academic_radar.config import RADAR_CONFIG, RadarConfig
 from core.academic_radar.color_scale import score_to_color, score_to_status
+from core.academic_radar.gpa_planner import PASS_POINT, course_point4
 from core.academic_radar.models import (
     ConfidenceLevel,
     CourseGradeItem,
@@ -48,9 +50,17 @@ METRIC_CALCULATION_TEXTS = {
 }
 
 
+def _is_eligible_academic(course: CourseGradeItem) -> bool:
+    return (
+        course.credits > 0
+        and not course.is_transferred
+        and course.eligibility.status in ("academic", "unknown")
+    )
+
+
 def weighted_mean(grades_and_credits: list[tuple[float, float]]) -> float | None:
     """Calculates credit-weighted mean. Returns None if total credits is 0."""
-    valid = [(g, c) for g, c in grades_and_credits if g is not None and c > 0]
+    valid = [(g, c) for g, c in grades_and_credits if g is not None and math.isfinite(g) and math.isfinite(c) and c > 0]
     if not valid:
         return None
     total_credits = sum(c for _, c in valid)
@@ -71,7 +81,7 @@ def weighted_tail_mean(
     """
     eligible = [
         c for c in courses
-        if c.final_grade is not None and c.credits > 0 and c.eligibility.status in ("academic", "unknown")
+        if c.final_grade is not None and math.isfinite(c.final_grade) and _is_eligible_academic(c)
     ]
     if not eligible:
         return None, []
@@ -121,18 +131,18 @@ def _resolve_confidence(coverage: float, config: RadarConfig) -> ConfidenceLevel
     return "insufficient"
 
 
-def calculate_total_power(summary: dict[str, Any], courses: list[CourseGradeItem]) -> tuple[float | None, float]:
+def calculate_total_power(
+    summary: dict[str, Any] | None, courses: list[CourseGradeItem]
+) -> tuple[float | None, float]:
     """Calculates Total Power (0..100) from summary GPA 10. Returns (score, coverage)."""
-    raw_gpa = summary.get("diemTBHocLuc")
-    if raw_gpa is not None:
-        try:
-            score = float(raw_gpa) * 10.0
-            return max(0.0, min(100.0, score)), 1.0
-        except (ValueError, TypeError):
-            pass
+    summary = summary or {}
+    gpa_val = _optional_float(summary.get("diemTBHocLuc"))
+    if gpa_val is not None:
+        score = gpa_val * 10.0
+        return max(0.0, min(100.0, score)), 1.0
 
     # Fallback to credit-weighted final grades if summary GPA is absent
-    academic_courses = [c for c in courses if c.eligibility.status in ("academic", "unknown") and c.credits > 0]
+    academic_courses = [c for c in courses if _is_eligible_academic(c)]
     if not academic_courses:
         return None, 0.0
 
@@ -329,8 +339,24 @@ def _build_deterministic_insight(metrics: dict[str, RadarMetric]) -> str:
 def _round_half_up(val: float | None) -> int | None:
     if val is None:
         return None
-    import math
     return int(math.floor(val + 0.5))
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped == "-":
+            return None
+        value = stripped.replace(",", ".")
+    try:
+        numeric = float(value)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
 
 
 def calculate_radar_profile(
@@ -339,7 +365,7 @@ def calculate_radar_profile(
     config: RadarConfig = RADAR_CONFIG,
 ) -> RadarProfile:
     """Computes the full 6-axis Academic Radar profile for a given semester."""
-    summary = semester.summary
+    summary = semester.summary or {}
     courses = semester.courses
 
     # 1. Total Power
@@ -434,12 +460,60 @@ def calculate_radar_profile(
     valid_count = len(valid_metrics)
     is_polygon_viable = valid_count >= config.minimum_metrics_for_polygon
 
-    # Summary GPA fields
-    gpa_10 = summary.get("diemTBHocLuc")
-    gpa_4 = summary.get("diemTBTinChi")
-    credits_earned = summary.get("stcdatHocKy") or summary.get("soTCDat")
+    # Summary GPA fields (Portal summary authoritative when present; fall back per-field from graded academic courses)
+    gpa_10 = _optional_float(summary.get("diemTBHocLuc"))
+    gpa_4 = _optional_float(summary.get("diemTBTinChi"))
+    credits_earned = _optional_float(summary.get("stcdatHocKy"))
+    if credits_earned is None:
+        credits_earned = _optional_float(summary.get("soTCDat"))
+
+    eligible_graded = [
+        c
+        for c in courses
+        if _is_eligible_academic(c)
+        and c.final_grade is not None
+        and math.isfinite(c.final_grade)
+    ]
+    if eligible_graded:
+        if gpa_10 is None:
+            gpa_10 = weighted_mean(
+                [(float(c.final_grade), c.credits) for c in eligible_graded]
+            )
+        if gpa_4 is None:
+            gpa_4 = weighted_mean(
+                [
+                    (pt4, c.credits)
+                    for c in eligible_graded
+                    if (pt4 := course_point4(c)) is not None
+                ]
+            )
+        if credits_earned is None:
+            credits_earned = float(
+                sum(
+                    c.credits
+                    for c in eligible_graded
+                    if c.is_passed
+                    and (pt4 := course_point4(c)) is not None
+                    and pt4 >= PASS_POINT
+                )
+            )
+
+    # Tín chỉ đăng ký = tín chỉ đạt + không đạt; thiếu dữ liệu thì cộng từ các học phần trong kỳ.
+    credits_failed = _optional_float(summary.get("soTCKhongDat"))
+    course_credits = sum(c.credits for c in courses if c.credits > 0 and not c.is_transferred)
+    if credits_earned is not None:
+        credits_registered = max(
+            float(credits_earned) + float(credits_failed or 0.0), float(course_credits)
+        )
+    else:
+        credits_registered = float(course_credits) if course_credits > 0 else None
+    cumulative_gpa_10 = _optional_float(summary.get("diemTBHocLucTichLuy"))
+    cumulative_gpa_4 = _optional_float(summary.get("diemTBTinChiTichLuy"))
+    credits_cumulative = _optional_float(summary.get("soTCTichLuy"))
     classification = summary.get("xepLoaiHocLuc") or summary.get("xepLoai")
-    training_point = summary.get("soDiemRenLuyen") or summary.get("diemRenLuyen")
+    training_point = _optional_float(summary.get("soDiemRenLuyen"))
+    if training_point is None:
+        training_point = _optional_float(summary.get("diemRenLuyen"))
 
     insight = _build_deterministic_insight(metrics)
 
@@ -452,11 +526,15 @@ def calculate_radar_profile(
         weakest_metrics=weakest,
         overall_coverage=overall_coverage,
         is_polygon_viable=is_polygon_viable,
-        gpa_10=float(gpa_10) if gpa_10 is not None else None,
-        gpa_4=float(gpa_4) if gpa_4 is not None else None,
-        credits_earned=float(credits_earned) if credits_earned is not None else None,
+        gpa_10=gpa_10,
+        gpa_4=gpa_4,
+        credits_earned=credits_earned,
+        credits_registered=credits_registered,
+        cumulative_gpa_10=cumulative_gpa_10,
+        cumulative_gpa_4=cumulative_gpa_4,
+        credits_cumulative=credits_cumulative,
         classification=str(classification) if classification else None,
-        training_point=float(training_point) if training_point is not None else None,
+        training_point=training_point,
         insight_text=insight,
         scoring_version=config.scoring_version,
     )

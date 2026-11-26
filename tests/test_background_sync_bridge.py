@@ -123,7 +123,7 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
             "C:/app-cache/uthelper_update/UTHelper-2.2.0.apk",
             "ab" * 32,
             123,
-            "com.uthelper.uthelper",
+            "io.github.chouwzi.uthelper",
             2_002_000,
             "cd" * 32,
         )
@@ -138,13 +138,39 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
                 "C:/app-cache/uthelper_update/UTHelper-2.2.0.apk",
                 "ab" * 32,
                 123,
-                "com.uthelper.uthelper",
+                "io.github.chouwzi.uthelper",
                 2_002_000,
                 "cd" * 32,
             ),
         ),
         ("cancel", ()),
     ]
+
+
+def test_durable_update_download_bridge_preserves_pinned_identity_and_void_cancel():
+    calls = []
+
+    class Service:
+        async def start_update_download(self, *identity):
+            calls.append(("start", identity))
+            return {"status": "running"}
+
+        async def get_update_download_status(self, *identity):
+            calls.append(("query", identity))
+            return {"status": "completed", "local_path": "/private/update.apk"}
+
+        async def cancel_update_download(self, *identity):
+            calls.append(("cancel", identity))
+            return None  # The native command deliberately has no response body.
+
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = Service()
+    identity = ("https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/app.apk",
+                "a" * 64, 100, "io.github.chouwzi.uthelper", 2_005_001, "b" * 64)
+    assert asyncio.run(bridge.start_update_download(*identity)) == {"status": "running"}
+    assert asyncio.run(bridge.get_update_download_status(*identity))["status"] == "completed"
+    assert asyncio.run(bridge.cancel_update_download(*identity)) == {"status": "cancelled"}
+    assert calls == [("start", identity), ("query", identity), ("cancel", identity)]
 
 
 @pytest.mark.parametrize(
@@ -183,3 +209,80 @@ def test_app_controller_only_exposes_token_with_exact_client_and_issuer_provenan
     monkeypatch.setattr("config.settings.MOODLE_WS_TOKEN_ORIGIN", token_origin)
 
     assert controller._native_background_credentials() == expected
+
+
+def test_bridge_app_secret_methods_forward_and_handle_missing_service():
+    class _SecretService:
+        def __init__(self):
+            self.stored = {"password": "pw", "empty": ""}
+
+        async def read_app_secrets(self):
+            return dict(self.stored)
+
+        async def write_app_secrets(self, secrets):
+            self.stored = dict(secrets)
+            return True
+
+        async def clear_app_secrets(self):
+            self.stored.clear()
+            return True
+
+    empty_bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    empty_bridge.service = None
+    assert asyncio.run(empty_bridge.read_app_secrets()) == {}
+    assert asyncio.run(empty_bridge.write_app_secrets({"password": "pw"})) is False
+    assert asyncio.run(empty_bridge.clear_app_secrets()) is False
+
+    service = _SecretService()
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = service
+    assert asyncio.run(bridge.read_app_secrets()) == {"password": "pw"}
+    assert asyncio.run(bridge.write_app_secrets({"ws_token": "tok", "blank": ""})) is True
+    assert service.stored == {"ws_token": "tok"}
+    assert asyncio.run(bridge.clear_app_secrets()) is True
+    assert service.stored == {}
+
+
+def test_android_secret_backend_writes_off_loop_and_fails_closed_on_loop_thread():
+    import threading
+    from platform_utils.background_sync import AndroidSecretBackend
+
+    class _VaultService:
+        def __init__(self):
+            self.writes = []
+
+        async def write_app_secrets(self, secrets):
+            self.writes.append(dict(secrets))
+            return True
+
+    bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
+    bridge.service = _VaultService()
+
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run_loop():
+        asyncio.set_event_loop(loop)
+        loop.call_soon(ready.set)
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run_loop, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=2.0)
+    try:
+        backend = AndroidSecretBackend(loop, bridge, {"password": "init"})
+        assert backend.read_secret("password") == "init"
+        assert backend.write_all({"password": "updated", "ws_token": "tok"}) is True
+        assert backend.read_secret("password") == "updated"
+        assert bridge.service.writes == [{"password": "updated", "ws_token": "tok"}]
+
+        async def _write_on_loop():
+            return backend.write_all({"password": "blocked"})
+
+        fut = asyncio.run_coroutine_threadsafe(_write_on_loop(), loop)
+        assert fut.result(timeout=2.0) is False
+        assert backend.read_secret("password") == "updated"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2.0)
+        loop.close()

@@ -26,6 +26,25 @@ _MAX_IPA_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_IPA_MEMBERS = 100_000
 _MAX_EXPANDED_BYTES = 8 * 1024 * 1024 * 1024
 _HEX40 = re.compile(r"^[0-9a-fA-F]{40}$")
+_REQUIRED_OFFICE_VIEWER_ASSETS = (
+    "docx_host.html",
+    "docx_host.js",
+    "docx-preview.min.js",
+    "jszip.min.js",
+    "pptx_host.html",
+    "pptx_host.js",
+    "pptx_worker.js",
+    "pptx_engine.js",
+    "viewer.css",
+    "viewer_common.js",
+)
+_REQUIRED_PDF_VIEWER_ASSETS = (
+    "pdf_host.html",
+    "pdf_host.js",
+    "pdf_viewer.css",
+    "pdf.min.mjs",
+    "pdf.worker.min.mjs",
+)
 
 
 class IpaError(ValueError):
@@ -110,12 +129,119 @@ def _macho_architectures(path: Path) -> tuple[str, ...]:
     return ("arm64",)
 
 
+def verify_ios_app_office_viewer_assets(
+    app: Path,
+    *,
+    require: bool = True,
+) -> bool:
+    """Verify bundled ``office_viewer/*`` files in an iOS ``.app`` bundle."""
+    if not require:
+        return False
+    bundle = Path(app)
+    app_zips = sorted(
+        item
+        for item in bundle.rglob("app.zip")
+        if not item.is_symlink() and item.is_file()
+    )
+    if app_zips:
+        for app_zip in app_zips:
+            try:
+                with zipfile.ZipFile(app_zip) as nested:
+                    members = nested.infolist()
+                    by_name: dict[str, list[zipfile.ZipInfo]] = {}
+                    for member in members:
+                        if stat.S_ISLNK(member.external_attr >> 16):
+                            raise IpaError(
+                                f"Nested app.zip ({app_zip.name}) contains unsafe symlink member: {member.filename}"
+                            )
+                        by_name.setdefault(member.filename, []).append(member)
+                    for asset_name in _REQUIRED_OFFICE_VIEWER_ASSETS:
+                        candidates = (
+                            f"assets/office_viewer/{asset_name}",
+                            f"app/assets/office_viewer/{asset_name}",
+                        )
+                        matched_infos: list[zipfile.ZipInfo] = []
+                        for candidate in candidates:
+                            matched_infos.extend(by_name.get(candidate, ()))
+                        if not matched_infos:
+                            raise IpaError(
+                                f"Nested app.zip ({app_zip.name}) is missing office_viewer asset: {asset_name}"
+                            )
+                        for info in matched_infos:
+                            if info.is_dir():
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) contains unsafe office_viewer asset: {asset_name}"
+                                )
+                            if info.file_size <= 0:
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) has empty office_viewer asset: {asset_name}"
+                                )
+                    for asset_name in _REQUIRED_PDF_VIEWER_ASSETS:
+                        candidates = (
+                            f"assets/pdf_viewer/{asset_name}",
+                            f"app/assets/pdf_viewer/{asset_name}",
+                        )
+                        matched_infos = []
+                        for candidate in candidates:
+                            matched_infos.extend(by_name.get(candidate, ()))
+                        if not matched_infos:
+                            raise IpaError(
+                                f"Nested app.zip ({app_zip.name}) is missing pdf_viewer asset: {asset_name}"
+                            )
+                        for info in matched_infos:
+                            if info.is_dir():
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) contains unsafe pdf_viewer asset: {asset_name}"
+                                )
+                            if info.file_size <= 0:
+                                raise IpaError(
+                                    f"Nested app.zip ({app_zip.name}) has empty pdf_viewer asset: {asset_name}"
+                                )
+            except (OSError, zipfile.BadZipFile) as exc:
+                raise IpaError("iOS nested app.zip is invalid") from exc
+        return True
+
+    viewer_dirs = sorted(
+        item
+        for item in bundle.rglob("office_viewer")
+        if not item.is_symlink() and item.is_dir()
+    )
+    pdf_viewer_dirs = sorted(
+        item
+        for item in bundle.rglob("pdf_viewer")
+        if not item.is_symlink() and item.is_dir()
+    )
+    has_office = any(
+        all(
+            not (viewer_dir / asset_name).is_symlink()
+            and (viewer_dir / asset_name).is_file()
+            and (viewer_dir / asset_name).stat().st_size > 0
+            for asset_name in _REQUIRED_OFFICE_VIEWER_ASSETS
+        )
+        for viewer_dir in viewer_dirs
+    )
+    has_pdf = any(
+        all(
+            not (pdf_dir / asset_name).is_symlink()
+            and (pdf_dir / asset_name).is_file()
+            and (pdf_dir / asset_name).stat().st_size > 0
+            for asset_name in _REQUIRED_PDF_VIEWER_ASSETS
+        )
+        for pdf_dir in pdf_viewer_dirs
+    )
+    if has_office and has_pdf:
+        return True
+
+    raise IpaError("iOS app bundle is missing required office_viewer/pdf_viewer assets")
+
+
 def inspect_device_app(
     app: Path,
     *,
     version: str,
     build_number: str,
     bundle_id: str,
+    require_office_viewer: bool = False,
 ) -> IosAppMetadata:
     """Validate one unpacked, unsigned device application bundle."""
     bundle = Path(app)
@@ -157,6 +283,7 @@ def inspect_device_app(
     if executable.is_symlink() or not executable.is_file():
         raise IpaError("application executable is invalid")
     architectures = _macho_architectures(executable)
+    verify_ios_app_office_viewer_assets(bundle, require=require_office_viewer)
     return IosAppMetadata(
         bundle_id=actual_bundle,
         version=actual_version,
@@ -208,6 +335,7 @@ def inspect_ipa(
     version: str,
     build_number: str,
     bundle_id: str,
+    require_office_viewer: bool = False,
 ) -> IosAppMetadata:
     """Reopen and independently validate a packaged IPA."""
     path = Path(ipa)
@@ -225,6 +353,7 @@ def inspect_ipa(
                     version=version,
                     build_number=build_number,
                     bundle_id=bundle_id,
+                    require_office_viewer=require_office_viewer,
                 )
     except (OSError, zipfile.BadZipFile) as exc:
         raise IpaError("IPA container is invalid") from exc
@@ -237,6 +366,7 @@ def package_unsigned_ipa(
     version: str,
     build_number: str,
     bundle_id: str,
+    require_office_viewer: bool = False,
 ) -> IosAppMetadata:
     """Package one no-codesign xcarchive using the native macOS ZIP tool."""
     archive_path = Path(archive)
@@ -255,6 +385,7 @@ def package_unsigned_ipa(
         version=version,
         build_number=build_number,
         bundle_id=bundle_id,
+        require_office_viewer=require_office_viewer,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="uthelper-ipa-package-") as temp:
@@ -275,6 +406,7 @@ def package_unsigned_ipa(
                     str(temporary_ipa),
                 ],
                 cwd=root,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -287,6 +419,7 @@ def package_unsigned_ipa(
             version=version,
             build_number=build_number,
             bundle_id=bundle_id,
+            require_office_viewer=require_office_viewer,
         )
         os.replace(temporary_ipa, destination)
     return verified
@@ -358,6 +491,7 @@ def main() -> None:
     parser.add_argument("--bundle-id", required=True)
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument("--workflow-run-id", required=True)
+    parser.add_argument("--require-office-viewer", action="store_true")
     args = parser.parse_args()
     metadata = package_unsigned_ipa(
         args.archive,
@@ -365,6 +499,7 @@ def main() -> None:
         version=args.version,
         build_number=args.build_number,
         bundle_id=args.bundle_id,
+        require_office_viewer=args.require_office_viewer,
     )
     write_verification_evidence(
         args.output,

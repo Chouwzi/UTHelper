@@ -1,6 +1,8 @@
+import json
 import os
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -34,6 +36,7 @@ def _scheduler_notifier(tmp_path):
     notifier = WindowsNotifier(start_scheduler=False)
     notifier._schedule_state_path = tmp_path / "windows-schedules.json"
     notifier._receipt_path = tmp_path / "windows-receipts.json"
+    notifier._class_receipt_path = tmp_path / "windows-class-receipts.json"
     notifier._schedule_state = {}
     return notifier
 
@@ -136,6 +139,58 @@ def test_failed_windows_schedule_retries_before_deadline(tmp_path):
     notifier.close()
 
 
+def test_deliver_pending_writes_class_receipts_to_the_class_receipt_file(tmp_path):
+    """Class deliveries must never land in the deadline receipt cache.
+
+    Regression: ``_deliver_pending`` falls back to ``_receipt_path`` whenever
+    ``_class_receipt_path`` is missing, which re-introduces class reminders into
+    the activity delivery cache keyed by course URL.
+    """
+    notifier = _scheduler_notifier(tmp_path)
+    start = datetime.now() + timedelta(hours=3)
+    reminder = SimpleNamespace(
+        reminder_id="reminder-1",
+        delivery_mode="in_person",
+        lead_hours=1,
+        scheduled_at=datetime.now() - timedelta(seconds=1),
+        session=SimpleNamespace(
+            subject="Mạng máy tính",
+            course_code="CN123",
+            room="F.302",
+            campus="Cơ sở Võ Oanh",
+            note="",
+            start_at=start,
+        ),
+    )
+    notifier.reconcile_class_schedule_reminders([reminder])
+    key = "class_schedule:reminder-1"
+    value = notifier._schedule_state[key]
+    notifier.notify_class_schedule_reminder = MagicMock(return_value=True)
+
+    notifier._deliver_pending(key, value)
+
+    notifier.notify_class_schedule_reminder.assert_called_once_with(value)
+    class_receipts = json.loads(
+        notifier._class_receipt_path.read_text(encoding="utf-8")
+    )
+    assert class_receipts == [
+        {
+            "activity_key": "reminder-1",
+            "deadline_revision": "",
+            "milestone": "class_schedule_1h",
+            "channel": "windows",
+            "delivered_at": class_receipts[0]["delivered_at"],
+        }
+    ]
+    deadline_receipts = tmp_path / "windows-receipts.json"
+    assert not deadline_receipts.exists() or json.loads(
+        deadline_receipts.read_text(encoding="utf-8")
+    ) == []
+    assert key not in notifier._schedule_state
+    assert notifier.get_diagnostics()["scheduled_delivered"] == 1
+    notifier.close()
+
+
 def test_cancel_activity_only_removes_matching_windows_reminders(tmp_path):
     notifier = _scheduler_notifier(tmp_path)
     first = _scheduled_reminder(notification_id=1)
@@ -153,3 +208,133 @@ def test_cancel_activity_only_removes_matching_windows_reminders(tmp_path):
     assert notifier.cancel_activity("quiz-42") == 1
     assert set(notifier._schedule_state) == {second.state_key}
     notifier.close()
+
+
+def test_class_schedule_reconciliation_preserves_deadline_schedules(tmp_path):
+    from core.class_schedule_notifications import build_class_schedule_reminders
+    from core.today_schedule import ClassSession
+
+    notifier = _scheduler_notifier(tmp_path)
+    deadline_reminder = _scheduled_reminder()
+    notifier.reconcile_schedules([deadline_reminder])
+
+    now = datetime.now()
+    session = ClassSession(
+        session_id="class-1",
+        subject="Mạng máy tính",
+        course_code="CN123",
+        start_at=now + timedelta(hours=3),
+        end_at=now + timedelta(hours=5),
+        room="F.302",
+        campus="Cơ sở Võ Oanh",
+        period_start=1,
+        period_end=3,
+        cancelled=False,
+        note="",
+    )
+    class_reminders = build_class_schedule_reminders(
+        [session], now=now, enabled=True
+    )
+
+    result = notifier.reconcile_class_schedule_reminders(class_reminders)
+
+    # The 3-hour lead is due at `now` for this fixture and is not scheduled;
+    # the 2-hour and 1-hour reminders remain in the future.
+    assert result.scheduled == 2
+    assert deadline_reminder.state_key in notifier._schedule_state
+    assert {
+        key for key in notifier._schedule_state if key.startswith("class_schedule:")
+    } == {f"class_schedule:{item.reminder_id}" for item in class_reminders}
+    notifier.close()
+
+
+def test_class_schedule_reconciliation_removes_only_class_reminders(tmp_path):
+    from core.class_schedule_notifications import build_class_schedule_reminders
+    from core.today_schedule import ClassSession
+
+    notifier = _scheduler_notifier(tmp_path)
+    deadline_reminder = _scheduled_reminder()
+    notifier.reconcile_schedules([deadline_reminder])
+
+    now = datetime.now()
+    session = ClassSession(
+        session_id="class-2",
+        subject="Cơ sở dữ liệu",
+        course_code="DB123",
+        start_at=now + timedelta(hours=3),
+        end_at=now + timedelta(hours=5),
+        room="F.302",
+        campus="Cơ sở Võ Oanh",
+        period_start=1,
+        period_end=3,
+        cancelled=False,
+        note="",
+    )
+    class_reminders = build_class_schedule_reminders(
+        [session], now=now, enabled=True
+    )
+    notifier.reconcile_class_schedule_reminders(class_reminders)
+    notifier.reconcile_class_schedule_reminders([])
+
+    assert list(notifier._schedule_state) == [deadline_reminder.state_key]
+    notifier.close()
+
+
+def test_class_schedule_windows_payload_contains_delivery_mode_and_lead_time(tmp_path):
+    from core.class_schedule_notifications import build_class_schedule_reminders
+    from core.today_schedule import ClassSession
+
+    notifier = _scheduler_notifier(tmp_path)
+    now = datetime.now()
+    session = ClassSession(
+        session_id="online-class-1",
+        subject="Mạng máy tính",
+        course_code="CN123",
+        start_at=now + timedelta(hours=4),
+        end_at=now + timedelta(hours=6),
+        room="Zoom",
+        campus="",
+        period_start=1,
+        period_end=3,
+        cancelled=False,
+        note="Học trực tuyến qua Zoom",
+    )
+    reminders = build_class_schedule_reminders(
+        [session], now=now, enabled=True, lead_hours=(1, 2, 3)
+    )
+    result = notifier.reconcile_class_schedule_reminders(reminders)
+
+    assert result.scheduled == 3
+    scheduled = list(notifier._schedule_state.values())
+    assert {item["delivery_mode"] for item in scheduled} == {"online"}
+    assert {item["lead_hours"] for item in scheduled} == {1, 2, 3}
+    notifier.close()
+
+
+def test_windows_class_toast_shows_delivery_mode_and_selected_lead_time():
+    toaster = MagicMock()
+    module = MagicMock()
+    module.InteractableWindowsToaster.return_value = toaster
+    toast = MagicMock()
+    module.Toast.return_value = toast
+
+    notifier = WindowsNotifier.__new__(WindowsNotifier)
+    notifier.app_id = "UTHelper"
+    notifier.aumid = "Package_family!UTHelper"
+    notifier.tray_app = None
+    notifier.last_error = ""
+    value = {
+        "subject": "Mạng máy tính",
+        "class_start_at": (datetime.now() + timedelta(hours=3)).isoformat(),
+        "room": "",
+        "campus": "",
+        "note": "Học trực tuyến qua Zoom",
+        "delivery_mode": "online",
+        "lead_hours": 3,
+    }
+    with patch.dict(sys.modules, {"windows_toasts": module}):
+        assert notifier.notify_class_schedule_reminder(value) is True
+
+    assert "Trực tuyến" in toast.text_fields[1]
+    assert "Còn 3 giờ nữa" in toast.text_fields[1]
+    toaster.show_toast.assert_called_once_with(toast)

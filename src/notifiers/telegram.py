@@ -1,8 +1,7 @@
 import logging
 import html
-import httpx
 from datetime import datetime
-from typing import List
+from typing import Any, List
 from models import Assignment
 from config import settings
 from core.time_utils import format_remaining_time
@@ -13,6 +12,23 @@ logger = logging.getLogger(__name__)
 
 # Telegram API max message length
 _TELEGRAM_MAX_LENGTH = 4000
+
+_httpx_mod: Any = None
+
+
+def _get_httpx() -> Any:
+    global _httpx_mod
+    if _httpx_mod is None:
+        import httpx as _loaded
+
+        _httpx_mod = _loaded
+    return _httpx_mod
+
+
+def __getattr__(name: str) -> Any:
+    if name == "httpx":
+        return _get_httpx()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _get(obj, key, default=''):
@@ -31,30 +47,30 @@ class TelegramNotifier(BaseNotifier):
 
         tasks = assignments
         if not tasks:
-            return False
+            return True
 
         token = settings.TELEGRAM_BOT_TOKEN
         chat_id = settings.TELEGRAM_CHAT_ID
         api_url = f"https://api.telegram.org/bot{token}/sendMessage"
 
-        # Count urgencies for smart summary
-        critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
-        warning_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'warning')
+        if all(bool(_get(t, "is_grade_alert", False)) for t in tasks):
+            header = f"📊 <b>UTHelper</b> · Cập nhật điểm mới ({len(tasks)})\n\n"
+        else:
+            critical_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'critical')
+            warning_count = sum(1 for t in tasks if urgency_str(_get(t, 'urgency', 'safe')) == 'warning')
 
-        # Smart summary
-        summary_parts = []
-        if critical_count:
-            summary_parts.append(f"🔴 {critical_count} khẩn cấp")
-        if warning_count:
-            summary_parts.append(f"🟠 {warning_count} sắp hạn")
-        safe_count = len(tasks) - critical_count - warning_count
-        if safe_count > 0:
-            summary_parts.append(f"🟢 {safe_count} bình thường")
-        summary = " · ".join(summary_parts)
+            summary_parts = []
+            if critical_count:
+                summary_parts.append(f"🔴 {critical_count} khẩn cấp")
+            if warning_count:
+                summary_parts.append(f"🟠 {warning_count} sắp hạn")
+            safe_count = len(tasks) - critical_count - warning_count
+            if safe_count > 0:
+                summary_parts.append(f"🟢 {safe_count} bình thường")
+            summary = " · ".join(summary_parts)
 
-        # Build header
-        header = "📋 <b>UTHelper</b> · Nhắc nhở deadline\n"
-        header += f"<i>{summary}</i>\n\n"
+            header = "📋 <b>UTHelper</b> · Nhắc nhở deadline\n"
+            header += f"<i>{summary}</i>\n\n"
 
         # Footer
         time_str = datetime.now().strftime("%H:%M %d/%m/%Y")
@@ -90,17 +106,39 @@ class TelegramNotifier(BaseNotifier):
             "disable_web_page_preview": True
         }
 
+        http_client = globals().get("httpx") or _get_httpx()
         try:
-            r = httpx.post(api_url, json=payload, timeout=5)
-            r.raise_for_status()
+            r = http_client.post(api_url, json=payload, timeout=5)
+            if r is not None and hasattr(r, "raise_for_status"):
+                r.raise_for_status()
             logger.info(f"[Telegram] Đã gửi thông báo tổng hợp cho {len(tasks)} bài tập.")
             return True
+        except http_client.HTTPStatusError as e:
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            logger.error("[Telegram] Lỗi khi gửi: HTTP %s", status_code)
+            return False
+        except http_client.RequestError as e:
+            logger.error("[Telegram] Lỗi kết nối: %s", type(e).__name__)
+            return False
         except Exception as e:
-            logger.error(f"[Telegram] Lỗi khi gửi: {e}")
+            logger.error("[Telegram] Lỗi khi gửi: %s", type(e).__name__)
             return False
 
     def _format_task_block(self, a) -> str:
         """Format a single task into a rich HTML text block for Telegram."""
+        if bool(_get(a, "is_grade_alert", False)):
+            title = html.escape(str(_get(a, "title", "📊 Điểm mới")))
+            course_raw = _get(a, "course_name", "") or _get(a, "course", "Không rõ môn")
+            course = html.escape(clean_course_name(str(course_raw)))
+            item_name = html.escape(str(_get(a, "item_name", "") or "-"))
+            old_grade = html.escape(str(_get(a, "old_grade", "-") or "-"))
+            new_grade = html.escape(str(_get(a, "new_grade", "-") or "-"))
+            block = "━━━━━━━━━━━━━━━━━\n"
+            block += f"<b>{title}</b>\n"
+            block += f"📚 {course}\n"
+            block += f"📝 {item_name}: <code>{old_grade}</code> → <b>{new_grade}</b>\n\n"
+            return block
+
         # Title
         title = _get(a, "title", "Không rõ tiêu đề")
         title = html.escape(str(title))
@@ -131,7 +169,7 @@ class TelegramNotifier(BaseNotifier):
 
         # Urgency display
         urgency = _get(a, "urgency", "safe")
-        urg_emoji, urg_label = get_urgency_display(urgency)
+        urg_emoji, _urg_label = get_urgency_display(urgency)
 
         # Submission status
         submission = _get(a, 'submission_status', '')

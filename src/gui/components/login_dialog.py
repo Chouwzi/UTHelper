@@ -1,9 +1,16 @@
 import flet as ft
 import asyncio
 from config import settings, save_settings
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from gui.core.theme import C
 
-async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
+async def show_login_dialog(
+    page: ft.Page,
+    orchestrator,
+    on_success_callback,
+    *,
+    allow_cancel: bool = False,
+):
     """
     Component hiển thị hộp thoại đăng nhập ban đầu nếu chưa có thông tin username/password.
     Tách biệt khỏi AppController để đảm bảo SRP.
@@ -69,6 +76,17 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
     )
 
     loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)
+    cancel_button = ft.TextButton("Hủy") if allow_cancel else None
+
+    def on_cancel(_event):
+        try:
+            page.pop_dialog()
+        except (AttributeError, TypeError):
+            dlg.open = False
+        page.update()
+
+    if cancel_button is not None:
+        cancel_button.on_click = on_cancel
 
     async def on_login_click(e):
         # --- Validation with field highlighting ---
@@ -103,19 +121,28 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
         btn_login.disabled = True
         username_field.disabled = True
         password_field.disabled = True
+        if cancel_button is not None:
+            cancel_button.disabled = True
         loading_bar.visible = True
         page.update()
 
+        raw_username = username_field.value.strip()
+        canonical_username = (
+            normalize_demo_username(raw_username)
+            if is_demo_account(raw_username)
+            else raw_username
+        )
         success = await asyncio.to_thread(
-            orchestrator.client.login, username_field.value.strip(),
+            orchestrator.client.login, canonical_username,
             password_field.value, True
         )
 
         if success:
-            settings.UTH_USERNAME = username_field.value.strip()
+            username_field.value = canonical_username
+            settings.UTH_USERNAME = canonical_username
             settings.UTH_PASSWORD = password_field.value
             orchestrator.is_logged_in = True
-            save_settings()
+            await asyncio.to_thread(save_settings)
 
             # Success feedback
             btn_login.content = ft.Row(
@@ -155,6 +182,8 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             btn_login.disabled = False
             username_field.disabled = False
             password_field.disabled = False
+            if cancel_button is not None:
+                cancel_button.disabled = False
             loading_bar.visible = False
             # UX: Specific error messages based on failure reason
             error_reason = getattr(orchestrator.client, '_last_login_error', '')
@@ -238,6 +267,8 @@ async def show_login_dialog(page: ft.Page, orchestrator, on_success_callback):
             padding=ft.Padding.only(top=8, bottom=4),
         ),
         content_padding=24,
+        actions=[cancel_button] if cancel_button is not None else [],
+        actions_alignment=ft.MainAxisAlignment.END,
     )
 
     # Open dialog - Flet 0.82+: page.show_dialog()

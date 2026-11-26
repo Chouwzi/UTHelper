@@ -55,7 +55,7 @@ _EVIDENCE_KEYS = frozenset(
 _EXPECTED = {
     ".ipa": (
         "ios",
-        "com.uthelper.UTHelper",
+        "io.github.chouwzi.uthelper",
         "arm64",
         frozenset(
             {
@@ -72,13 +72,14 @@ _EXPECTED = {
     ),
     ".apk": (
         "android",
-        "com.uthelper.uthelper",
+        "io.github.chouwzi.uthelper",
         "universal",
         frozenset(
             {
                 "apk_signature",
                 "native_abis",
                 "notification_receivers",
+                "office_viewer_assets",
                 "package_id",
                 "sha256",
                 "version_code",

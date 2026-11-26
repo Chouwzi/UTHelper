@@ -20,6 +20,14 @@ class SettingsFormValidationError(ValueError):
     """A validation error which identifies a control but never echoes its value."""
 
 
+class ClassScheduleLeadHoursError(SettingsFormValidationError):
+    """Schedule reminders were enabled without any selected lead hour.
+
+    A dedicated type lets ``SettingsView._save`` explain this exact problem
+    instead of falling back to the generic "enter a valid number" message.
+    """
+
+
 DEFAULT_THEME = "midnight_blue"
 DEFAULT_COLORS = {
     "color_critical": "#EF4444",
@@ -33,6 +41,7 @@ DEFAULT_COLORS = {
 }
 DEFAULT_NOTIFY_TYPES = ("assignment", "attendance", "quiz")
 DEFAULT_MILESTONES = (4320, 1440, 180, 60, 30, 5)
+DEFAULT_CLASS_SCHEDULE_LEAD_HOURS = (1,)
 _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 
@@ -140,6 +149,29 @@ def _normalize_milestones(value: object) -> tuple[int, ...]:
     return tuple(sorted(milestones, reverse=True))
 
 
+
+
+def _normalize_class_schedule_lead_hours(value: object) -> tuple[int, ...]:
+    """Normalize the selectable one-, two- and three-hour class reminders."""
+    if value is None:
+        return DEFAULT_CLASS_SCHEDULE_LEAD_HOURS
+    if isinstance(value, str):
+        raw_values = [part.strip() for part in value.split(",") if part.strip()]
+    else:
+        try:
+            raw_values = list(value)  # type: ignore[arg-type]
+        except TypeError:
+            raw_values = [value]
+    normalized: set[int] = set()
+    for item in raw_values:
+        parsed = _coerce_integral(item)
+        if parsed not in {1, 2, 3}:
+            raise SettingsFormValidationError(
+                "notify_class_schedule_lead_hours must contain only 1, 2 or 3"
+            ) from None
+        normalized.add(parsed)
+    return tuple(sorted(normalized))
+
 def _parse_bool(name: str, value: object, default: bool) -> bool:
     if _is_blank(value):
         return default
@@ -219,6 +251,8 @@ class SettingsFormSnapshot:
     notification_profile: str
     notify_types: tuple[str, ...]
     notify_milestones_minutes: tuple[int, ...]
+    notify_class_schedule_enabled: bool
+    notify_class_schedule_lead_hours: tuple[int, ...]
     notify_muted_courses: tuple[str, ...]
 
     @classmethod
@@ -268,6 +302,15 @@ class SettingsFormSnapshot:
                 "notification_profile": getattr(value, "NOTIFICATION_PROFILE", "balanced"),
                 "notify_types": getattr(value, "NOTIFY_TYPES", DEFAULT_NOTIFY_TYPES),
                 "notify_milestones_minutes": getattr(value, "NOTIFY_MILESTONES_MINUTES", DEFAULT_MILESTONES),
+                "notify_class_schedule_enabled": getattr(
+                    value, "NOTIFY_CLASS_SCHEDULE_ENABLED", False
+                ),
+                "notify_class_schedule_lead_hours": (
+                    # A persisted empty list (older builds saved one) must not
+                    # crash Settings on open: fall back to the default hour.
+                    getattr(value, "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", None)
+                    or DEFAULT_CLASS_SCHEDULE_LEAD_HOURS
+                ),
                 "notify_muted_courses": getattr(value, "NOTIFY_MUTED_COURSES", ()),
             }
         )
@@ -275,7 +318,7 @@ class SettingsFormSnapshot:
     @classmethod
     def from_form_values(cls, values: Mapping[str, object]) -> SettingsFormSnapshot:
         """Parse controls into the canonical state, with value-safe errors."""
-        return cls(
+        snapshot = cls(
             theme=_text(values.get("theme"), DEFAULT_THEME),
             color_critical=_normalize_color(values.get("color_critical"), DEFAULT_COLORS["color_critical"]),
             color_warning=_normalize_color(values.get("color_warning"), DEFAULT_COLORS["color_warning"]),
@@ -320,8 +363,23 @@ class SettingsFormSnapshot:
             notification_profile=_text(values.get("notification_profile"), "balanced").casefold(),
             notify_types=_normalize_notify_types(values.get("notify_types")),
             notify_milestones_minutes=_normalize_milestones(values.get("notify_milestones_minutes")),
+            notify_class_schedule_enabled=_parse_bool(
+                "notify_class_schedule_enabled",
+                values.get("notify_class_schedule_enabled"),
+                False,
+            ),
+            notify_class_schedule_lead_hours=_normalize_class_schedule_lead_hours(
+                values.get("notify_class_schedule_lead_hours", DEFAULT_CLASS_SCHEDULE_LEAD_HOURS)
+            ),
             notify_muted_courses=_normalize_csv_strings(values.get("notify_muted_courses")),
         )
+        if snapshot.notify_class_schedule_enabled and not snapshot.notify_class_schedule_lead_hours:
+            # Enabling reminders with every lead chip deselected would
+            # silently schedule nothing; reject it so the UI can explain.
+            raise ClassScheduleLeadHoursError(
+                "notify_class_schedule_lead_hours must contain at least one of 1, 2 or 3"
+            )
+        return snapshot
 
     def to_settings_values(self) -> dict[str, object]:
         """Return an explicit config-field mapping; no implicit name conversion."""
@@ -368,5 +426,7 @@ class SettingsFormSnapshot:
             "NOTIFICATION_PROFILE": self.notification_profile,
             "NOTIFY_TYPES": list(self.notify_types),
             "NOTIFY_MILESTONES_MINUTES": list(self.notify_milestones_minutes),
+            "NOTIFY_CLASS_SCHEDULE_ENABLED": self.notify_class_schedule_enabled,
+            "NOTIFY_CLASS_SCHEDULE_LEAD_HOURS": list(self.notify_class_schedule_lead_hours),
             "NOTIFY_MUTED_COURSES": list(self.notify_muted_courses),
         }

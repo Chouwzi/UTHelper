@@ -166,7 +166,7 @@ class TestSettingsSerialization:
     def test_legacy_poll_interval_migrates_when_check_missing(self):
         migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 4
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
 
     def test_legacy_notification_milestones_migrate_to_minutes(self):
         migrated = migrate_settings_data({
@@ -187,7 +187,7 @@ class TestSettingsSerialization:
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})
 
         assert migrated["AUTO_UPDATE_ENABLED"] is True
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 4
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
         assert Settings(**migrated).AUTO_UPDATE_ENABLED is True
         assert (
             Settings.model_fields["AUTO_UPDATE_ENABLED"].description
@@ -224,3 +224,89 @@ class TestSecretFieldsMapping:
         s = Settings()
         for attr_name in _SECRET_FIELDS:
             assert hasattr(s, attr_name), f"Settings missing attribute {attr_name}"
+
+
+class TestMobileStoragePathResolution:
+    """Android/iOS storage directory alignment with Flet runtime storage."""
+
+    def test_android_prefers_flet_app_storage_data(self, monkeypatch, tmp_path):
+        import config
+
+        storage_dir = tmp_path / "flet_storage_data"
+        legacy_dir = tmp_path / "flet_legacy_data"
+        monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+        monkeypatch.setenv("FLET_APP_STORAGE_DATA", str(storage_dir))
+        monkeypatch.setenv("FLET_APP_DATA", str(legacy_dir))
+
+        assert config.is_android() is True
+        assert config.get_data_dir() == storage_dir / "UTHelper"
+
+    def test_android_falls_back_to_legacy_flet_app_data_when_storage_unset(
+        self, monkeypatch, tmp_path
+    ):
+        import config
+
+        legacy_dir = tmp_path / "flet_legacy_data"
+        monkeypatch.setattr(config.sys, "getandroidapilevel", lambda: 35, raising=False)
+        monkeypatch.setenv("FLET_APP_STORAGE_DATA", "   ")
+        monkeypatch.setenv("FLET_APP_DATA", str(legacy_dir))
+
+        assert config.is_android() is True
+        assert config.get_data_dir() == legacy_dir / "UTHelper"
+
+    def test_ios_and_android_without_env_fall_back_to_home_uthelper(
+        self, monkeypatch, tmp_path
+    ):
+        import config
+
+        home_dir = tmp_path / "home"
+        monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+        monkeypatch.delattr(config.sys, "getandroidapilevel", raising=False)
+        monkeypatch.setattr(config.sys, "platform", "ios")
+        monkeypatch.delenv("FLET_APP_STORAGE_DATA", raising=False)
+        monkeypatch.delenv("FLET_APP_DATA", raising=False)
+        monkeypatch.setattr(config.Path, "home", lambda: home_dir)
+
+        assert config.is_android() is True
+        assert config.get_data_dir() == home_dir / ".uthelper"
+
+    @pytest.mark.parametrize(
+        ("platform_name", "sys_platform", "expected_subdir"),
+        [
+            ("Windows", "win32", "appdata"),
+            ("Darwin", "darwin", "Library"),
+            ("Linux", "linux", "UTHelper"),
+        ],
+    )
+    def test_desktop_platforms_ignore_flet_app_storage_data(
+        self, monkeypatch, tmp_path, platform_name, sys_platform, expected_subdir
+    ):
+        import config
+
+        storage_dir = tmp_path / "flet_storage_data"
+        appdata_dir = tmp_path / "appdata"
+        home_dir = tmp_path / "home"
+        monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+        monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+        monkeypatch.delattr(config.sys, "getandroidapilevel", raising=False)
+        monkeypatch.setattr(config.sys, "platform", sys_platform)
+        monkeypatch.setattr(config.platform, "system", lambda: platform_name)
+        monkeypatch.setenv("FLET_APP_STORAGE_DATA", str(storage_dir))
+        monkeypatch.setenv("APPDATA", str(appdata_dir))
+        monkeypatch.setattr(config.Path, "home", lambda: home_dir)
+
+        resolved = config.get_data_dir()
+        assert storage_dir not in resolved.parents
+        assert resolved != storage_dir / "UTHelper"
+        assert expected_subdir in str(resolved)
+
+
+def test_class_schedule_reminder_settings_have_safe_defaults_and_migrate():
+    migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 4})
+
+    assert migrated["NOTIFY_CLASS_SCHEDULE_ENABLED"] is False
+    assert migrated["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1]
+    assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
+    settings = Settings(**migrated)
+    assert settings.NOTIFY_CLASS_SCHEDULE_ENABLED is False
+    assert settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS == [1]

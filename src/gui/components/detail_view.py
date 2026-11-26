@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from collections.abc import Mapping
 from typing import Optional
 from urllib.parse import parse_qsl, urlsplit
 
@@ -11,14 +12,20 @@ if _project_root not in sys.path:
 
 import flet as ft
 import asyncio
+import inspect
 import logging
 from collections import Counter
+import platform_utils
+from config import settings
+from core.demo_sandbox import is_demo_account
 from gui.core.theme import C, refresh_semantic_control_colors, semantic_palette
 from gui.core.utils import (
+    DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
     clean_course_name,
     format_deadline,
     get_card_countdown,
     get_urgency_badge,
+    is_uth_lms_url,
 )
 from gui.components.detail.submitted_files_table import build_submitted_files_ui
 from gui.components.detail.submission_presenter import (
@@ -35,12 +42,15 @@ from core.submission_models import (
     normalize_filepath,
 )
 from core.moodle_sites import moodle_site_from_origin, moodle_site_from_url
+from core.activity_status import normalize_submission_status
+from core.url_validation import validate_https_url
 from core.use_cases.submission_workflow import (
     FinalizeSubmissionIntent,
     SelectedSubmissionFile,
     SubmissionMutationResult,
     SubmissionTarget,
 )
+from gui.components.in_app_webview import InAppWebViewDialog
 
 logger = logging.getLogger(__name__)
 
@@ -90,23 +100,68 @@ def _translate_key(key: str) -> str:
     return _KEY_TRANSLATIONS.get(key, key)
 
 class DetailView(ft.Container):
-    def __init__(self, page: ft.Page, on_close, get_client=None, on_status_changed=None, submission_workflow_factory=None):
+    def __init__(
+        self,
+        page: ft.Page,
+        on_close,
+        get_client=None,
+        on_status_changed=None,
+        submission_workflow_factory=None,
+        quiz_player_view=None,
+        get_quiz_account_id=None,
+        on_open_url=None,
+        on_open_external=None,
+        get_account_epoch=None,
+        *,
+        embedded_in_pane: bool = False,
+    ):
         super().__init__()
-        self._init_variables(page, get_client, on_status_changed, submission_workflow_factory)
+        self._init_variables(
+            page,
+            get_client,
+            on_status_changed,
+            submission_workflow_factory,
+            quiz_player_view,
+            get_quiz_account_id,
+            on_open_url,
+            on_open_external,
+            get_account_epoch,
+            embedded_in_pane=embedded_in_pane,
+        )
         self._init_controls()
         self._init_layout(on_close)
         self._rendered_palette = semantic_palette()
 
-    def _init_variables(self, page: ft.Page, get_client, on_status_changed, submission_workflow_factory):
+    def _init_variables(
+        self,
+        page: ft.Page,
+        get_client,
+        on_status_changed,
+        submission_workflow_factory,
+        quiz_player_view=None,
+        get_quiz_account_id=None,
+        on_open_url=None,
+        on_open_external=None,
+        get_account_epoch=None,
+        *,
+        embedded_in_pane: bool = False,
+    ):
         self._page          = page
         self.visible        = False
         self.expand         = True
         self.bgcolor        = C.BG
+        self._embedded_in_pane = bool(embedded_in_pane)
         self._current_url   = ""
         self._current_data  = {}
-        self._get_client    = get_client   
+        self._get_client    = get_client
         self._on_status_changed = on_status_changed
         self._submission_workflow_factory = submission_workflow_factory
+        self._quiz_player_view = quiz_player_view
+        self._get_quiz_account_id = get_quiz_account_id
+        self._on_open_url = on_open_url
+        self._on_open_external = on_open_external
+        self._get_account_epoch = get_account_epoch
+        self._quiz_launch_target = None
         self._selected_files = []          
         self._is_uploading  = False
         self._submission_snapshot: SubmissionSnapshot | None = None
@@ -115,6 +170,228 @@ class DetailView(ft.Container):
         self._pending_file_mutation: tuple[MutationOperation, bool] | None = None
         self._view_generation = 0
         self._snapshot_load_generation = 0
+        self._account_generation = 0
+        self._owner_account_epoch = (
+            self._current_account_epoch() if self._embedded_in_pane else None
+        )
+        self._pane_width: float | None = None
+
+    def _current_account_epoch(self) -> int | None:
+        getter = getattr(self, "_get_account_epoch", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if isinstance(val, int) and not isinstance(val, bool):
+                    return val
+            except Exception:
+                pass
+        for cb_attr in ("_on_status_changed", "_submission_workflow_factory"):
+            cb = getattr(self, cb_attr, None)
+            owner = getattr(cb, "__self__", None) or getattr(
+                getattr(cb, "func", None), "__self__", None
+            )
+            if owner is not None and hasattr(owner, "_account_epoch"):
+                val = getattr(owner, "_account_epoch", None)
+                if isinstance(val, int) and not isinstance(val, bool):
+                    return val
+        return None
+
+    def _effective_expected_account_epoch(self) -> int | None:
+        owner_epoch = getattr(self, "_owner_account_epoch", None)
+        if owner_epoch is not None:
+            return owner_epoch
+        current = getattr(self, "_current_account_epoch", None)
+        return current() if callable(current) else None
+
+    def _is_account_context_current(
+        self, account_generation: int, expected_account_epoch: int | None
+    ) -> bool:
+        if getattr(self, "_account_generation", 0) != account_generation:
+            return False
+        if expected_account_epoch is not None:
+            current_epoch = self._current_account_epoch()
+            if current_epoch is not None and current_epoch != expected_account_epoch:
+                return False
+        return True
+
+    def reset_for_account_switch(self, account_epoch: int | None = None) -> None:
+        """Invalidate in-flight work and clear account-owned state on account switch/logout."""
+        self._account_generation = getattr(self, "_account_generation", 0) + 1
+        self._view_generation = getattr(self, "_view_generation", 0) + 1
+        self._snapshot_load_generation = (
+            getattr(self, "_snapshot_load_generation", 0) + 1
+        )
+        self._owner_account_epoch = (
+            account_epoch
+            if account_epoch is not None
+            else self._current_account_epoch()
+        )
+        self.visible = False
+        self._current_url = ""
+        self._current_data = {}
+        self._quiz_launch_target = None
+        self._last_server_status = ""
+        for coll_attr in (
+            "_selected_files",
+            "_submitted_files",
+            "_selected_file_indices",
+        ):
+            coll = getattr(self, coll_attr, None)
+            if coll is not None and hasattr(coll, "clear"):
+                coll.clear()
+        self._is_multiselect_mode = False
+        self._editing_file_index = -1
+        self._pending_delete_indices = []
+        self._pending_file_mutation = None
+        self._submission_snapshot = None
+        self._submission_fingerprint = ""
+        self._submission_policy = None
+        self._is_uploading = False
+
+        for dlg_attr in (
+            "_file_edit_dialog",
+            "_delete_confirm_dialog",
+            "_replace_confirm_dialog",
+        ):
+            dlg = getattr(self, dlg_attr, None)
+            if dlg is not None:
+                dlg.open = False
+
+        for ctrl_attr in (
+            "_loading_bar",
+            "_error_banner",
+            "_badge_ctrl",
+            "_file_list_col",
+            "_submitted_files_col",
+            "_submitted_area",
+            "_submission_area",
+            "_upload_progress",
+            "_upload_status",
+            "_upload_mode_row",
+            "_submission_statement",
+            "_submission_policy_text",
+            "_pick_btn",
+            "_submit_btn",
+            "_finalize_btn",
+            "_batch_delete_btn",
+            "_multiselect_btn",
+            "_edit_submitted_btn",
+            "_open_btn",
+            "_quiz_open_btn",
+            "_quiz_auth_btn",
+            "_quiz_runtime_notice",
+            "_edit_status",
+            "_opentime_row",
+            "_cutoff_row",
+        ):
+            ctrl = getattr(self, ctrl_attr, None)
+            if ctrl is not None:
+                ctrl.visible = False
+        for text_attr in (
+            "_title_text",
+            "_course_text",
+            "_upload_status",
+            "_submission_policy_text",
+            "_edit_filename",
+            "_edit_status",
+            "_delete_confirm_text",
+            "_submission_status_value",
+            "_countdown_txt",
+            "_deadline_txt",
+            "_opentime_txt",
+            "_cutoff_txt",
+        ):
+            txt = getattr(self, text_attr, None)
+            if txt is not None:
+                txt.value = ""
+        edit_fp = getattr(self, "_edit_filepath", None)
+        if edit_fp is not None:
+            edit_fp.value = "/"
+        for col_attr in ("_content_col", "_file_list_col", "_submitted_files_col"):
+            col = getattr(self, col_attr, None)
+            controls = getattr(col, "controls", None)
+            if controls is not None and hasattr(controls, "clear"):
+                controls.clear()
+        for dis_attr in ("_file_list_col", "_upload_mode_row", "_quiz_open_btn"):
+            ctrl = getattr(self, dis_attr, None)
+            if ctrl is not None:
+                ctrl.disabled = False
+        prog = getattr(self, "_upload_progress", None)
+        if prog is not None:
+            prog.value = None
+        stmt = getattr(self, "_submission_statement", None)
+        if stmt is not None:
+            stmt.value = False
+        DetailView._set_header_open_visible(self, False)
+
+    @staticmethod
+    def _normalize_width(width) -> float | None:
+        if width is None or isinstance(width, bool):
+            return None
+        try:
+            numeric = float(width)
+        except (TypeError, ValueError):
+            return None
+        if numeric > 0:
+            return numeric
+        return None
+
+    def _effective_width(self) -> float | None:
+        if getattr(self, "_pane_width", None) is not None:
+            return self._pane_width
+        page = getattr(self, "_page", None)
+        if page is not None:
+            for candidate in (
+                getattr(page, "width", None),
+                getattr(getattr(page, "window", None), "width", None),
+            ):
+                normalized = DetailView._normalize_width(candidate)
+                if normalized is not None:
+                    return normalized
+        return None
+
+    def _is_narrow(self) -> bool:
+        eff = self._effective_width()
+        if eff is not None:
+            return eff < 600.0
+        return bool(platform_utils.UI_IS_MOBILE)
+
+    def _sync_dialog_widths(self) -> None:
+        narrow = self._is_narrow()
+        eff = self._effective_width() or 360.0
+        if narrow:
+            edit_w = min(340.0, max(220.0, eff - 112.0))
+            del_w = min(320.0, max(220.0, eff - 112.0))
+        else:
+            edit_w = 340.0
+            del_w = 320.0
+        edit_content = getattr(self, "_file_edit_dialog_content", None)
+        if edit_content is not None:
+            edit_content.width = edit_w
+        del_content = getattr(self, "_delete_confirm_dialog_content", None)
+        if del_content is not None:
+            del_content.width = del_w
+
+    def _sync_responsive_layout(self) -> None:
+        narrow = self._is_narrow()
+        row = getattr(self, "_submission_actions_row", None)
+        if row is not None:
+            row.wrap = narrow
+        for btn_name in ("_submit_btn", "_finalize_btn"):
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.expand = not narrow
+        self._sync_dialog_widths()
+
+    def set_width(self, width: float) -> None:
+        """Apply active Pane-3 width and adapt narrow submission/dialog layout."""
+        self._pane_width = DetailView._normalize_width(width)
+        self._sync_responsive_layout()
+        try:
+            if self.page is not None:
+                self.update()
+        except Exception:
+            pass
 
     def _submission_workflow(self, client):
         if self._submission_workflow_factory:
@@ -163,19 +440,7 @@ class DetailView(ft.Container):
 
     @staticmethod
     def _is_safe_browser_url(url) -> bool:
-        if not isinstance(url, str) or url != url.strip():
-            return False
-        try:
-            parsed = urlsplit(url)
-            _ = parsed.port
-        except (TypeError, ValueError):
-            return False
-        return (
-            parsed.scheme.lower() in ("http", "https")
-            and parsed.hostname is not None
-            and parsed.username is None
-            and parsed.password is None
-        )
+        return validate_https_url(url) is not None
 
     @classmethod
     def _is_native_submission_url(cls, url) -> bool:
@@ -286,19 +551,21 @@ class DetailView(ft.Container):
             bgcolor=C.BG, value="/",
         )
         self._edit_status = ft.Text("", size=12, visible=False)
+        self._file_edit_dialog_content = ft.Container(
+            content=ft.Column(controls=[
+                self._edit_filename,
+                self._edit_filepath,
+                self._edit_status,
+            ], spacing=12, tight=True),
+            width=340,
+        )
         self._file_edit_dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Chỉnh sửa file",
             title=ft.Text("Chỉnh sửa file", size=16, weight=ft.FontWeight.BOLD,
-                          color=C.TEXT_PRIMARY),
+                          color=C.TEXT_PRIMARY, semantics_label="Chỉnh sửa file"),
             bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=ft.Column(controls=[
-                    self._edit_filename,
-                    self._edit_filepath,
-                    self._edit_status,
-                ], spacing=12, tight=True),
-                width=340,
-            ),
+            content=self._file_edit_dialog_content,
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_edit_dialog,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
@@ -313,15 +580,17 @@ class DetailView(ft.Container):
         )
 
         self._delete_confirm_text = ft.Text("", size=13, color=C.TEXT_PRIMARY)
+        self._delete_confirm_dialog_content = ft.Container(
+            content=self._delete_confirm_text,
+            width=320,
+        )
         self._delete_confirm_dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Xác nhận xóa",
             title=ft.Text("Xác nhận xóa", size=16, weight=ft.FontWeight.BOLD,
-                          color=C.CRITICAL),
+                          color=C.CRITICAL, semantics_label="Xác nhận xóa"),
             bgcolor=C.SURFACE,
-            content=ft.Container(
-                content=self._delete_confirm_text,
-                width=320,
-            ),
+            content=self._delete_confirm_dialog_content,
             actions=[
                 ft.TextButton("Hủy", on_click=self._close_delete_confirm,
                               style=ft.ButtonStyle(color=C.TEXT_SECONDARY)),
@@ -338,8 +607,9 @@ class DetailView(ft.Container):
 
         self._replace_confirm_dialog = ft.AlertDialog(
             modal=True,
+            semantics_label="Xác nhận thay thế",
             title=ft.Text("Xác nhận thay thế", size=16, weight=ft.FontWeight.BOLD,
-                          color=C.WARNING),
+                          color=C.WARNING, semantics_label="Xác nhận thay thế"),
             bgcolor=C.SURFACE,
             content=ft.Text(
                 "Thao tác này sẽ thay thế toàn bộ danh sách file hiện có trên Moodle.",
@@ -374,7 +644,9 @@ class DetailView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.CRITICAL),
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             border_radius=6,
             on_click=self._on_confirm_batch_delete_async,
             ink=True,
@@ -393,7 +665,9 @@ class DetailView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             border_radius=6,
             on_click=self._on_toggle_multiselect_async,
             ink=True,
@@ -412,7 +686,9 @@ class DetailView(ft.Container):
             ),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.WARNING),
-            padding=ft.Padding.symmetric(vertical=8, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             border_radius=6,
             on_click=self._on_edit_submitted,
             ink=True,
@@ -429,7 +705,7 @@ class DetailView(ft.Container):
                 ft.Row(controls=[
                     self._multiselect_btn,
                     self._batch_delete_btn,
-                ], spacing=8),
+                ], spacing=8, run_spacing=6, wrap=True),
                 self._edit_submitted_btn,
             ], spacing=8),
             bgcolor=C.SURFACE,
@@ -467,7 +743,7 @@ class DetailView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=C.SAFE,
-            padding=ft.Padding.symmetric(vertical=13),
+            padding=ft.Padding.symmetric(vertical=13, horizontal=16),
             border_radius=8,
             on_click=self._on_submit,
             ink=True,
@@ -487,7 +763,7 @@ class DetailView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             bgcolor=C.SAFE,
-            padding=ft.Padding.symmetric(vertical=13),
+            padding=ft.Padding.symmetric(vertical=13, horizontal=16),
             border_radius=8,
             on_click=self._on_finalize,
             ink=True,
@@ -514,7 +790,9 @@ class DetailView(ft.Container):
             bgcolor=C.BG,
             border=ft.Border.all(1, C.BORDER),
             border_radius=6,
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             on_click=self._on_mode_overwrite_async,
             ink=True,
             expand=True,
@@ -526,7 +804,9 @@ class DetailView(ft.Container):
             ], spacing=4, alignment=ft.MainAxisAlignment.CENTER),
             bgcolor=C.ACCENT,
             border_radius=6,
-            padding=ft.Padding.symmetric(vertical=6, horizontal=12),
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding.symmetric(horizontal=12),
             on_click=self._on_mode_append_async,
             ink=True,
             expand=True,
@@ -555,6 +835,16 @@ class DetailView(ft.Container):
             visible=False,  
         )
 
+        self._submission_actions_row = ft.Row(
+            controls=[
+                self._pick_btn,
+                self._submit_btn,
+                self._finalize_btn,
+            ],
+            spacing=8,
+            run_spacing=8,
+            wrap=False,
+        )
         self._submission_area = ft.Container(
             content=ft.Column(controls=[
                 ft.Row(controls=[
@@ -568,11 +858,7 @@ class DetailView(ft.Container):
                 self._submission_statement,
                 self._upload_progress,
                 self._upload_status,
-                ft.Row(controls=[
-                    self._pick_btn,
-                    self._submit_btn,
-                    self._finalize_btn,
-                ], spacing=8),
+                self._submission_actions_row,
             ], spacing=10),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
@@ -581,21 +867,70 @@ class DetailView(ft.Container):
             visible=False,
         )
 
-        self._cta_icon = ft.Icon(ft.Icons.OPEN_IN_BROWSER_ROUNDED, size=16, color=C.ON_ACCENT)
-        self._cta_text = ft.Text("Xem trong trình duyệt", size=13, color=C.ON_ACCENT,
+        cta_default_label = (
+            "Mở trang gốc ngay trong ứng dụng"
+            if self._embedded_in_pane
+            else "Mở trong ứng dụng"
+        )
+        cta_default_icon = (
+            ft.Icons.WEB_ASSET_ROUNDED
+            if self._embedded_in_pane
+            else ft.Icons.OPEN_IN_BROWSER_ROUNDED
+        )
+        self._cta_icon = ft.Icon(cta_default_icon, size=16, color=C.ON_ACCENT)
+        self._cta_text = ft.Text(cta_default_label, size=13, color=C.ON_ACCENT,
                             weight=ft.FontWeight.W_600)
         self._open_btn = ft.Container(
-            content=ft.Row(
-                controls=[self._cta_icon, self._cta_text],
-                spacing=8, alignment=ft.MainAxisAlignment.CENTER,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            content=ft.Semantics(
+                label="Mở trong ứng dụng",
+                button=True,
+                content=ft.Row(
+                    controls=[self._cta_icon, self._cta_text],
+                    spacing=8, alignment=ft.MainAxisAlignment.CENTER,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ),
             bgcolor=C.ACCENT,
             padding=ft.Padding.symmetric(vertical=13),
             border_radius=8,
-            on_click=self._open_browser,
+            on_click=self._open_in_app,
             ink=True,
             alignment=ft.Alignment(0, 0),
+        )
+        self._quiz_open_btn = ft.Button(
+            "Làm bài",
+            icon=ft.Icons.QUIZ_OUTLINED,
+            on_click=self._open_quiz,
+            bgcolor=C.ACCENT,
+            color=C.ON_ACCENT,
+            expand=True,
+            tooltip="Làm bài trong ứng dụng",
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=13),
+            ),
+            visible=False,
+            disabled=False,
+        )
+        self._quiz_runtime_notice = ft.Text(
+            "",
+            size=12,
+            color=C.TEXT_SECONDARY,
+            text_align=ft.TextAlign.CENTER,
+            visible=False,
+        )
+        self._quiz_auth_btn = ft.Button(
+            "Đăng nhập",
+            icon=ft.Icons.LOGIN_ROUNDED,
+            on_click=self._login_for_quiz,
+            bgcolor=C.ACCENT,
+            color=C.ON_ACCENT,
+            expand=True,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=13),
+            ),
+            visible=False,
         )
 
         self._opentime_row = ft.Row(controls=[
@@ -613,11 +948,16 @@ class DetailView(ft.Container):
         self._cutoff_row.visible = False
 
         self._header_open_btn = ft.IconButton(
-            ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+            ft.Icons.OPEN_IN_NEW_ROUNDED,
             icon_color=C.ACCENT, icon_size=20,
-            tooltip="Mở trong trình duyệt",
-            on_click=self._open_browser,
+            tooltip="Mở bằng trình duyệt ngoài",
+            padding=0,
+            size_constraints=ft.BoxConstraints(
+                min_width=44, max_width=44, min_height=44, max_height=44
+            ),
+            on_click=self._open_external,
         )
+        self._sync_responsive_layout()
 
     def _init_layout(self, on_close):
         self._back_icon = ft.Icon(
@@ -629,6 +969,7 @@ class DetailView(ft.Container):
                 self._back_icon,
                 self._back_text,
             ], spacing=4, tight=True),
+            height=44,
             on_click=lambda _: on_close(),
             style=ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=8, vertical=10)),
         )
@@ -665,13 +1006,28 @@ class DetailView(ft.Container):
         )
         self._details_divider = ft.Divider(height=16, color=C.BORDER)
 
+        self._header_open_semantics = ft.Semantics(
+            label="Mở bằng trình duyệt ngoài",
+            button=True,
+            content=self._header_open_btn,
+            visible=False,
+        )
+        self._header_open_btn.visible = False
+        self._top_bar_container = ft.Container(
+            content=ft.Row(
+                controls=[
+                    back_btn,
+                    self._header_open_semantics,
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            ),
+            padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
+            visible=not self._embedded_in_pane,
+        )
+
         self.content = ft.Column(
             controls=[
-                ft.Container(
-                    content=ft.Row(controls=[back_btn, self._header_open_btn],
-                                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=ft.Padding.only(left=8, right=8, top=20, bottom=8),
-                ),
+                self._top_bar_container,
                 self._loading_bar,
                 self._error_banner,
                 ft.Container(
@@ -700,7 +1056,16 @@ class DetailView(ft.Container):
                                 padding=ft.Padding.symmetric(horizontal=16),
                             ),
                             ft.Container(
-                                content=self._open_btn,
+                                content=ft.Column(
+                                    controls=[
+                                        self._open_btn,
+                                        self._quiz_open_btn,
+                                        self._quiz_auth_btn,
+                                        self._quiz_runtime_notice,
+                                    ],
+                                    spacing=8,
+                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                                ),
                                 padding=ft.Padding.only(
                                     left=16, right=16, top=8, bottom=20),
                             ),
@@ -716,7 +1081,64 @@ class DetailView(ft.Container):
         )
 
     # Hàm công khai
+    @staticmethod
+    def _coerce_open_time_str(raw_open_time) -> str:
+        if raw_open_time is None:
+            return ""
+        if hasattr(raw_open_time, "isoformat"):
+            try:
+                return raw_open_time.isoformat(sep=" ")
+            except TypeError:
+                return raw_open_time.isoformat()
+        return str(raw_open_time).strip()
+
+    @staticmethod
+    def _parse_cutoff_datetime(cutoff_raw):
+        if not cutoff_raw:
+            return None
+        from datetime import datetime as _dt
+        from core.time_utils import parse_datetime
+
+        try:
+            if isinstance(cutoff_raw, (int, float)):
+                return _dt.fromtimestamp(cutoff_raw) if cutoff_raw > 0 else None
+            text = str(cutoff_raw).strip()
+            if not text:
+                return None
+            try:
+                numeric = float(text)
+                return _dt.fromtimestamp(numeric) if numeric > 0 else None
+            except ValueError:
+                return parse_datetime(text)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _set_header_open_visible(target_view, visible: bool) -> None:
+        show = bool(visible)
+        semantics = getattr(target_view, "_header_open_semantics", None)
+        btn = getattr(target_view, "_header_open_btn", None)
+        if show:
+            if btn is not None:
+                btn.visible = True
+            if semantics is not None:
+                semantics.visible = True
+        else:
+            if semantics is not None:
+                semantics.visible = False
+            if btn is not None:
+                btn.visible = False
+
     def show_loading(self, data: dict):
+        if getattr(self, "_embedded_in_pane", False):
+            if not DetailView._is_account_context_current(
+                self,
+                getattr(self, "_account_generation", 0),
+                getattr(self, "_owner_account_epoch", None),
+            ):
+                return
+        else:
+            self._owner_account_epoch = DetailView._current_account_epoch(self)
         # Navigation has already changed targets, so invalidate background
         # submission work and hide controls belonging to the previous item.
         self._view_generation += 1
@@ -724,7 +1146,19 @@ class DetailView(ft.Container):
         self._submission_area.visible = False
         self._submitted_area.visible = False
         self._open_btn.visible = False
-        self._header_open_btn.visible = False
+        DetailView._set_header_open_visible(self, False)
+        quiz_open_btn = getattr(self, "_quiz_open_btn", None)
+        if quiz_open_btn is not None:
+            quiz_open_btn.visible = False
+            quiz_open_btn.disabled = False
+        quiz_runtime_notice = getattr(self, "_quiz_runtime_notice", None)
+        if quiz_runtime_notice is not None:
+            quiz_runtime_notice.visible = False
+        quiz_auth_btn = getattr(self, "_quiz_auth_btn", None)
+        if quiz_auth_btn is not None:
+            quiz_auth_btn.visible = False
+        if hasattr(self, "_quiz_launch_target"):
+            self._quiz_launch_target = None
         self._title_text.value  = data.get("title", "Đang tải...")
         self._course_text.value = clean_course_name(data.get("course", ""))
         self._current_url       = data.get("url", "")
@@ -733,48 +1167,48 @@ class DetailView(ft.Container):
         self._loading_bar.visible = True
 
         badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
-        self._badge_ctrl.content      = ft.Text(badge_text, size=10, color=badge_color,
-                                                 weight=ft.FontWeight.BOLD)
-        self._badge_ctrl.bgcolor      = None
-        self._badge_ctrl.border       = ft.Border.all(1, badge_color)
-        self._badge_ctrl.padding      = ft.Padding.symmetric(horizontal=8, vertical=3)
-        self._badge_ctrl.border_radius = 5
-        self._badge_ctrl.visible      = True
+        self._badge_ctrl.content = ft.Text(
+            badge_text, size=10, color=badge_color, weight=ft.FontWeight.W_600
+        )
+        self._badge_ctrl.bgcolor = ft.Colors.with_opacity(0.11, badge_color)
+        self._badge_ctrl.border = None
+        self._badge_ctrl.padding = ft.Padding.symmetric(horizontal=8, vertical=3)
+        self._badge_ctrl.border_radius = 6
+        self._badge_ctrl.visible = True
 
-        deadline_str = data.get("deadline", "")
+        deadline_str = str(data.get("deadline") or "")
         cd_text, overdue, cd_color, _ = get_card_countdown(data)
-        self._countdown_txt.value = cd_text
-        self._countdown_txt.color = cd_color
-        
-        details = data.get("details", {})
-        open_time_str = details.get("open_time", "")
+        if deadline_str:
+            self._countdown_txt.value = cd_text or "Không xác định"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+            self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
+        else:
+            self._countdown_txt.value = cd_text or "Không giới hạn thời gian"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+            self._deadline_txt.value = "Không giới hạn"
+
+        details = data.get("details")
+        if not isinstance(details, Mapping):
+            details = {}
+        open_time_str = DetailView._coerce_open_time_str(details.get("open_time"))
         if open_time_str:
             self._opentime_txt.value = format_deadline(open_time_str)
             self._opentime_row.visible = True
         else:
             self._opentime_row.visible = False
-            
-        self._deadline_txt.value = format_deadline(deadline_str)
 
         # Cutoff date display
-        cutoff_ts = data.get('cutoff_date', 0)
-        duedate_str = data.get('deadline', '')
-        if cutoff_ts and cutoff_ts > 0:
-            from datetime import datetime as _dt
-            try:
-                cutoff_dt = _dt.fromtimestamp(cutoff_ts)
-                self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
-                # Only show if cutoff differs from deadline
-                deadline_dt = None
-                if duedate_str:
-                    from core.time_utils import parse_datetime
-                    deadline_dt = parse_datetime(duedate_str)
-                if deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60:
-                    self._cutoff_row.visible = True
-                else:
-                    self._cutoff_row.visible = False
-            except (OSError, ValueError):
-                self._cutoff_row.visible = False
+        cutoff_dt = DetailView._parse_cutoff_datetime(data.get("cutoff_date"))
+        if cutoff_dt is not None:
+            self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
+            deadline_dt = None
+            if deadline_str:
+                from core.time_utils import parse_datetime
+
+                deadline_dt = parse_datetime(deadline_str)
+            self._cutoff_row.visible = bool(
+                deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60
+            )
         else:
             self._cutoff_row.visible = False
 
@@ -797,7 +1231,19 @@ class DetailView(ft.Container):
         return changed
 
     def update_detail(self, data: dict):
+        if getattr(self, "_embedded_in_pane", False):
+            if not DetailView._is_account_context_current(
+                self,
+                getattr(self, "_account_generation", 0),
+                getattr(self, "_owner_account_epoch", None),
+            ):
+                return
+        else:
+            self._owner_account_epoch = DetailView._current_account_epoch(self)
         self._view_generation += 1
+        sync_resp = getattr(self, "_sync_responsive_layout", None)
+        if callable(sync_resp):
+            sync_resp()
         self._loading_bar.visible  = False
         self._error_banner.visible = False
         self._title_text.value     = data.get("title", "Không có tiêu đề")
@@ -805,13 +1251,55 @@ class DetailView(ft.Container):
         self._current_data         = data
         browser_available = self._is_safe_browser_url(self._current_url)
         self._open_btn.visible = browser_available
-        self._header_open_btn.visible = browser_available
+        DetailView._set_header_open_visible(
+            self, browser_available and not self._embedded_in_pane
+        )
+        self._quiz_open_btn.visible = False
+        self._quiz_open_btn.disabled = False
+        self._quiz_open_btn.bgcolor = C.ACCENT
+        self._quiz_open_btn.color = C.ON_ACCENT
+        self._quiz_auth_btn.visible = False
+        self._quiz_runtime_notice.visible = False
+        self._quiz_launch_target = None
         self._content_col.controls.clear()
+
+        badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
+        self._badge_ctrl.content = ft.Text(
+            badge_text, size=10, color=badge_color, weight=ft.FontWeight.W_600
+        )
+        self._badge_ctrl.bgcolor = ft.Colors.with_opacity(0.11, badge_color)
+        self._badge_ctrl.border = None
+        self._badge_ctrl.padding = ft.Padding.symmetric(horizontal=8, vertical=3)
+        self._badge_ctrl.border_radius = 6
+        self._badge_ctrl.visible = True
+
+        deadline_str = str(data.get("deadline") or "")
+        cd_text, _, cd_color, _ = get_card_countdown(data)
+        if deadline_str:
+            self._deadline_txt.value = format_deadline(deadline_str) or "Không giới hạn"
+            self._countdown_txt.value = cd_text or "Không xác định"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
+        else:
+            self._deadline_txt.value = "Không giới hạn"
+            self._countdown_txt.value = cd_text or "Không giới hạn thời gian"
+            self._countdown_txt.color = cd_color if cd_text else C.TEXT_SECONDARY
 
         # UX-8: Dynamic CTA based on submission status and type
         sub_status = data.get("submission_status", "unknown")
         act_type = data.get("type", "other")
         is_assignment = act_type in ("assignment", "assign")
+        quiz_details = data.get("details", {})
+        if not isinstance(quiz_details, Mapping):
+            quiz_details = {}
+        attempts_remaining = quiz_details.get("quiz_attempts_remaining")
+        has_unfinished_attempt = quiz_details.get(
+            "quiz_has_unfinished_attempt"
+        )
+        quiz_exhausted = (
+            type(attempts_remaining) is int
+            and attempts_remaining == 0
+            and has_unfinished_attempt is False
+        )
 
         # Reset submission UI
         self._selected_files.clear()
@@ -837,10 +1325,20 @@ class DetailView(ft.Container):
         self._submitted_files_col.controls.clear()
         self._submitted_area.visible = False
 
+        web_cta_icon = (
+            ft.Icons.WEB_ASSET_ROUNDED
+            if self._embedded_in_pane
+            else ft.Icons.OPEN_IN_BROWSER_ROUNDED
+        )
+        web_cta_label = (
+            "Mở trang gốc ngay trong ứng dụng"
+            if self._embedded_in_pane
+            else "Mở trong ứng dụng"
+        )
         if is_assignment and sub_status not in ("submitted", "graded", "Đã nộp", "Đã chấm điểm"):
-            # CTA chính → mở browser (fallback)
-            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            # CTA chính → mở trong ứng dụng (InAppWebView / Pane 3)
+            self._cta_icon.name = web_cta_icon
+            self._cta_text.value = web_cta_label
             self._open_btn.bgcolor = C.SURFACE
             self._open_btn.border = ft.Border.all(1, C.ACCENT)
             self._cta_text.color = C.ACCENT
@@ -866,7 +1364,14 @@ class DetailView(ft.Container):
 
         # Load submitted files in background (for assignments)
         if is_assignment and data.get("site_identity") == "thnn":
-            submission_context_reason = "Tính năng xem file và nộp bài THNN chưa được hỗ trợ. Vui lòng mở trong trình duyệt."
+            submission_context_reason = (
+                "Tính năng xem file và nộp bài THNN chưa được hỗ trợ trong ứng dụng. "
+                + (
+                    "Vui lòng mở trang gốc trong ứng dụng."
+                    if self._embedded_in_pane
+                    else "Bạn có thể mở bằng trình duyệt ngoài bằng nút ở góc trên."
+                )
+            )
         elif is_assignment:
             url = data.get("url", "")
             raw_course_id = data.get("course_id")
@@ -878,13 +1383,21 @@ class DetailView(ft.Container):
                 )
             elif not self._is_native_submission_url(url):
                 submission_context_reason = (
-                    "Đường dẫn này không phải bài tập Moodle. "
-                    "Hãy mở trong trình duyệt."
+                    "Đường dẫn này không phải bài tập Moodle. Hãy mở trực tiếp trong ứng dụng."
+                    if self._embedded_in_pane
+                    else (
+                        "Đường dẫn này không phải bài tập Moodle. "
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
+                    )
                 )
             elif not course_context_valid:
                 submission_context_reason = (
-                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
-                    "Hãy mở bài tập trong trình duyệt."
+                    "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. Hãy mở bài tập trực tiếp trong ứng dụng."
+                    if self._embedded_in_pane
+                    else (
+                        "Thông tin học phần không hợp lệ nên không thể đồng bộ bài nộp. "
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
+                    )
                 )
             else:
                 try:
@@ -897,8 +1410,12 @@ class DetailView(ft.Container):
                     client
                     and self._client_matches_native_submission_site(client, url)
                     and (not client_is_bound or self._has_submission_workflow(client))
+                    and self._is_account_context_current(
+                        getattr(self, "_account_generation", 0),
+                        self._effective_expected_account_epoch(),
+                    )
                 ):
-                    prefetched = data.get("details", {}).get("raw_submission_status")
+                    prefetched = quiz_details.get("raw_submission_status")
                     load_generation, view_generation = (
                         self._reserve_submission_snapshot_load()
                     )
@@ -914,32 +1431,89 @@ class DetailView(ft.Container):
                 elif client:
                     submission_context_reason = (
                         "Moodle cho trang bài tập này chưa được cấu hình. "
-                        "Hãy mở bài tập trong trình duyệt."
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                     )
                 else:
                     submission_context_reason = (
                         "Không thể kết nối Moodle trong ứng dụng. "
-                        "Hãy mở bài tập trong trình duyệt."
+                        "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                     )
             if submission_context_reason:
-                self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-                self._cta_text.value = "Mở trong trình duyệt"
+                self._cta_icon.name = web_cta_icon
+                self._cta_text.value = web_cta_label
                 self._open_btn.bgcolor = C.SURFACE
                 self._open_btn.border = ft.Border.all(1, C.ACCENT)
                 self._cta_text.color = C.ACCENT
                 self._cta_icon.color = C.ACCENT
         else:
             self._submission_area.visible = False
-            self._cta_icon.name = ft.Icons.OPEN_IN_BROWSER_ROUNDED
-            self._cta_text.value = "Mở trong trình duyệt"
+            self._cta_icon.name = web_cta_icon
+            self._cta_text.value = web_cta_label
             self._open_btn.bgcolor = C.ACCENT
             self._open_btn.border = None
             self._cta_text.color = C.ON_ACCENT
             self._cta_icon.color = C.ON_ACCENT
 
-        details = data.get("details", {})
+        if act_type == "quiz" and self._quiz_player_view is not None:
+            account_id = ""
+            if callable(self._get_quiz_account_id):
+                try:
+                    account_id = self._get_quiz_account_id() or ""
+                except Exception:
+                    logger.debug("Quiz account identity is unavailable", exc_info=True)
+            try:
+                target, player_state = self._quiz_player_view.prepare_activity(
+                    data, account_id
+                )
+            except Exception:
+                logger.warning("Unable to prepare embedded quiz target")
+                target, player_state = None, None
+            if target is not None and player_state is None:
+                self._quiz_launch_target = target
+                self._open_btn.visible = browser_available and quiz_exhausted
+                status_key = normalize_submission_status(sub_status)
+                if quiz_exhausted:
+                    self._quiz_open_btn.content = "Hết lượt làm bài"
+                    self._quiz_open_btn.disabled = True
+                    self._quiz_open_btn.bgcolor = C.SURFACE
+                    self._quiz_open_btn.color = C.TEXT_SECONDARY
+                elif has_unfinished_attempt is True:
+                    self._quiz_open_btn.content = "Tiếp tục làm bài"
+                else:
+                    self._quiz_open_btn.content = (
+                        "Mở bài"
+                        if status_key
+                        in {
+                            "draft",
+                            "submitted",
+                            "graded",
+                            "in_progress",
+                            "attempted",
+                            "abandoned",
+                        }
+                        else "Làm bài"
+                    )
+                self._quiz_open_btn.tooltip = self._quiz_open_btn.content
+                self._quiz_open_btn.visible = True
+            elif target is not None and player_state == "player_unavailable":
+                self._quiz_runtime_notice.value = (
+                    "Trình xem bài chưa sẵn sàng. "
+                    "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
+                )
+                self._quiz_runtime_notice.visible = True
+            elif player_state == "requires_safe_exam_browser":
+                self._quiz_runtime_notice.value = (
+                    "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt."
+                )
+                self._quiz_runtime_notice.visible = True
+            elif player_state == "missing_account":
+                self._quiz_auth_btn.visible = True
 
-        open_time_str = details.get("open_time", "")
+        details = data.get("details")
+        if not isinstance(details, Mapping):
+            details = {}
+
+        open_time_str = DetailView._coerce_open_time_str(details.get("open_time"))
         if open_time_str:
             self._opentime_txt.value = format_deadline(open_time_str)
         else:
@@ -947,29 +1521,24 @@ class DetailView(ft.Container):
         self._opentime_row.visible = True
 
         # Cutoff date display in detail panel
-        cutoff_ts = data.get('cutoff_date', 0)
-        deadline_str_raw = data.get('deadline', '')
-        if cutoff_ts and cutoff_ts > 0:
-            from datetime import datetime as _dt
-            try:
-                cutoff_dt = _dt.fromtimestamp(cutoff_ts)
-                self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
-                deadline_dt = None
-                if deadline_str_raw:
-                    from core.time_utils import parse_datetime
-                    deadline_dt = parse_datetime(deadline_str_raw)
-                if deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60:
-                    self._cutoff_row.visible = True
-                else:
-                    self._cutoff_row.visible = False
-            except (OSError, ValueError):
-                self._cutoff_row.visible = False
+        cutoff_dt = DetailView._parse_cutoff_datetime(data.get("cutoff_date"))
+        deadline_str_raw = str(data.get("deadline") or "")
+        if cutoff_dt is not None:
+            self._cutoff_txt.value = format_deadline(cutoff_dt.isoformat())
+            deadline_dt = None
+            if deadline_str_raw:
+                from core.time_utils import parse_datetime
+
+                deadline_dt = parse_datetime(deadline_str_raw)
+            self._cutoff_row.visible = bool(
+                deadline_dt and abs((cutoff_dt - deadline_dt).total_seconds()) > 60
+            )
         else:
             self._cutoff_row.visible = False
 
         # Trích xuất thông tin Tên môn học
-        full_name = details.get("course_full_name", "")
-        self._course_text.value = clean_course_name(full_name or data.get("course", ""))
+        full_name = str(details.get("course_full_name") or "")
+        self._course_text.value = clean_course_name(full_name or str(data.get("course") or ""))
 
         # Trạng thái nộp bài
         status_data = details.get("status_data", {})
@@ -982,6 +1551,7 @@ class DetailView(ft.Container):
         if not isinstance(status_data, dict):
             status_data = {}
         rows = []
+        label_w = 110 if (callable(getattr(self, "_is_narrow", None)) and self._is_narrow()) else 130
         has_submission_status = False
         self._submission_status_value.value = "Đang đồng bộ với Moodle..."
         self._submission_status_value.color = C.TEXT_SECONDARY
@@ -1026,7 +1596,7 @@ class DetailView(ft.Container):
 
                 rows.append(
                     ft.Row(controls=[
-                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=130),
+                        ft.Text(translated_key, size=12, color=C.TEXT_SECONDARY, width=label_w),
                         value_control,
                     ], spacing=8)
                 )
@@ -1039,7 +1609,7 @@ class DetailView(ft.Container):
                             "Trạng thái nộp bài",
                             size=12,
                             color=C.TEXT_SECONDARY,
-                            width=130,
+                            width=label_w,
                         ),
                         self._submission_status_value,
                     ],
@@ -1055,42 +1625,54 @@ class DetailView(ft.Container):
 
         # Thông tin Quiz
         quiz_rows = []
-        attempts   = details.get("attempts_allowed")
-        time_limit = details.get("time_limit")
+        attempts = str(details.get("attempts_allowed") or "").strip()
+        time_limit = str(details.get("time_limit") or "").strip()
         if attempts:
             quiz_rows.append(ft.Row(controls=[
-                ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=130),
-                ft.Text(attempts, size=12, color=C.TEXT_PRIMARY),
+                ft.Text("Số lần làm:", size=12, color=C.TEXT_SECONDARY, width=label_w),
+                ft.Text(attempts, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
         if time_limit:
             quiz_rows.append(ft.Row(controls=[
-                ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=130),
-                ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY),
+                ft.Text("Thời gian:", size=12, color=C.TEXT_SECONDARY, width=label_w),
+                ft.Text(time_limit, size=12, color=C.TEXT_PRIMARY, expand=True),
             ], spacing=8))
-        for info in details.get("quiz_info", []):
-            if info and attempts not in info and time_limit not in info:
+        quiz_info_items = details.get("quiz_info") or []
+        if isinstance(quiz_info_items, (list, tuple)):
+            for raw_info in quiz_info_items:
+                info = str(raw_info or "").strip()
+                if not info:
+                    continue
+                if attempts and attempts in info:
+                    continue
+                if time_limit and time_limit in info:
+                    continue
                 quiz_rows.append(ft.Text(info, size=12, color=C.TEXT_SECONDARY))
         if quiz_rows:
             self._content_col.controls.append(self._section("Thông tin Quiz", quiz_rows))
 
         # Thông tin Điểm danh
-        att_records = details.get("attendance_records", [])
+        att_records = details.get("attendance_records") or []
         # Các cột phổ biến, dùng layout đặc biệt
         _ATT_SKIP = {"Description", "Status", "Points", "Ngày", "Ngay", "Date"}
-        if att_records:
+        if isinstance(att_records, (list, tuple)) and att_records:
             att_rows = []
             for rec in att_records:
-                status       = rec.get("Status", "")
+                if not isinstance(rec, Mapping):
+                    continue
+                status = str(rec.get("Status") or "")
                 status_color = (C.SAFE     if any(x in status.lower() for x in ("present", "có mặt"))
                                 else C.CRITICAL if any(x in status.lower() for x in ("absent", "vắng"))
                                 else C.TEXT_SECONDARY)
-                date_raw   = rec.get("Ngày", rec.get("Ngay", rec.get("Date", "")))
+                date_raw = str(
+                    rec.get("Ngày") or rec.get("Ngay") or rec.get("Date") or ""
+                )
                 date_parts = date_raw.split("\n")
 
                 # Các cột phụ khác
                 extra_rows = [
                     ft.Row(controls=[
-                        ft.Text(k, size=11, color=C.TEXT_SECONDARY, width=110),
+                        ft.Text(str(k), size=11, color=C.TEXT_SECONDARY, width=110),
                         ft.Text(str(v), size=11, color=C.TEXT_PRIMARY, expand=True),
                     ], spacing=8)
                     for k, v in rec.items()
@@ -1102,7 +1684,7 @@ class DetailView(ft.Container):
                         content=ft.Column(controls=[
                             ft.Row(controls=[
                                 ft.Column(controls=[
-                                    ft.Text(rec.get("Description", ""), size=12,
+                                    ft.Text(str(rec.get("Description") or ""), size=12,
                                             weight=ft.FontWeight.BOLD, color=C.TEXT_PRIMARY),
                                     ft.Text(date_parts[0] if date_parts else "",
                                             size=11, color=C.TEXT_SECONDARY),
@@ -1114,7 +1696,7 @@ class DetailView(ft.Container):
                                 ft.Column(controls=[
                                     ft.Text(status, size=12, color=status_color,
                                             weight=ft.FontWeight.BOLD),
-                                    ft.Text(rec.get("Points", ""), size=11,
+                                    ft.Text(str(rec.get("Points") or ""), size=11,
                                             color=C.TEXT_SECONDARY),
                                 ], spacing=2,
                                    horizontal_alignment=ft.CrossAxisAlignment.END),
@@ -1126,7 +1708,8 @@ class DetailView(ft.Container):
                         border=ft.Border.all(1, C.BORDER),
                     )
                 )
-            self._content_col.controls.append(self._section("Điểm danh", att_rows))
+            if att_rows:
+                self._content_col.controls.append(self._section("Điểm danh", att_rows))
 
         # Mô tả
         desc_html = details.get("description_html", "")
@@ -1148,11 +1731,113 @@ class DetailView(ft.Container):
 
         # Chỉ thay đổi giao diện, không tự gọi update
 
+    def _show_demo_lms_guard_snackbar(self) -> None:
+        sb = ft.SnackBar(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.INFO_OUTLINE_ROUNDED, color=C.WARNING, size=16),
+                    ft.Text(
+                        DEMO_LMS_WEBVIEW_GUARD_MESSAGE,
+                        size=13,
+                        color=C.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+            ),
+            bgcolor=C.SURFACE,
+            duration=3000,
+        )
+        overlay = getattr(self._page, "overlay", None)
+        if overlay is not None:
+            overlay[:] = [item for item in overlay if not isinstance(item, ft.SnackBar)]
+            overlay.append(sb)
+            sb.open = True
+            update_fn = getattr(self._page, "update", None)
+            if callable(update_fn):
+                try:
+                    update_fn()
+                except Exception:
+                    pass
+            return
+        show_dlg = getattr(self._page, "show_dialog", None)
+        if callable(show_dlg):
+            try:
+                show_dlg(sb)
+            except (AttributeError, TypeError):
+                pass
+
+    def _open_url_in_app(self, url: str, title: str = "") -> None:
+        validated = validate_https_url(url)
+        if validated is None:
+            logger.warning("Blocked invalid or non-HTTPS URL in DetailView")
+            return
+        if callable(self._on_open_url):
+            try:
+                sig = inspect.signature(self._on_open_url)
+                positional = [
+                    p
+                    for p in sig.parameters.values()
+                    if p.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                ]
+                has_varargs = any(
+                    p.kind == inspect.Parameter.VAR_POSITIONAL
+                    for p in sig.parameters.values()
+                )
+            except (TypeError, ValueError):
+                positional = []
+                has_varargs = True
+            if has_varargs or len(positional) >= 2:
+                res = self._on_open_url(validated, title)
+            else:
+                res = self._on_open_url(validated)
+            if inspect.isawaitable(res):
+                run_task = getattr(self._page, "run_task", None)
+                if callable(run_task):
+                    run_task(lambda: res)
+            return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
+            return
+        InAppWebViewDialog(
+            self._page,
+            url=validated,
+            title=title,
+            on_open_external=lambda target: self._launch_external_sync(target),
+        ).show()
+
+    def _launch_external_sync(self, url: str) -> None:
+        validated = validate_https_url(url)
+        if validated is None:
+            return
+        if callable(self._on_open_external):
+            self._on_open_external(validated)
+            return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
+            return
+
+        async def _launch() -> None:
+            try:
+                await ft.UrlLauncher().launch_url(validated)
+            except Exception as exc:
+                logger.warning("Failed to launch external url: %s", exc)
+
+        run_task = getattr(self._page, "run_task", None)
+        if callable(run_task):
+            run_task(_launch)
+
     async def _handle_link_tap(self, e):
-        try:
-            await ft.UrlLauncher().launch_url(e.data)
-        except Exception as exc:
-            logger.warning(f"Failed to launch url {e.data}: {exc}")
+        title = str(self._current_data.get("title", "") or "")
+        self._open_url_in_app(getattr(e, "data", ""), title)
 
     def show_error_banner(self):
         self._error_banner.visible = True
@@ -1172,13 +1857,137 @@ class DetailView(ft.Container):
             ], spacing=6),
         )
 
+    async def _open_in_app(self, e=None):
+        title = str(self._current_data.get("title", "") or "")
+        self._open_url_in_app(self._current_url, title)
+
+    async def _open_external(self, e=None):
+        validated = validate_https_url(self._current_url)
+        if validated is None:
+            return
+        if callable(self._on_open_external):
+            self._on_open_external(validated)
+            return
+        if is_demo_account(getattr(settings, "UTH_USERNAME", "")) and is_uth_lms_url(
+            validated
+        ):
+            self._show_demo_lms_guard_snackbar()
+            return
+        await ft.UrlLauncher().launch_url(validated)
+
     async def _open_browser(self, e):
-        if not self._is_safe_browser_url(self._current_url):
+        await self._open_in_app(e)
+
+    async def _open_quiz(self, _event=None):
+        if self._quiz_open_btn.disabled:
+            return
+        target = self._quiz_launch_target
+        if target is None or self._quiz_player_view is None:
+            return
+        account_id = ""
+        if callable(self._get_quiz_account_id):
+            try:
+                account_id = self._get_quiz_account_id() or ""
+            except Exception:
+                logger.debug("Quiz account identity is unavailable", exc_info=True)
+        if is_demo_account(account_id or getattr(settings, "UTH_USERNAME", "")):
+            self._show_demo_lms_guard_snackbar()
+            return
+        open_for_account = getattr(
+            self._quiz_player_view, "open_activity_for_account", None
+        )
+        if callable(open_for_account):
+            opened = open_for_account(
+                target,
+                self._current_data,
+                account_id,
+                on_entry_unavailable=self._on_quiz_entry_unavailable,
+            )
+        else:
+            opened = self._quiz_player_view.open_activity(target, self._current_data)
+        if not opened and not self._quiz_player_view.visible:
+            self._open_btn.visible = True
+            self._quiz_open_btn.visible = False
+            self._quiz_open_btn.disabled = False
+            self._quiz_runtime_notice.value = (
+                "Trình xem bài chưa sẵn sàng. "
+                "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
+            )
+            self._quiz_runtime_notice.visible = True
+        try:
+            self._page.update()
+        except Exception:
+            pass
+
+    async def _on_quiz_entry_unavailable(self, activity, reason: str):
+        """Apply a confirmed attempt state while preserving browser actions."""
+        activity_url = activity.get("url") if isinstance(activity, Mapping) else None
+        if activity_url and activity_url != self._current_url:
+            return
+        if reason == "attempts_exhausted":
+            updated = dict(self._current_data or {})
+            details = updated.get("details")
+            details = dict(details) if isinstance(details, Mapping) else {}
+            details["quiz_attempts_remaining"] = 0
+            details["quiz_has_unfinished_attempt"] = False
+            updated["details"] = details
+            self.update_detail(updated)
+        else:
+            messages = {
+                "quiz_closed": "Bài kiểm tra hiện đã đóng.",
+                "quiz_unavailable": "Bài kiểm tra hiện không thể mở.",
+                "unsupported_action": "Bài kiểm tra hiện không thể mở trong ứng dụng.",
+                "requires_safe_exam_browser": "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt.",
+                "entry_in_progress": "Bài kiểm tra đang được thực hiện.",
+                "entry_not_opened": "Không thể mở lượt làm bài.",
+            }
+            if reason in {"requires_safe_exam_browser", "quiz_closed"}:
+                self._quiz_open_btn.visible = False
+                self._open_btn.visible = self._is_safe_browser_url(self._current_url)
+            self._quiz_runtime_notice.value = messages.get(
+                reason,
+                "Không thể mở bài trong ứng dụng. Hãy mở trong ứng dụng hoặc thử nút mở bằng trình duyệt ngoài.",
+            )
+            self._quiz_runtime_notice.visible = bool(self._quiz_runtime_notice.value)
+        try:
+            self._page.update()
+        except Exception:
+            pass
+        await self.focus_quiz_opener()
+
+    async def _login_for_quiz(self, _event=None):
+        player_view = self._quiz_player_view
+        request_app_auth = getattr(player_view, "request_app_auth", None)
+        if not callable(request_app_auth):
             return
 
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        async def refresh_quiz_target():
+            self.update_detail(dict(self._current_data))
+            try:
+                self._page.update()
+            except Exception:
+                pass
+
+        try:
+            await request_app_auth(refresh_quiz_target)
+        except Exception:
+            logger.warning("Quiz app login could not be opened")
+
+    async def focus_quiz_opener(self) -> None:
+        """Restore keyboard focus after the quiz surface closes when possible."""
+        control = self._quiz_open_btn
+        if self._quiz_open_btn.disabled or not self._quiz_open_btn.visible:
+            control = (
+                self._header_open_btn
+                if self._header_open_btn.visible
+                else self._open_btn
+            )
+        if not getattr(control, "visible", False):
+            return
+        try:
+            await control.focus()
+        except Exception:
+            pass
 
     # In-App Submission
 
@@ -1216,11 +2025,19 @@ class DetailView(ft.Container):
                         ft.Text(f.name, size=12, color=C.TEXT_PRIMARY, expand=True,
                                 max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ft.Text(size_str, size=11, color=C.TEXT_SECONDARY),
-                        ft.IconButton(
-                            ft.Icons.CLOSE_ROUNDED, icon_size=14,
-                            icon_color=C.TEXT_SECONDARY,
-                            on_click=self._create_remove_handler(i),
-                            style=ft.ButtonStyle(padding=ft.Padding.all(4)),
+                        ft.Semantics(
+                            label="Xóa file khỏi danh sách",
+                            button=True,
+                            content=ft.IconButton(
+                                ft.Icons.CLOSE_ROUNDED, icon_size=14,
+                                icon_color=C.TEXT_SECONDARY,
+                                tooltip="Xóa file khỏi danh sách",
+                                on_click=self._create_remove_handler(i),
+                                padding=0,
+                                size_constraints=ft.BoxConstraints(
+                                    min_width=44, max_width=44, min_height=44, max_height=44
+                                ),
+                            ),
                         ),
                     ],
                     spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1306,7 +2123,12 @@ class DetailView(ft.Container):
             )
         self._page.update()
 
-    def _apply_submission_snapshot(self, snapshot: SubmissionSnapshot):
+    def _apply_submission_snapshot(
+        self,
+        snapshot: SubmissionSnapshot,
+        *,
+        expected_account_epoch: int | None = None,
+    ):
         """Replace displayed submission state with one authoritative snapshot."""
         self._submission_snapshot = snapshot
         self._submission_fingerprint = snapshot.fingerprint
@@ -1317,7 +2139,12 @@ class DetailView(ft.Container):
         self._render_submission_policy()
         self._build_submitted_files_ui()
 
-        DetailView._notify_submission_status(self, snapshot, self._current_url)
+        DetailView._notify_submission_status(
+            self,
+            snapshot,
+            self._current_url,
+            expected_account_epoch=expected_account_epoch,
+        )
 
     @staticmethod
     def _map_submission_status(raw_status: str) -> str:
@@ -1341,19 +2168,53 @@ class DetailView(ft.Container):
         self._submission_status_value.weight = ft.FontWeight.W_600
 
     def _notify_submission_status(
-        self, snapshot: SubmissionSnapshot, target_url: str
+        self,
+        snapshot: SubmissionSnapshot,
+        target_url: str,
+        *,
+        expected_account_epoch: int | None = None,
     ):
         status = DetailView._map_submission_status(snapshot.raw_status)
         if target_url == self._current_url:
             self._last_server_status = status
             self._current_data["submission_status"] = status
         if status and self._on_status_changed and target_url:
+            epoch = (
+                expected_account_epoch
+                if expected_account_epoch is not None
+                else DetailView._effective_expected_account_epoch(self)
+            )
+            if epoch is not None:
+                try:
+                    sig = inspect.signature(self._on_status_changed)
+                    accepts_epoch = "expected_account_epoch" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in sig.parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    accepts_epoch = False
+                if accepts_epoch:
+                    self._on_status_changed(
+                        target_url, status, expected_account_epoch=epoch
+                    )
+                    return
             self._on_status_changed(target_url, status)
 
-    def _apply_mutation_result(self, result: SubmissionMutationResult):
+    def _apply_mutation_result(
+        self,
+        result: SubmissionMutationResult,
+        *,
+        expected_account_epoch: int | None = None,
+    ):
         """Render verified server truth, retaining the last truth if refresh failed."""
         if result.snapshot is not None:
-            self._apply_submission_snapshot(result.snapshot)
+            try:
+                self._apply_submission_snapshot(
+                    result.snapshot,
+                    expected_account_epoch=expected_account_epoch,
+                )
+            except TypeError:
+                self._apply_submission_snapshot(result.snapshot)
             if result.partial:
                 changed = DetailView._reconcile_selected_files(
                     self, result.snapshot
@@ -1568,6 +2429,8 @@ class DetailView(ft.Container):
             return
 
         generation = self._view_generation
+        account_generation = getattr(self, "_account_generation", 0)
+        expected_epoch = self._effective_expected_account_epoch()
         target_url = url
         target_course_id = course_id
         intent = self._build_file_intent(
@@ -1594,10 +2457,16 @@ class DetailView(ft.Container):
                 intent,
                 selected_files,
             )
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ):
+                return
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
-                self._apply_mutation_result(result)
+                self._apply_mutation_result(
+                    result, expected_account_epoch=expected_epoch
+                )
                 if result.ok:
                     self._selected_files.clear()
                     self._file_list_col.controls.clear()
@@ -1605,24 +2474,34 @@ class DetailView(ft.Container):
                     self._upload_progress.value = 1.0
             elif result.snapshot is not None:
                 DetailView._notify_submission_status(
-                    self, result.snapshot, target_url
+                    self,
+                    result.snapshot,
+                    target_url,
+                    expected_account_epoch=expected_epoch,
                 )
         except Exception:
             logger.error("Submission mutation failed unexpectedly")
-            if self._is_current_mutation_context(
+            if self._is_account_context_current(
+                account_generation, expected_epoch
+            ) and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._show_upload_status(
                     "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
                 )
         finally:
-            if self._is_current_mutation_context(
+            if getattr(
+                self, "_account_generation", 0
+            ) == account_generation and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._is_uploading = False
                 self._upload_progress.visible = False
-                self._render_submission_policy()
-                self._page.update()
+                if self._is_account_context_current(
+                    account_generation, expected_epoch
+                ):
+                    self._render_submission_policy()
+                    self._page.update()
 
     async def _execute_finalize_submission(self):
         client = self._get_client() if self._get_client else None
@@ -1643,6 +2522,8 @@ class DetailView(ft.Container):
             return
 
         generation = self._view_generation
+        account_generation = getattr(self, "_account_generation", 0)
+        expected_epoch = self._effective_expected_account_epoch()
         target_url = url
         target_course_id = course_id
         finalize_intent = FinalizeSubmissionIntent(
@@ -1665,32 +2546,48 @@ class DetailView(ft.Container):
                 target_course_id,
                 finalize_intent,
             )
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ):
+                return
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
-                self._apply_mutation_result(result)
+                self._apply_mutation_result(
+                    result, expected_account_epoch=expected_epoch
+                )
                 if result.ok:
                     self._upload_progress.value = 1.0
             elif result.snapshot is not None:
                 DetailView._notify_submission_status(
-                    self, result.snapshot, target_url
+                    self,
+                    result.snapshot,
+                    target_url,
+                    expected_account_epoch=expected_epoch,
                 )
         except Exception:
             logger.error("Submission finalization failed unexpectedly")
-            if self._is_current_mutation_context(
+            if self._is_account_context_current(
+                account_generation, expected_epoch
+            ) and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._show_upload_status(
                     "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
                 )
         finally:
-            if self._is_current_mutation_context(
+            if getattr(
+                self, "_account_generation", 0
+            ) == account_generation and self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
                 self._is_uploading = False
                 self._upload_progress.visible = False
-                self._render_submission_policy()
-                self._page.update()
+                if self._is_account_context_current(
+                    account_generation, expected_epoch
+                ):
+                    self._render_submission_policy()
+                    self._page.update()
 
     def _is_current_mutation_context(
         self, generation: int, target_url: str, target_course_id: int | None
@@ -1754,6 +2651,8 @@ class DetailView(ft.Container):
         view_generation: int,
     ):
         """Load one already-reserved snapshot request and apply it if current."""
+        account_generation = getattr(self, "_account_generation", 0)
+        expected_epoch = self._effective_expected_account_epoch()
         try:
             result = await asyncio.to_thread(
                 self._load_submission_snapshot,
@@ -1762,7 +2661,9 @@ class DetailView(ft.Container):
                 course_id,
                 prefetched_status,
             )
-            if not self._is_current_snapshot_load(
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ) or not self._is_current_snapshot_load(
                 load_generation,
                 view_generation,
                 url,
@@ -1770,24 +2671,52 @@ class DetailView(ft.Container):
             ):
                 return
             if result.ok and result.snapshot is not None:
-                self._apply_submission_snapshot(result.snapshot)
+                try:
+                    self._apply_submission_snapshot(
+                        result.snapshot,
+                        expected_account_epoch=expected_epoch,
+                    )
+                except TypeError:
+                    self._apply_submission_snapshot(result.snapshot)
             elif result.issue is not None:
+                self._resolve_pending_submission_status_on_error()
                 failed = SubmissionMutationResult.failure(result.issue, None)
                 self._show_upload_status(mutation_message(failed), C.CRITICAL)
             self._page.update()
         except Exception:
             logger.exception("Load submitted snapshot failed unexpectedly")
-            if not self._is_current_snapshot_load(
+            if not self._is_account_context_current(
+                account_generation, expected_epoch
+            ) or not self._is_current_snapshot_load(
                 load_generation,
                 view_generation,
                 url,
                 course_id,
             ):
                 return
+            self._resolve_pending_submission_status_on_error()
             self._show_upload_status(
                 "Không thể kiểm tra trạng thái bài nộp mới nhất.", C.CRITICAL
             )
             self._page.update()
+
+    def _resolve_pending_submission_status_on_error(self) -> None:
+        """Clear stuck 'Đang đồng bộ với Moodle...' label when snapshot fetch fails."""
+        if getattr(self._submission_status_value, "value", "") != "Đang đồng bộ với Moodle...":
+            return
+        fallback_raw = str(
+            getattr(self, "_last_server_status", "")
+            or (self._current_data or {}).get("submission_status")
+            or ""
+        ).strip()
+        if fallback_raw and fallback_raw.lower() not in {"unknown", "none", "-"}:
+            mapped = DetailView._map_submission_status(fallback_raw)
+            is_ok = any(k in mapped.lower() for k in ("đã nộp", "đã chấm", "hoàn thành"))
+            self._submission_status_value.value = mapped
+            self._submission_status_value.color = C.SAFE if is_ok else C.WARNING
+            return
+        self._submission_status_value.value = "Chưa thể đồng bộ trực tuyến"
+        self._submission_status_value.color = C.WARNING
 
     def _is_current_snapshot_load(
         self,
@@ -1850,12 +2779,11 @@ class DetailView(ft.Container):
         )
 
     async def _on_edit_submitted(self, e):
-        """Mở trình duyệt để chỉnh sửa bài nộp."""
+        """Mở bài nộp trong ứng dụng để chỉnh sửa."""
         if not self._current_url:
             return
-        # UTH Moodle redirects to /my/courses.php if already logged in via autologin.
-        # Direct navigation relies on active browser sessions or standard CAS SSO redirect.
-        await ft.UrlLauncher().launch_url(self._current_url)
+        title = str(self._current_data.get("title", "") or "")
+        self._open_url_in_app(self._current_url, title)
 
     # File Edit Dialog
 
@@ -1871,6 +2799,9 @@ class DetailView(ft.Container):
         self._edit_status.value = ""
         self._edit_status.visible = False
 
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._file_edit_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -1903,6 +2834,9 @@ class DetailView(ft.Container):
                 )
         else:
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa file '{name}'?"
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)
@@ -1934,6 +2868,9 @@ class DetailView(ft.Container):
         else:
             file_list = "\n".join(f"  • {n}" for n in names)
             self._delete_confirm_text.value = f"Bạn có chắc chắn muốn xóa {len(names)} file?\n{file_list}"
+        sync_dlgs = getattr(self, "_sync_dialog_widths", None)
+        if callable(sync_dlgs):
+            sync_dlgs()
         dlg = self._delete_confirm_dialog
         if dlg not in self._page.overlay:
             self._page.overlay.append(dlg)

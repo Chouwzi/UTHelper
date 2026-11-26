@@ -433,3 +433,176 @@ class TestHasSecureBackend:
     def test_has_keyring(self):
         from config import _has_any_secure_backend
         assert _has_any_secure_backend() is True
+
+
+class _FakeSecretBackend:
+    def __init__(self, initial=None, *, fail_write=False):
+        self.store = dict(initial or {})
+        self.fail_write = fail_write
+        self.write_calls = []
+
+    def read_secret(self, key: str) -> str:
+        return self.store.get(key, "")
+
+    def write_secret(self, key: str, value: str) -> bool:
+        if self.fail_write:
+            return False
+        if value:
+            self.store[key] = value
+        else:
+            self.store.pop(key, None)
+        return True
+
+    def snapshot_secrets(self, keys):
+        return {key: self.store.get(key, "") for key in keys}
+
+    def restore_secrets(self, snapshot):
+        self.store = {k: v for k, v in snapshot.items() if v}
+        return True
+
+    def write_all(self, values):
+        self.write_calls.append(dict(values))
+        if self.fail_write:
+            return False
+        self.store = {k: v for k, v in values.items() if v}
+        return True
+
+
+def test_is_real_android_excludes_ios(monkeypatch):
+    import config
+
+    monkeypatch.delattr(config.sys, "_ANDROID_", raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.delattr(config.sys, "getandroidapilevel", raising=False)
+    monkeypatch.setattr(config.sys, "platform", "ios")
+    assert config.is_android() is True
+    assert config._is_real_android() is False
+
+    monkeypatch.setattr(config.sys, "_IOS_", True, raising=False)
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    assert config._is_real_android() is False
+
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config.sys, "platform", "linux")
+    assert config._is_real_android() is True
+
+
+def test_android_save_settings_fails_closed_without_backend_when_secrets_non_empty(
+    monkeypatch, tmp_path
+):
+    import config
+
+    config_file = tmp_path / "settings.json"
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+    monkeypatch.setattr(
+        config,
+        "settings",
+        config.Settings(UTH_USERNAME="2251120001", UTH_PASSWORD="android-secret", THEME="sakura_pink"),
+    )
+
+    assert config.save_settings() is False
+    assert not config_file.exists()
+
+
+def test_android_save_settings_allows_non_secret_save_when_all_secrets_empty(
+    monkeypatch, tmp_path
+):
+    import config
+
+    config_file = tmp_path / "settings.json"
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+    monkeypatch.setattr(
+        config,
+        "settings",
+        config.Settings(UTH_USERNAME="2251120001", THEME="midnight_blue"),
+    )
+
+    assert config.save_settings() is True
+    saved = json.loads(config_file.read_text(encoding="utf-8"))
+    assert saved["THEME"] == "midnight_blue"
+    for secret_attr in config._SECRET_FIELDS:
+        assert secret_attr not in saved
+
+
+def test_android_load_stashes_plaintext_migration_and_backend_save_scrubs_json(
+    monkeypatch, tmp_path
+):
+    import config
+
+    config_file = tmp_path / "settings.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "UTH_USERNAME": "2251120001",
+                "UTH_PASSWORD": "legacy-password",
+                "TELEGRAM_BOT_TOKEN": "123:legacy-tg",
+                "THEME": "steel_light",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", config_file)
+    config.register_secret_backend(None)
+
+    loaded = config.load_settings()
+    assert loaded.UTH_PASSWORD == "legacy-password"
+    assert loaded.TELEGRAM_BOT_TOKEN == "123:legacy-tg"
+
+    pending = config.pop_pending_plaintext_migration()
+    assert pending == {
+        "password": "legacy-password",
+        "telegram_bot_token": "123:legacy-tg",
+    }
+    assert config.pop_pending_plaintext_migration() == {}
+
+    backend = _FakeSecretBackend()
+    config.register_secret_backend(backend)
+    monkeypatch.setattr(config, "settings", loaded)
+    try:
+        assert config.save_settings() is True
+        assert backend.store == {
+            "password": "legacy-password",
+            "telegram_bot_token": "123:legacy-tg",
+        }
+        scrubbed = json.loads(config_file.read_text(encoding="utf-8"))
+        assert scrubbed["UTH_USERNAME"] == "2251120001"
+        for secret_attr in config._SECRET_FIELDS:
+            assert secret_attr not in scrubbed
+    finally:
+        config.register_secret_backend(None)
+
+
+def test_android_secret_backend_rollback_on_json_write_failure(monkeypatch, tmp_path):
+    import config
+
+    backend = _FakeSecretBackend({"password": "old-password"})
+    monkeypatch.setattr(config.sys, "_ANDROID_", True, raising=False)
+    monkeypatch.delattr(config.sys, "_IOS_", raising=False)
+    monkeypatch.setattr(config, "_HAS_KEYRING", False)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(
+        "core.safe_file_io.SafeFileIO.write_json_atomic",
+        lambda *_args, **_kwargs: False,
+    )
+    config.register_secret_backend(backend)
+    monkeypatch.setattr(
+        config,
+        "settings",
+        config.Settings(UTH_PASSWORD="new-password", THEME="sakura_pink"),
+    )
+    try:
+        assert config.save_settings() is False
+        assert backend.store == {"password": "old-password"}
+    finally:
+        config.register_secret_backend(None)

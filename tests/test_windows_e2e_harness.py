@@ -36,6 +36,7 @@ def test_e2e_harness_rejects_missing_executable_without_waiting():
             text=True,
             timeout=10,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
 
     assert result.returncode != 0

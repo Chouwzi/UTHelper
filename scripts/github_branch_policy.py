@@ -19,6 +19,7 @@ REQUIRED_CHECKS = (
     "🧪 Test (Python 3.12)",
     "🧪 Test (Python 3.13)",
     "🧪 Test (Python 3.14)",
+    "📱 Quiz Flutter extension",
     "🔐 Dependency review",
     "🔒 Security (core)",
     "🔒 Security (android)",
@@ -41,14 +42,16 @@ class GhApi:
         payload: dict[str, Any] | None = None,
     ) -> Any:
         command = ["gh", "api", "--method", method, path]
-        encoded = None
+        stdin_kwargs: dict[str, Any]
         if payload is not None:
             command.extend(("--input", "-"))
-            encoded = json.dumps(payload, separators=(",", ":"))
+            stdin_kwargs = {"input": json.dumps(payload, separators=(",", ":"))}
+        else:
+            stdin_kwargs = {"stdin": subprocess.DEVNULL}
         try:
             result = subprocess.run(
                 command,
-                input=encoded,
+                **stdin_kwargs,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -104,6 +107,7 @@ def protected_branches_ruleset(owner_actor_id: int) -> dict[str, Any]:
                     "require_code_owner_review": True,
                     "require_last_push_approval": False,
                     "required_review_thread_resolution": True,
+                    "require_extra_approval_for_unattributed_changes": True,
                     "allowed_merge_methods": ["merge"],
                 },
             },

@@ -87,6 +87,7 @@ def upload_ipa_release(
             command,
             cwd=private_keys_dir.parent,
             env=transporter_env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=1_200,

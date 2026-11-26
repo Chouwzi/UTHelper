@@ -1,6 +1,8 @@
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Optional, Dict, Any, List, Iterable
 import logging
+from pathlib import Path
+from typing import Callable, Optional, Dict, Any, List, Iterable
 from core import ws_functions
 
 logger = logging.getLogger(__name__)
@@ -8,8 +10,40 @@ logger = logging.getLogger(__name__)
 class MoodleService:
     """Lớp dịch vụ đóng gói các hành động gọi Web Service Moodle và cơ chế lưu cache."""
 
-    def __init__(self, call_ws_api: Callable):
+    def __init__(
+        self,
+        call_ws_api: Callable,
+        grade_report_fetcher: Optional[Callable[[int], Optional[str]]] = None,
+        grade_report_error_getter: Optional[Callable[[], str]] = None,
+        *,
+        client: Any = None,
+    ):
         self.call_ws_api = call_ws_api
+        self._client = client if client is not None else getattr(call_ws_api, "__self__", None)
+        self._grade_report_fetcher = grade_report_fetcher
+        self._grade_report_error_getter = grade_report_error_getter
+
+    @property
+    def moodle_site_origin(self) -> Optional[str]:
+        if self._client is None:
+            return None
+        return getattr(self._client, "moodle_site_origin", None)
+
+    @property
+    def last_grade_report_error(self) -> str:
+        """Last error recorded when fetching a Moodle HTML grade report."""
+        if callable(self._grade_report_error_getter):
+            try:
+                return str(self._grade_report_error_getter() or "")
+            except Exception:
+                return ""
+        return ""
+
+    def fetch_grade_report_html(self, course_id: int) -> Optional[str]:
+        """Fetch /grade/report/user/index.php?id=<course_id> HTML via bound client."""
+        if not callable(self._grade_report_fetcher):
+            return None
+        return self._grade_report_fetcher(course_id)
 
     def get_site_info(self) -> Optional[Dict[str, Any]]:
         """Lấy thông tin chung của tài khoản và cấu hình hệ thống e-learning."""
@@ -49,9 +83,9 @@ class MoodleService:
             **params,
         )
 
-    def get_enrolled_courses(self) -> Optional[List[Dict[str, Any]]]:
+    def get_enrolled_courses(self, classification: str = "all") -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách các môn học mà sinh viên đang đăng ký học."""
-        return ws_functions.get_enrolled_courses(self.call_ws_api)
+        return ws_functions.get_enrolled_courses(self.call_ws_api, classification)
 
     def get_user_courses(self, userid: int) -> Optional[List[Dict[str, Any]]]:
         """Lấy danh sách môn học của một user cụ thể."""
@@ -117,9 +151,82 @@ class MoodleService:
             modulename,
         )
 
-    def upload_file_to_draft(self, file_path: str, draft_id: int = 0) -> int:
+    def upload_file_to_draft(
+        self,
+        file_path: str,
+        draft_id: int = 0,
+        *,
+        user_id: Optional[int] = None,
+    ) -> Optional[int]:
         """Tải một tệp tin lên vùng nháp (draft area) trên server Moodle."""
-        return ws_functions.upload_file_to_draft(self.call_ws_api, file_path, draft_id)
+        try:
+            path = Path(file_path)
+            raw_bytes = path.read_bytes()
+        except (OSError, TypeError, ValueError) as exc:
+            logger.error("Không thể đọc file '%s' để upload nháp: %s", file_path, exc)
+            return None
+
+        resolved_user_id = user_id if user_id is not None else self.get_current_user_id()
+        if not isinstance(resolved_user_id, int) or isinstance(resolved_user_id, bool) or resolved_user_id <= 0:
+            logger.error("Không xác định được Moodle user_id để upload file '%s'", path.name)
+            return None
+
+        encoded = base64.b64encode(raw_bytes).decode("ascii")
+        return ws_functions.upload_file_to_draft(
+            self.call_ws_api,
+            path.name,
+            encoded,
+            resolved_user_id,
+            draft_id,
+        )
+
+    def upload_draft_file_record(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        itemid: int = 0,
+        filepath: str = "/",
+    ) -> Any:
+        """Upload raw bytes to a Moodle draft area via the bound client."""
+        if self._client is None or not hasattr(self._client, "upload_draft_file_record"):
+            return None
+        return self._client.upload_draft_file_record(
+            filename,
+            content,
+            itemid=itemid,
+            filepath=filepath,
+        )
+
+    def download_file(self, url: str) -> Optional[bytes]:
+        """Download an authenticated Moodle file payload via the bound client."""
+        if self._client is None or not hasattr(self._client, "download_file"):
+            return None
+        return self._client.download_file(url)
+
+    def get_user_id(self, *, refresh: bool = False) -> Optional[int]:
+        """Return the active Moodle user ID, refreshing from server when requested."""
+        if self._client is not None and hasattr(self._client, "get_user_id"):
+            return self._client.get_user_id(refresh=refresh)
+        return self.get_current_user_id()
+
+    def remove_assignment_submission(
+        self,
+        cmid: int,
+        *,
+        expected_user_id: int,
+        before_commit: Optional[Callable[[], bool]] = None,
+    ) -> bool:
+        """Remove an editable Moodle assignment submission via the bound client."""
+        if self._client is None or not hasattr(self._client, "remove_assignment_submission"):
+            return False
+        return bool(
+            self._client.remove_assignment_submission(
+                cmid,
+                expected_user_id=expected_user_id,
+                before_commit=before_commit,
+            )
+        )
 
     def get_unused_draft_itemid(self) -> Optional[int]:
         """Allocate a separate Moodle draft area for an editor field."""
@@ -257,3 +364,65 @@ class MoodleService:
     def get_course_contents(self, courseid: int) -> Optional[List[Dict[str, Any]]]:
         """Lấy nội dung toàn bộ bài học, tài liệu giảng dạy trong môn học."""
         return ws_functions.get_course_contents(self.call_ws_api, courseid)
+
+    def get_pages_by_courses(self, courseid: int) -> Optional[List[Dict[str, Any]]]:
+        """Lấy nội dung HTML chi tiết các mod_page trong môn học."""
+        return ws_functions.get_pages_by_courses(self.call_ws_api, courseid)
+
+    def set_activity_completion_manually(self, cmid: int, completed: bool) -> bool:
+        """Cập nhật trạng thái hoàn thành thủ công của module."""
+        return ws_functions.update_activity_completion_manually(
+            self.call_ws_api, cmid, completed
+        )
+
+    def get_course_user_groups(
+        self, course_id: int, user_id: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Lấy danh sách nhóm của sinh viên trong môn học."""
+        return ws_functions.get_course_user_groups(
+            self.call_ws_api, course_id, user_id=user_id
+        )
+
+    def get_forums_by_courses(self, course_ids: List[int]) -> List[Dict[str, Any]]:
+        """Lấy danh sách diễn đàn theo môn học."""
+        return ws_functions.get_forums_by_courses(self.call_ws_api, course_ids)
+
+    def get_forum_discussions(
+        self, forum_id: int, *, page: int = 0, perpage: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Lấy danh sách chủ đề trong diễn đàn."""
+        return ws_functions.get_forum_discussions(
+            self.call_ws_api, forum_id, page=page, perpage=perpage
+        )
+
+    def get_discussion_posts(self, discussion_id: int) -> List[Dict[str, Any]]:
+        """Lấy bài viết trong chủ đề thảo luận."""
+        return ws_functions.get_discussion_posts(self.call_ws_api, discussion_id)
+
+    def get_choice_options(self, choice_id: int) -> List[Dict[str, Any]]:
+        """Lấy danh sách phương án bình chọn mod_choice."""
+        return ws_functions.get_choice_options(self.call_ws_api, choice_id)
+
+    def submit_choice_response(self, choice_id: int, responses: List[int]) -> bool:
+        """Gửi lựa chọn bình chọn mod_choice."""
+        return ws_functions.submit_choice_response(
+            self.call_ws_api, choice_id, responses
+        )
+
+    def get_quiz_access_information(
+        self, quiz_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Lấy thông tin điều kiện truy cập quiz."""
+        return ws_functions.get_quiz_access_information(self.call_ws_api, quiz_id)
+
+    def get_quiz_attempt_review(
+        self, attempt_id: int, page: int = -1
+    ) -> Optional[Dict[str, Any]]:
+        """Lấy chi tiết xem lại lượt làm quiz."""
+        return ws_functions.get_quiz_attempt_review(
+            self.call_ws_api, attempt_id, page=page
+        )
+
+    def get_books_by_courses(self, course_ids: List[int]) -> List[Dict[str, Any]]:
+        """Lấy danh sách hoạt động Book trong môn học."""
+        return ws_functions.get_books_by_courses(self.call_ws_api, course_ids)

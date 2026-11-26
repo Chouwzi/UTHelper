@@ -213,6 +213,7 @@ def test_verifier_script_is_directly_executable_without_pythonpath() -> None:
         capture_output=True,
         timeout=10,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
 
     assert result.returncode == 0

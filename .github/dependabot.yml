@@ -1,5 +1,13 @@
 version: 2
 updates:
+  - package-ecosystem: "pub"
+    directory: "/extensions/flet_uth_quiz/flutter/flet_uth_quiz"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: "flet"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -17,6 +25,11 @@ updates:
       time: "03:30"
       timezone: "Asia/Ho_Chi_Minh"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "flet"
+      - dependency-name: "winrt-Windows.ApplicationModel"
+      - dependency-name: "flet-android-notifications"
+      - dependency-name: "webview2-Microsoft.Web.WebView2.Core"
 
   - package-ecosystem: "gradle"
     directory: "/extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android"
@@ -26,3 +39,8 @@ updates:
       time: "04:00"
       timezone: "Asia/Ho_Chi_Minh"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "androidx.room:*"
+      - dependency-name: "org.jetbrains.kotlin:kotlin-gradle-plugin"
+      - dependency-name: "androidx.core:core-ktx"
+      - dependency-name: "androidx.work:work-runtime-ktx"

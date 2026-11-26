@@ -91,7 +91,7 @@ jobs:
         run: pip install ruff
 
       - name: Ruff check
-        run: ruff check src/ --output-format=github
+        run: ruff check src tests scripts extensions --output-format=github
 
   test:
     name: 🧪 Test (Python ${{ matrix.python-version }})
@@ -119,17 +119,17 @@ jobs:
         run: |
           pip install -e .
           pip install -e extensions/flet_uth_background_sync
-          pip install pytest pytest-cov keyring
+          pip install -e extensions/flet_uth_quiz
+          pip install pytest pytest-cov keyring "pillow>=13.0.0" flet-webview==0.86.5
 
       - name: Run tests
         run: |
           cd src
-          python -m pytest ../tests/ -q \
+          python -m pytest ../tests/ ../extensions/flet_uth_quiz/tests/ ../extensions/flet_uth_background_sync/tests/ -q \
             --tb=short \
             --cov=. \
             --cov-report=term-missing \
-            --cov-report=xml:../coverage.xml \
-            -x
+            --cov-report=xml:../coverage.xml
 
       - name: Compile check (syntax)
         run: python -m py_compile src/main.py && python -c "import py_compile, pathlib; [py_compile.compile(str(f), doraise=True) for f in pathlib.Path('src').rglob('*.py')]"
@@ -141,6 +141,37 @@ jobs:
           name: coverage-report
           path: coverage.xml
           retention-days: 7
+
+  quiz-flutter:
+    name: 📱 Quiz Flutter extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@0ca7a949e71ae44c8e688a51c5e7e93b2c87e295
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Install Flutter dependencies
+        working-directory: extensions/flet_uth_quiz/flutter/flet_uth_quiz
+        run: flutter pub get
+
+      - name: Analyze quiz extension
+        working-directory: extensions/flet_uth_quiz/flutter/flet_uth_quiz
+        run: flutter analyze
+
+      - name: Test quiz extension
+        working-directory: extensions/flet_uth_quiz/flutter/flet_uth_quiz
+        run: flutter test
 
   dependency-review:
     name: 🔐 Dependency review
@@ -196,6 +227,9 @@ jobs:
         run: |
           pip install pip-audit
           pip install -e "${{ matrix.extras }}"
+          if [ "${{ matrix.surface }}" = "android" ]; then
+            pip install "flet-webview==0.86.5"
+          fi
           pip freeze --exclude-editable > audit-requirements.txt
           audit_status=1
           for attempt in 1 2 3; do

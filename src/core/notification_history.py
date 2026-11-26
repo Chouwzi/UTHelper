@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import threading
@@ -10,15 +11,39 @@ logger = logging.getLogger(__name__)
 _MAX_HISTORY = 100  # Giữ tối đa 100 entries
 
 
-class NotificationHistory:
-    """Lưu lịch sử thông báo đã gửi."""
+def _history_digest(namespace: str) -> str:
+    return hashlib.sha256(namespace.strip().casefold().encode("utf-8")).hexdigest()[:12]
 
-    def __init__(self, history_dir: Optional[Path] = None):
+
+class NotificationHistory:
+    """Lưu lịch sử thông báo đã gửi (phân tách theo tài khoản khi có namespace)."""
+
+    def __init__(
+        self,
+        history_dir: Optional[Path] = None,
+        namespace: Optional[str] = None,
+    ):
+        self._explicit_dir = history_dir is not None
         if history_dir is None:
-            from config import _USER_DATA_DIR
-            history_dir = _USER_DATA_DIR
-        self._path = history_dir / "notification_history.json"
+            from config import _USER_DATA_DIR, settings
+
+            history_dir = Path(_USER_DATA_DIR)
+            if namespace is None:
+                namespace = str(getattr(settings, "UTH_USERNAME", "") or "").strip() or "__logged_out__"
+        self._history_dir = Path(history_dir)
         self._lock = threading.Lock()
+        if namespace is not None and str(namespace).strip():
+            digest = _history_digest(str(namespace))
+            self._path = self._history_dir / f"notification_history_{digest}.json"
+        else:
+            self._path = self._history_dir / "notification_history.json"
+
+    def set_namespace(self, namespace: Optional[str]) -> None:
+        """Switch history file to another account namespace."""
+        norm = str(namespace or "").strip() or "__logged_out__"
+        digest = _history_digest(norm)
+        with self._lock:
+            self._path = self._history_dir / f"notification_history_{digest}.json"
 
     def add(self, assignments: List[Any], channels: List[str]) -> None:
         """Ghi nhận một lần gửi thông báo."""

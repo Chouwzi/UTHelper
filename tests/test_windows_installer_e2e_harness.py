@@ -29,6 +29,7 @@ def test_installer_harness_rejects_missing_installer_without_waiting():
             text=True,
             timeout=10,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         elapsed = time.monotonic() - started
 

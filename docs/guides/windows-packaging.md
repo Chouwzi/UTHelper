@@ -26,9 +26,15 @@ Fresh verification before build:
 .\.venv\Scripts\python.exe src\main.py
 ```
 
-Build and prepare the argument-free autostart alias:
+Build and prepare the argument-free autostart alias (if building manually with Visual Studio 2026 / MSVC 14.52+, append `/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` to `$env:CL` for `flutter_inappwebview_windows` WIL `<experimental/coroutine>` compatibility):
 
 ```powershell
+$clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+if ([string]::IsNullOrWhiteSpace($env:CL)) {
+  $env:CL = $clFlag
+} elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+  $env:CL = "$($env:CL.Trim()) $clFlag"
+}
 flet build windows --verbose
 .\.venv\Scripts\python.exe scripts\prepare_windows_bundle.py build\windows
 ```
@@ -161,10 +167,70 @@ If the executable starts but a dynamic dependency fails, repeat the debug build 
 - Prefer `__file__`/bundled paths for read-only assets and `%APPDATA%` for writable config. The app stores settings under `%APPDATA%\UTHelper`.
 - The machine-scoped MSI requires elevation to install under Program Files. The
   application and its HKCU autostart switch do not request elevation at runtime.
-- MSI and Burn are the sole canonical Windows release packages. Legacy MSIX and
-  AppInstaller helpers are not part of the exact release inventory.
-- Code signing with an RFC3161 timestamp is mandatory for release inventory;
-  unsigned local output cannot pass the publication gate.
+- MSI and Burn are the sole canonical GitHub LTS Windows release packages
+  (`exe_lts`). Store MSIX packages (`msstore`) are built and verified through
+  the dedicated Microsoft Store workflow and are never mixed into the 7-asset
+  GitHub LTS release inventory.
+- Code signing with an RFC3161 timestamp is mandatory for the GitHub LTS release
+  inventory; unsigned local MSI/EXE output cannot pass the publication gate.
+
+## Microsoft Store MSIX Packaging (`msstore`)
+
+For Microsoft Store distribution ([ADR 0004](../adr/0004-multi-channel-store-and-lts-distribution.md)),
+package the exact verified `build\windows` Flet bundle as an `.msix` using
+`scripts/package_msix.ps1`, `scripts/generate_msix_assets.py`, and
+`scripts/verify_msix_release.ps1`.
+
+1. **Visual assets**: `scripts/generate_msix_assets.py` deterministically renders
+   aspect-ratio-preserving RGBA PNG tiles from `src/assets/icon.png` at the exact
+   dimensions required by Microsoft Store Partner Center:
+   - `Assets\Square44x44Logo.png` (`44x44`)
+   - `Assets\StoreLogo.png` (`50x50`)
+   - `Assets\Square150x150Logo.png` (`150x150`)
+   - `Assets\Wide310x150Logo.png` (`310x150`)
+2. **Build unsigned Partner Center `.msix`** (`-SignMode none`; Partner Center
+   re-signs Store submissions automatically) or local sideload `.msix`
+   (`-SignMode test`):
+
+```powershell
+.\scripts\package_msix.ps1 `
+  -BundleDir build\windows `
+  -Version "2.6.0.0" `
+  -IdentityName "com.uthelper.UTHelper" `
+  -Publisher "CN=UTHelper" `
+  -StoreProductId "9NBLGGH4NNS1" `
+  -Channel msstore `
+  -SignMode none `
+  -Output dist\UTHelper-2.6.0-msstore.msix
+```
+
+   The script stages `distribution-channel.json` (`channel = "msstore"`) inside
+   the temporary MSIX stage without touching `src/assets/`, preserves
+   argument-free `windows.startupTask` (`UTHelperAutostart.exe`,
+   `TaskId="UTHelperStartup"`), declares `rescap:Capability Name="runFullTrust"`
+   and `Capability Name="internetClient"`, and keeps full MSIX **AppData
+   virtualization** enabled (no `unvirtualizedResources`, no disabled
+   `FileSystemWriteVirtualization`/`RegistryWriteVirtualization`).
+
+3. **Verify MSIX integrity and optional WACK certification**:
+
+```powershell
+.\scripts\verify_msix_release.ps1 `
+  -MsixPath dist\UTHelper-2.6.0-msstore.msix `
+  -Channel msstore `
+  -IdentityName "com.uthelper.UTHelper" `
+  -Publisher "CN=UTHelper" `
+  -Version "2.6.0.0" `
+  -StoreProductId "9NBLGGH4NNS1" `
+  -Output evidence\UTHelper-2.6.0-msstore.msix.verification.json `
+  -RunWack
+```
+
+   Passing `-RunWack` runs the Windows App Certification Kit (`appcert.exe`)
+   against the built `.msix` and asserts `OVERALL_RESULT="PASS"`. CI automation
+   is available via `.github/workflows/build-msstore.yml`. See
+   [Store distribution & submission guide](store-distribution-submission.md) for
+   Partner Center `runFullTrust` justification and pre-submission steps.
 
 ## Protected release environment
 
@@ -188,6 +254,7 @@ to a commit contained in `main`. A successful public release has exactly:
 ```text
 UTHelper-X.Y.Z.ipa
 UTHelper-X.Y.Z.apk
+UTHelper-X.Y.Z-arm64-v8a.apk
 UTHelper-Setup-X.Y.Z.exe
 UTHelper-X.Y.Z.msi
 release-manifest.json

@@ -389,7 +389,7 @@ def load_theme_from_settings():
 load_theme_from_settings()
 
 
-def set_page_theme(page) -> None:
+def set_page_theme(page, theme_name: str | None = None) -> None:
     """Đồng bộ các giá trị màu C hiện tại vào page.theme ColorScheme để các màu sắc ngữ nghĩa (semantic colors) của Flet hoạt động chính xác.
 
     Cần gọi hàm này sau khi thực hiện apply_theme() để cập nhật lại ColorScheme của page.
@@ -399,7 +399,10 @@ def set_page_theme(page) -> None:
     from config import settings
     from gui.core.theme_presets import THEME_PRESETS
     
-    theme_name = getattr(settings, 'THEME', 'midnight_blue')
+    # A live preview has not been persisted to settings yet. Callers can pass
+    # the draft theme so Flet's light/dark mode stays in sync with the colors
+    # already applied to the semantic palette.
+    theme_name = theme_name or getattr(settings, 'THEME', 'midnight_blue')
     preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
     is_light = preset.get("mode", "dark") == "light"
 
@@ -431,6 +434,28 @@ def set_page_theme(page) -> None:
             on_error=C.ON_CRITICAL,
             shadow=C.SHADOW,
             scrim=C.SCRIM,
+        ),
+        navigation_bar_theme=ft.NavigationBarTheme(
+            bgcolor=C.SURFACE,
+            indicator_color=ft.Colors.with_opacity(0.18, C.ACCENT),
+            label_behavior=ft.NavigationBarLabelBehavior.ALWAYS_SHOW,
+            label_padding=ft.Padding.symmetric(horizontal=1, vertical=0),
+            label_text_style={
+                ft.ControlState.SELECTED: ft.TextStyle(
+                    size=10.5,
+                    weight=ft.FontWeight.W_600,
+                    color=C.ACCENT,
+                    letter_spacing=0.0,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.ControlState.DEFAULT: ft.TextStyle(
+                    size=10.5,
+                    weight=ft.FontWeight.W_500,
+                    color=C.TEXT_SECONDARY,
+                    letter_spacing=0.0,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            },
         ),
     )
     

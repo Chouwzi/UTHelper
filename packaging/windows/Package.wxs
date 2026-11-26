@@ -34,6 +34,15 @@
         </Component>
       </Directory>
     </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut Id="DesktopUTHelper" Name="UTHelper"
+                  Target="[INSTALLFOLDER]UTHelper.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\UTHelper" Name="DesktopInstalled"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
     <CustomAction Id="RemoveRunUTHelper" Directory="SystemFolder"
                   ExeCommand="reg.exe delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v UTHelper /f"
                   Execute="immediate" Impersonate="yes" Return="ignore" />
@@ -41,7 +50,7 @@
                   ExeCommand="reg.exe delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v UTHElearningAlert /f"
                   Execute="immediate" Impersonate="yes" Return="ignore" />
     <InstallExecuteSequence>
-      <Custom Action="RemoveRunUTHelper" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RemoveRunUTHelper" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND (NOT UPGRADINGPRODUCTCODE)" />
       <Custom Action="RemoveRunLegacy" After="RemoveRunUTHelper" Condition="REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
     <util:FailWhenDeferred />

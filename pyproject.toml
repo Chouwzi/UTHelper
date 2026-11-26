@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.5.0"
+version = "2.6.0"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,11 +13,16 @@ dependencies = [
     # HTTP: uses urllib.request (stdlib) — zero dependency, Cloudflare-friendly
     "certifi>=2024.2.2",
     "beautifulsoup4>=4.12.3",
+    "httpx>=0.28.1",
     "pydantic>=2.6.4",
     "flet==0.86.5",
     "python-dateutil>=2.8.2",
     "packaging>=24.2",
     "sentry-sdk>=2,<3",
+    "pypdf>=7.1.1",
+    "pillow>=13.0.0",
+    "xlrd>=2.0.2",
+    "filelock>=3.25.0",
 ]
 
 [project.optional-dependencies]
@@ -27,9 +32,10 @@ windows = [
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
     "winrt-Windows.ApplicationModel==3.2.1",
+    "webview2-Microsoft.Web.WebView2.Core==3.2.1",
     "keyring>=25.0.0",
-    "pillow>=12.3.0",
     "lxml>=6.1.0",
+    "pypdfium2>=5.9.0",
 ]
 android-build = [
     "flet-android-notifications==0.10.0",
@@ -42,7 +48,7 @@ uth-alert = "main:main"
 packages = ["src"]
 
 [tool.flet]
-org = "com.uthelper"
+org = "io.github.chouwzi"
 product = "UTHelper"
 artifact = "UTHelper"
 company = "UTHelper"
@@ -61,9 +67,13 @@ packages = true
 app = true
 
 [tool.flet.flutter.pubspec.dependency_overrides]
-# Flet 0.86.5's template pins 1.0.0; current generated JNI bindings require 1.1.
+# Flet 0.86.5's template pins jni 1.0.0; jni_flutter >=1.1.0 requires jni ^1.2.0
+# for JReference.nonNullPointer. jni 1.2.0 was retracted on 2026-11-19 because
+# Jni.findClass stopped stripping L...; descriptors, crashing older bindings
+# like path_provider_android 2.3.1 (ClassNotFoundException: "Landroid/content/Context;").
+# jni 1.2.1 retains nonNullPointer and restores descriptor stripping.
 # https://github.com/flet-dev/flet/issues/6919
-jni = "1.1.0"
+jni = "1.2.1"
 
 # ── Windows-specific configuration ──
 [tool.flet.windows]
@@ -72,10 +82,19 @@ dependencies = [
     "pywin32>=306.0",
     "windows-toasts>=1.3.1",
     "winrt-Windows.ApplicationModel==3.2.1",
+    "webview2-Microsoft.Web.WebView2.Core==3.2.1",
     "keyring>=25.0.0",
-    "pillow>=12.3.0",
     "lxml>=6.1.0",
+    "pypdfium2>=5.9.0",
+    "filelock>=3.25.0",
+    "flet-uth-quiz==0.1.0",
 ]
+
+[tool.flet.windows.dev_packages]
+flet-uth-quiz = "extensions/flet_uth_quiz"
+
+[tool.flet.windows.app]
+hide_window_on_start = true
 
 [tool.flet.windows.cleanup]
 # PyWin32 compiled help is not used at runtime; retain every runtime module.
@@ -84,50 +103,75 @@ package_files = ["**.chm"]
 # ── Android-specific configuration ──
 [tool.flet.android]
 legacy_packaging = true
-bundle_id = "com.uthelper.uthelper"
+bundle_id = "io.github.chouwzi.uthelper"
 adaptive_icon_background = "#0F172A"
+target_sdk_version = 36
 dependencies = [
     "flet-android-notifications==0.10.0",
     "flet-uth-background-sync==0.1.0",
+    "flet-uth-quiz==0.1.0",
+    "flet-webview==0.86.5",
+    "filelock>=3.25.0",
 ]
 
 [tool.flet.android.dev_packages]
 flet-uth-background-sync = "extensions/flet_uth_background_sync"
+flet-uth-quiz = "extensions/flet_uth_quiz"
 
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true
 "android.permission.POST_NOTIFICATIONS" = true
 "android.permission.RECEIVE_BOOT_COMPLETED" = true
 "android.permission.SCHEDULE_EXACT_ALARM" = true
-"android.permission.REQUEST_INSTALL_PACKAGES" = true  # Auto-update APK
-"android.permission.FOREGROUND_SERVICE" = true
-"android.permission.FOREGROUND_SERVICE_DATA_SYNC" = true
+"android.permission.REQUEST_INSTALL_PACKAGES" = true  # Auto-update APK (apk_lts only; stripped for chplay)
 
-# Android needs cleartext traffic for some Moodle instances
+# CH Play compliant: disallow external cleartext and backups; allow loopback HTTP only via network_security_config
 [tool.flet.android.manifest_application]
-"usesCleartextTraffic" = "true"
+"allowBackup" = "false"
+"usesCleartextTraffic" = "false"
+"networkSecurityConfig" = "@xml/network_security_config"
+
+[tool.flet.android.gradle_properties]
+"org.gradle.jvmargs" = "-Xmx3G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m -XX:+HeapDumpOnOutOfMemoryError"
+"org.gradle.workers.max" = "2"
+"kotlin.compiler.execution.strategy" = "in-process"
+"kotlin.incremental" = "false"
 
 # ── iOS-specific configuration ──
 [tool.flet.ios]
-bundle_id = "com.uthelper.UTHelper"
-dependencies = ["flet-uth-background-sync==0.1.0"]
+bundle_id = "io.github.chouwzi.uthelper"
+dependencies = [
+    "flet-uth-background-sync==0.1.0",
+    "flet-uth-quiz==0.1.0",
+    "flet-webview==0.86.5",
+    "filelock>=3.25.0",
+]
 
 [tool.flet.ios.dev_packages]
 flet-uth-background-sync = "extensions/flet_uth_background_sync"
+flet-uth-quiz = "extensions/flet_uth_quiz"
 
 [tool.flet.ios.info]
 # Allow cleartext HTTP for Moodle instances without HTTPS
 NSAppTransportSecurity = { NSAllowsArbitraryLoads = true }
 # Permission descriptions (required by App Store)
-NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để nhắc deadline bài tập."
+NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để nhắc deadline bài tập và lịch học."
 
 [dependency-groups]
 dev = [
+    "flet-webview==0.86.5",
+    "filelock>=3.25.0",
     "pytest>=9.0.3",
     "pytest-timeout>=2.3,<3",
+    "ruff>=0.9.0",
 ]
 
 [tool.pytest.ini_options]
+pythonpath = [
+    "src",
+    "extensions/flet_uth_quiz/src",
+    "extensions/flet_uth_background_sync/src",
+]
 testpaths = ["tests"]
 markers = [
     "windows_integration: isolated tests against real Windows user APIs",
