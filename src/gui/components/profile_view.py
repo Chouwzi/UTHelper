@@ -809,11 +809,11 @@ class ProfileView(ft.Container):
                             end=ft.Alignment(1, 0),
                             colors=[
                                 C.SURFACE,
-                                ft.Colors.with_opacity(0.60, C.SURFACE),
-                                ft.Colors.with_opacity(0.08, C.SURFACE),
+                                C.SURFACE,
+                                ft.Colors.with_opacity(0.45, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            stops=[0, 0.12, 0.30, 0.44],
+                            stops=[0, 0.10, 0.40, 0.68],
                         ),
                     ),
                     ft.Container(
@@ -834,6 +834,7 @@ class ProfileView(ft.Container):
             ),
             height=banner_height,
             width=float("inf"),
+            bgcolor=C.SURFACE,
             expand=True,
             # Flush with the outer card: the parent's rounded clip shapes the
             # corners so the banner and the info grid read as one card.
