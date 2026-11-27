@@ -1661,7 +1661,7 @@ class AppController:
         self.page.bgcolor             = C.BG
         self.page.padding             = 0
         self.page.spacing             = 0
-        self.page.theme_mode          = ft.ThemeMode.DARK
+        self.page.theme_mode          = ft.ThemeMode.LIGHT
 
         # Đồng bộ ColorScheme theme của Flet page với các giá trị C của chúng ta
         from gui.core.theme import set_page_theme
