@@ -54,6 +54,7 @@ except ImportError:
     _core_classify_uth_webview_url = None
     _core_normalize_uth_webview_target_url = None
 from config import (
+    get_data_dir,
     get_sync_interval_minutes,
     hydrate_secrets,
     pop_pending_plaintext_migration,
@@ -73,6 +74,7 @@ from gui.components.quiz_player_view import QuizPlayerView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.components.learning_roadmap_view import LearningRoadmapView
 from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
@@ -778,6 +780,16 @@ class AppController:
             )
         else:
             self._account_epoch = getattr(self, "_account_epoch", 0)
+        if account_switched_or_logged_out:
+            roadmap_service = getattr(self, "_roadmap_service", None)
+            clear_roadmap_cache = getattr(roadmap_service, "clear_cache", None)
+            if callable(clear_roadmap_cache):
+                try:
+                    clear_roadmap_cache()
+                except Exception:
+                    logger.debug("Roadmap account cache clear failed", exc_info=True)
+            self._roadmap_service = None
+            self._roadmap_service_account_key = None
         self._sync_generation = getattr(self, "_sync_generation", 0) + 1
         self._prefetch_epoch = getattr(self, "_prefetch_epoch", 0) + 1
         self._is_loading = False
@@ -1046,7 +1058,11 @@ class AppController:
                 self.cards_list, "controls", None
             ) is not None:
                 self.cards_list.controls = []
-            for view_attr in ("grade_overview_view", "course_grades_view"):
+            for view_attr in (
+                "grade_overview_view",
+                "course_grades_view",
+                "roadmap_view",
+            ):
                 view_obj = getattr(self, view_attr, None)
                 if view_obj is None:
                     continue
@@ -1763,6 +1779,8 @@ class AppController:
             return "settings"
         if getattr(getattr(self, "calendar_view", None), "visible", False):
             return "calendar"
+        if getattr(getattr(self, "roadmap_view", None), "visible", False):
+            return "grades"
         if getattr(getattr(self, "grade_overview_view", None), "visible", False) or getattr(
             getattr(self, "course_grades_view", None), "visible", False
         ):
@@ -1988,6 +2006,9 @@ class AppController:
             handled = True
         elif self.calendar_view.visible:
             await self._close_calendar()
+            handled = True
+        elif getattr(getattr(self, "roadmap_view", None), "visible", False):
+            await self._close_roadmap()
             handled = True
         elif self.grade_overview_view.visible:
             grade_handle_back = getattr(self.grade_overview_view, "handle_back", None)
@@ -2467,6 +2488,14 @@ class AppController:
             on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
             course_grades_lookup=self._lookup_moodle_course_grades_cached,
             course_grades_async_lookup=self._fetch_moodle_course_grades_async,
+            on_open_roadmap=lambda: self._safe_run_task(self._show_roadmap),
+        )
+        self.roadmap_view = LearningRoadmapView(
+            on_close=lambda: self._safe_run_task(self._close_roadmap),
+            on_refresh=lambda: self._safe_run_task(
+                lambda: self._show_roadmap(force_refresh=True)
+            ),
+            page=self.page,
         )
         self.course_grades_view = CoursesView(
             on_close=lambda: self._safe_run_task(self._close_course_grades),
@@ -2566,6 +2595,7 @@ class AppController:
             self.settings_view,
             self.calendar_view,
             self.grade_overview_view,
+            self.roadmap_view,
             self.courses_view,
             self.course_grades_view,
         ):
@@ -2683,6 +2713,7 @@ class AppController:
             detail_switcher=self.detail_switcher,
             empty_detail=self._empty_detail,
             on_destination_change=self._nav_shell.set_active,
+            roadmap_view=self.roadmap_view,
         )
         body_with_rail = ft.Row(
             controls=[self._nav_shell.rail_slot, main_stack],
@@ -2833,6 +2864,7 @@ class AppController:
         zero_margin = ft.Margin(left=0, right=0, top=0, bottom=0)
         for view in (
             getattr(self, "grade_overview_view", None),
+            getattr(self, "roadmap_view", None),
             getattr(self, "calendar_view", None),
             courses_view,
             getattr(self, "course_grades_view", None),
@@ -5301,6 +5333,68 @@ class AppController:
         else:
             await self._show_grades()
 
+    async def _show_roadmap(self, force_refresh: bool = False):
+        """Open the roadmap from the grade screen without adding a nav destination."""
+        import hashlib
+
+        from core.learning_roadmap.service import (
+            CACHE_FILE_NAME,
+            SOURCE_NONE,
+            LearningRoadmapService,
+            RoadmapLoadResult,
+        )
+
+        username = str(settings.UTH_USERNAME or settings.MOODLE_USERNAME or "").strip()
+        password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD or ""
+        account_key = hashlib.sha256(
+            username.casefold().encode("utf-8")
+        ).hexdigest()[:20]
+        cache_file = Path(get_data_dir()) / (
+            f"{Path(CACHE_FILE_NAME).stem}_{account_key}{Path(CACHE_FILE_NAME).suffix}"
+        )
+        account_epoch = getattr(self, "_account_epoch", 0)
+
+        self._diag_screen("roadmap")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="roadmap")
+        self.view_manager.show_roadmap_loading()
+        self._sync_rail_active()
+        service = None
+        try:
+            service = getattr(self, "_roadmap_service", None)
+            if (
+                service is None
+                or getattr(self, "_roadmap_service_account_key", None) != account_key
+            ):
+                clear_cache = getattr(service, "clear_cache", None)
+                if callable(clear_cache):
+                    clear_cache()
+                service = LearningRoadmapService(
+                    cache_file=cache_file,
+                    portal_client=self._portal_client,
+                )
+                self._roadmap_service = service
+                self._roadmap_service_account_key = account_key
+            result = await asyncio.to_thread(
+                service.load,
+                username=username,
+                password=password,
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:
+            logger.error("Learning roadmap load failed: %s", exc, exc_info=True)
+            result = RoadmapLoadResult(None, SOURCE_NONE, None, "Không tải được lộ trình")
+        if account_epoch != getattr(self, "_account_epoch", 0):
+            if service is not None:
+                service.clear_cache()
+            return
+        self.view_manager.show_roadmap_result(result)
+
+    async def _close_roadmap(self):
+        """Return from the roadmap to the grade screen that opened it."""
+        await self.view_manager.close_roadmap()
+        self._diag_screen("grades")
+        self._sync_rail_active()
+
     async def _show_grades(self, force_refresh: bool = False):
         """Show grade overview panel and load academic transcript/radar data."""
         account_epoch = getattr(self, "_account_epoch", 0)
@@ -5682,6 +5776,7 @@ class AppController:
             "calendar_view",
             "detail_view",
             "grade_overview_view",
+            "roadmap_view",
             "courses_view",
             "course_grades_view",
             "quiz_player_view",

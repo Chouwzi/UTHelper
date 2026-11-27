@@ -23,6 +23,7 @@ class ViewManager:
         detail_switcher=None,
         empty_detail=None,
         on_destination_change=None,
+        roadmap_view=None,
     ):
         self.page = page
         self.dashboard = dashboard
@@ -30,6 +31,7 @@ class ViewManager:
         self.settings_view = settings_view
         self.calendar_view = calendar_view
         self.grade_overview_view = grade_overview_view
+        self.roadmap_view = roadmap_view
         self.courses_view = courses_view
         self.course_grades_view = course_grades_view
         self.controller = controller
@@ -86,6 +88,10 @@ class ViewManager:
             self.courses_view.visible = False
         if self.course_grades_view is not None:
             self.course_grades_view.visible = False
+
+    def _hide_roadmap(self) -> None:
+        if self.roadmap_view is not None:
+            self.roadmap_view.visible = False
 
     def _clear_selected_card(self) -> None:
         clear_fn = getattr(self.controller, "_clear_selected_activity", None)
@@ -153,6 +159,7 @@ class ViewManager:
         self.calendar_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_roadmap()
         self._hide_courses_view()
         self._clear_detail_layer()
         if self.tab_switcher is None:
@@ -167,6 +174,7 @@ class ViewManager:
         self._dismiss_menu_if_open()
         self.cancel_pending_settings_navigation()
         self._clear_detail_layer()
+        self._hide_roadmap()
         self._sync_nav_buttons("courses")
         self._notify_destination("courses")
         if self.courses_view is None:
@@ -197,6 +205,7 @@ class ViewManager:
         self._dismiss_menu_if_open()
         self.cancel_pending_settings_navigation()
         self._clear_detail_layer()
+        self._hide_roadmap()
 
         self.calendar_view.visible = True
         self.calendar_view.opacity = 1.0
@@ -227,6 +236,7 @@ class ViewManager:
         """Ẩn màn hình Lịch bằng hiệu ứng và hiển thị lại màn hình Dashboard."""
         self.calendar_view.hide()
         self._hide_courses_view()
+        self._hide_roadmap()
         if self.tab_switcher is not None:
             self.dashboard.visible = True
             self.dashboard.opacity = 1.0
@@ -253,6 +263,7 @@ class ViewManager:
         generation = self._settings_navigation_generation
 
         self._clear_detail_layer()
+        self._hide_roadmap()
         self.settings_view.visible = True
         self.settings_view.offset = ft.Offset(0, 0)
         self.settings_view.opacity = 1.0
@@ -279,6 +290,7 @@ class ViewManager:
         self._dismiss_menu_if_open()
         self.cancel_pending_settings_navigation()
         self._clear_detail_layer()
+        self._hide_roadmap()
         self.grade_overview_view.visible = True
         self.grade_overview_view.opacity = 1.0
         self.grade_overview_view.offset = ft.Offset(0, 0)
@@ -319,6 +331,7 @@ class ViewManager:
         self._dismiss_menu_if_open()
         self.cancel_pending_settings_navigation()
         self._clear_detail_layer()
+        self._hide_roadmap()
         target.visible = True
         target.opacity = 1.0
         target.offset = ft.Offset(0, 0)
@@ -453,9 +466,57 @@ class ViewManager:
         self.grade_overview_view.set_credit_progress(progress)
         self.page.update()
 
+    def show_roadmap_loading(self):
+        """Show the roadmap opened from the grade screen."""
+        self._dismiss_menu_if_open()
+        self.cancel_pending_settings_navigation()
+        self._clear_detail_layer()
+        self.roadmap_view.visible = True
+        self.roadmap_view.opacity = 1.0
+        self.roadmap_view.offset = ft.Offset(0, 0)
+        self.grade_overview_view.visible = False
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.settings_view.visible = False
+        self._hide_courses_view()
+        self.roadmap_view.show_loading()
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.roadmap_view
+        else:
+            self._show_only(self.roadmap_view)
+        self._sync_detail_host()
+        self._sync_nav_buttons("grades")
+        self._notify_destination("grades")
+        self.page.update()
+
+    def show_roadmap_result(self, result):
+        self.roadmap_view.show_result(result)
+        self.page.update()
+
+    async def close_roadmap(self):
+        """Return to the grade screen that contains the roadmap entry point."""
+        self.roadmap_view.hide()
+        self.roadmap_view.visible = False
+        self.grade_overview_view.visible = True
+        self.grade_overview_view.opacity = 1.0
+        self.grade_overview_view.offset = ft.Offset(0, 0)
+        self.dashboard.visible = False
+        self.calendar_view.visible = False
+        self.settings_view.visible = False
+        self._hide_courses_view()
+        if self.tab_switcher is not None:
+            self.tab_switcher.content = self.grade_overview_view
+        else:
+            self._show_only(self.grade_overview_view)
+        self._sync_detail_host()
+        self._sync_nav_buttons("grades")
+        self._notify_destination("grades")
+        self.page.update()
+
     async def close_grades(self):
         """Đóng màn hình điểm số và quay lại màn hình chính."""
         self.grade_overview_view.hide()
+        self._hide_roadmap()
         self._hide_courses_view()
         if self.tab_switcher is not None:
             self.dashboard.visible = True
@@ -479,6 +540,7 @@ class ViewManager:
     def show_detail_loading(self, data):
         """Chuyển sang màn hình chi tiết bài tập ở trạng thái tải dữ liệu."""
         self._dismiss_menu_if_open()
+        self._hide_roadmap()
         try:
             from gui.components.courses.embedded_webview_host import (
                 set_global_webview_occlusion,
@@ -568,6 +630,7 @@ class ViewManager:
     async def close_settings(self):
         """Đóng màn hình cấu hình với hiệu ứng và hiển thị lại màn hình Dashboard chính."""
         self.cancel_pending_settings_navigation()
+        self._hide_roadmap()
         self._hide_courses_view()
         if self.tab_switcher is not None:
             self.dashboard.visible = True
