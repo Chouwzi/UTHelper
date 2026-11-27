@@ -2696,3 +2696,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_background_sync/src extensions/flet_uth_background_sync/tests extensions/flet_uth_quiz/src extensions/flet_uth_quiz/tests`: **All checks passed!**.
   - `pytest tests/test_architecture_boundaries.py -v`: **6 passed**.
   - `pytest tests extensions/flet_uth_background_sync/tests extensions/flet_uth_quiz/tests -q --tb=short`: **3329 passed, 26 skipped, 0 failed**.
+
+## Default Light Theme Alignment & Minimal Credits UI Polish (2026-11-27)
+
+- **Branch & Scope**: `fix/light-default-and-clean-credits` — `src/config.py`, `src/gui/core/{theme,theme_presets}.py`, `src/gui/view_models/settings_form.py`, `src/gui/components/settings/{credits_section,theme_section}.py`, `src/gui/components/settings_view.py`, `src/gui/app_controller.py`, `tests/{test_theme_accessibility,test_settings_credits_and_version}.py`.
+- **Changes**:
+  - Standardized `DEFAULT_THEME = "steel_light"` across `Settings`, `SettingsFormSnapshot`, `theme.py` (`C` initial tokens, `apply_theme`, `load_theme_from_settings`, `set_page_theme`), `SettingsView` (`_selected_theme`, `_apply_theme_colors`, `_handle_reset_defaults`), `theme_section.py`, and `AppController` (`ft.ThemeMode.LIGHT`); promoted `"steel_light"` (`"Cool slate - mặc định"`) to index 0 of `THEME_ORDER` while updating `"midnight_blue"` description, and aligned default `COLOR_*` fields (plus untouched legacy color migration on `"steel_light"`) with WCAG AA light tokens.
+  - Simplified `src/gui/components/settings/credits_section.py` (`Giới thiệu`) to remove verbose role/contribution descriptions on both Founder (`Tác giả chính`: `Nguyễn Trần Đình Chương` / `@Chouwzi` + `GitHub`) and Community Contributors (`Đóng góp cộng đồng`: names/handles only), keeping clean single-line layout across Desktop and 375px Mobile viewports.
+- **Verification**:
+  - `uv run ruff check src tests`: **All checks passed!**.
+  - `pytest tests -q --tb=short`: **3443 passed, 26 skipped, 0 failed** (verified in live Flet Web Desktop + Mobile browser renders).
