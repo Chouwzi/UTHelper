@@ -2709,11 +2709,21 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 
 ## Calendar Schedule-to-Week Highlight Fix (2026-11-27)
 
-- **Scope**: `src/gui/components/calendar_view.py`.
+- **Scope**: `src/gui/components/calendar_view.py`, `tests/test_calendar_week_view.py`.
 - Apply the three mode-button styles before rendering month/week content. The
   render path can update the page immediately; styling afterward left the
   schedule tab's active background visible when switching back to Week.
-- **Verification**: not run in this change.
+- Added a regression test that hooks `page.update()` and checks the schedule
+  tab is already transparent while rendering both Week and Month after leaving
+  Schedule mode.
+- **Verification (local Windows, Python 3.12, 2026-11-27)**:
+  - `python -m pytest tests/test_calendar_week_view.py -q --tb=short`: **45 passed**.
+  - `ruff check src tests`: **All checks passed**.
+  - `python -m pytest tests -q --tb=short`: **3436 passed, 38 skipped, 3 failed**.
+    The three failures are in unrelated cache/Quiz tests:
+    `test_default_user_data_dir_and_filename_sanitization`,
+    `test_live_safe_exam_browser_requirement_preserves_browser_recovery`, and
+    `test_late_old_session_error_cannot_clear_new_open_pending_cookies`.
 
 
 
