@@ -200,6 +200,15 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
         tags["native_exception_code"] = report.native_exception_code
     if report.faulting_module is not None:
         tags["faulting_module"] = report.faulting_module
+    if report.distribution_channel is not None:
+        tags["distribution_channel"] = report.distribution_channel
+    if report.package_format is not None:
+        tags["package_format"] = report.package_format
+    if (
+        report.distribution_channel is not None
+        or report.package_format is not None
+    ):
+        tags["build_track"] = report.release_channel
     exception_value: dict[str, Any] = {
         "type": report.exception_type,
         "mechanism": {
@@ -265,6 +274,10 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
         contexts["app"]["flutter_version"] = report.flutter_version
     if report.app_memory is not None:
         contexts["app"]["app_memory"] = report.app_memory
+    if report.distribution_channel is not None:
+        contexts["app"]["distribution_channel"] = report.distribution_channel
+    if report.package_format is not None:
+        contexts["app"]["package_format"] = report.package_format
     if report.processor_count is not None:
         contexts["device"]["processor_count"] = report.processor_count
     if report.cpu_description is not None:
@@ -310,7 +323,7 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
         if report.gpu.api_type is not None:
             gpu["api_type"] = report.gpu.api_type
         contexts["gpu"] = gpu
-    event = {
+    event: dict[str, Any] = {
         "event_id": report.event_id.hex,
         "timestamp": report.occurred_at.astimezone(timezone.utc).isoformat(),
         "release": f"uthelper@{report.app_version}",
@@ -323,6 +336,13 @@ def _event_from_report(report: DiagnosticReport) -> dict[str, Any]:
         "tags": tags,
         "contexts": contexts,
     }
+    if (
+        report.distribution_channel is not None
+        and report.package_format is not None
+    ):
+        event["dist"] = (
+            f"{report.distribution_channel}-{report.package_format}-{report.architecture}"
+        )
     package_versions = report.packages.model_dump(exclude_none=True)
     if package_versions:
         event["modules"] = package_versions
