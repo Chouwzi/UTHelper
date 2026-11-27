@@ -1115,11 +1115,26 @@ class CoursesCoordinator:
                 initial_pane_w = float(bounds_fn()[2])
             except Exception:
                 initial_pane_w = 700.0
-        plat_val = getattr(self._page, "platform", None)
-        is_windows_native_pdf = (
-            (plat_val == ft.PagePlatform.WINDOWS or str(plat_val or "").lower() == "windows")
-            and not bool(getattr(self._page, "web", False))
-        )
+        if (
+            (kind == "pdf" or rendered_pdf_bytes is not None)
+            and preprepared_office_viewer is None
+            and is_embedded_webview_supported(self._page)
+        ):
+            reg_lock = getattr(self, "_preview_register_lock", None)
+            ctx = reg_lock if reg_lock is not None else contextlib.nullcontext()
+            pdf_payload = rendered_pdf_bytes if rendered_pdf_bytes is not None else data
+            entry_pdf_path = (
+                cached_file_path
+                if (rendered_pdf_bytes is None and kind == "pdf")
+                else None
+            )
+            with ctx:
+                preprepared_office_viewer = prepare_pdf_viewer(
+                    pdf_payload,
+                    self.preview_server,
+                    theme="light",
+                    file_path=entry_pdf_path,
+                )
         reader = DocumentReaderView(
             file_name=name,
             data=data,
@@ -1137,7 +1152,7 @@ class CoursesCoordinator:
             preopened_pdf=preopened_pdf,
             rendered_pdf_bytes=rendered_pdf_bytes,
             pane_width=initial_pane_w,
-            pdf_in_webview=is_windows_native_pdf,
+            pdf_in_webview=False,
             on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             preprepared_office_viewer=preprepared_office_viewer,
             cached_file_path=cached_file_path,
@@ -1292,7 +1307,31 @@ class CoursesCoordinator:
                                 if not _is_still_current():
                                     return
                     if rendered_pdf_bytes is not None:
-                        if not is_windows_desktop:
+                        if webview_supported:
+                            if not _is_still_current():
+                                return
+
+                            def _prepare_rendered_pdf() -> Optional[OfficeViewerDescriptor]:
+                                ctx = (
+                                    reg_lock
+                                    if reg_lock is not None
+                                    else contextlib.nullcontext()
+                                )
+                                with ctx:
+                                    if not _is_still_current():
+                                        return None
+                                    return prepare_pdf_viewer(
+                                        rendered_pdf_bytes,
+                                        self.preview_server,
+                                        theme="light",
+                                    )
+
+                            preprepared_office_viewer = await asyncio.to_thread(
+                                _prepare_rendered_pdf
+                            )
+                            if not _is_still_current():
+                                return
+                        if preprepared_office_viewer is None:
                             if not _is_still_current():
                                 return
                             preopened_pdf = await asyncio.to_thread(
@@ -1374,13 +1413,7 @@ class CoursesCoordinator:
                             pass
                         return
                 elif att.preview_kind == "pdf":
-                    is_mobile = bool(
-                        platform_utils.IS_ANDROID
-                        or platform_utils.IS_IOS
-                        or plat_val in (ft.PagePlatform.ANDROID, ft.PagePlatform.IOS)
-                        or str(plat_val or "").lower() in ("android", "ios")
-                    )
-                    if is_mobile and webview_supported:
+                    if webview_supported:
                         if not _is_still_current():
                             return
 
@@ -1405,7 +1438,7 @@ class CoursesCoordinator:
                         )
                         if not _is_still_current():
                             return
-                    elif not is_windows_desktop:
+                    if preprepared_office_viewer is None:
                         if not _is_still_current():
                             return
                         pdf_dir = getattr(self.preview_cache, "cache_dir", None)

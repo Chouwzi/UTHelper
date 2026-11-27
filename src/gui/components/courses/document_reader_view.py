@@ -191,7 +191,7 @@ class DocumentReaderView(ft.Container):
         self._embedded_host = None
         self._webview_failed: bool = False
         self._viewer_watchdog: Optional[threading.Timer] = None
-        self._viewer_watchdog_timeout: float = 14.0
+        self._viewer_watchdog_timeout: float = 26.0
         self._viewer_ready_received: bool = False
         self._webview_fallback_notice: str = ""
 
@@ -399,7 +399,7 @@ class DocumentReaderView(ft.Container):
             return
         if not (hasattr(result, "control") or hasattr(result, "eval_js")):
             return
-        timeout_s = max(0.05, float(getattr(self, "_viewer_watchdog_timeout", 14.0)))
+        timeout_s = max(0.05, float(getattr(self, "_viewer_watchdog_timeout", 26.0)))
         timer = threading.Timer(
             timeout_s,
             lambda: self._fallback_from_webview("viewer_timeout"),
