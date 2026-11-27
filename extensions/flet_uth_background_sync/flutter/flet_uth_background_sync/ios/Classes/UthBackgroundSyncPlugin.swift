@@ -569,6 +569,23 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         return rawTop.isEmpty ? "unknown" : rawTop
     }
 
+    private func isWsVerifiableCoursesModule(_ activity: [String: Any], eventType: String) -> Bool {
+        let keyCandidate = text(activity["activity_key"] ?? activity["id"] ?? activity["activity_id"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        for nonWsPrefix in ["scorm:", "scorm_", "lesson:", "lesson_"] {
+            if keyCandidate.hasPrefix(nonWsPrefix) { return false }
+        }
+        let rawUrl = text(activity["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let path = URL(string: rawUrl)?.path.lowercased(), path.contains("/mod/") {
+            if path.contains("/mod/assign/") || path.contains("/mod/quiz/") {
+                return true
+            }
+            return false
+        }
+        return ["assignment", "assign", "quiz"].contains(eventType.lowercased())
+    }
+
     private func accepts(_ activity: [String: Any], settings: [String: Any]) -> Bool {
         let muted = Set(stringArray(settings["muted_courses"]).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -584,10 +601,10 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             if Self.completedStatuses.contains(status) {
                 return false
             }
-            // Block unverified Courses assignments/quizzes; keep THNN "unknown" eligible.
+            // Block unverified Courses assign/quiz items; keep SCORM/Lesson and THNN "unknown" eligible.
             if (status == "unknown" || status.isEmpty),
                isCoursesActivity(activity),
-               ["assignment", "assign", "quiz"].contains(eventType.lowercased()) {
+               isWsVerifiableCoursesModule(activity, eventType: eventType) {
                 return false
             }
         }

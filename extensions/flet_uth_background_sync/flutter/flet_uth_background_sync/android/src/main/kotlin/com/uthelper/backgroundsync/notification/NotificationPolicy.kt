@@ -84,11 +84,8 @@ class NotificationPolicy(private val settings: NativeSettings) {
         return candidate.toEpochSecond()
     }
 
-    private fun normalizeState(value: String): String =
-        value.trim().lowercase().split(Regex("\\s+")).joinToString(" ")
-
     private fun isCompleted(activity: ActivityEntity): Boolean =
-        activity.graded || normalizeState(activity.submissionState) in COMPLETED_STATES
+        activity.graded || isCompletedState(activity.submissionState)
 
     private fun isThnnActivity(activity: ActivityEntity): Boolean {
         if (activity.activityKey.startsWith("thnn:")) return true
@@ -97,16 +94,39 @@ class NotificationPolicy(private val settings: NativeSettings) {
     }
 
     private fun isUnverifiedCoursesActivity(activity: ActivityEntity): Boolean {
-        if (normalizeState(activity.submissionState) !in UNVERIFIED_STATES) return false
+        if (normalizeStateValue(activity.submissionState) !in UNVERIFIED_STATES) return false
         if (isThnnActivity(activity)) return false
         if (activity.eventType.trim().lowercase() !in VERIFIABLE_TYPES) return false
+        if (resolveModuleName(activity) !in VERIFIABLE_MODULES) return false
         val host = runCatching { URI(activity.url).host?.lowercase().orEmpty() }.getOrDefault("")
         if (host in COURSES_HOSTS) return true
         return activity.url.isBlank() &&
             COURSES_WORKER_PREFIXES.any { prefix -> activity.activityKey.startsWith(prefix) }
     }
 
+    private fun resolveModuleName(activity: ActivityEntity): String {
+        val cleanKey = activity.activityKey.removePrefix("thnn:").lowercase()
+        for ((prefix, mod) in KEY_MODULE_PREFIXES) {
+            if (cleanKey.startsWith(prefix)) return mod
+        }
+        val urlPath = runCatching { URI(activity.url).path.orEmpty() }.getOrDefault("")
+        val urlModule = Regex("/mod/([^/]+)/").find(urlPath)
+            ?.groupValues?.getOrNull(1)?.lowercase()
+        if (!urlModule.isNullOrBlank()) return urlModule
+        return when (val typeNorm = activity.eventType.trim().lowercase()) {
+            "assignment", "assign" -> "assign"
+            "quiz" -> "quiz"
+            else -> typeNorm
+        }
+    }
+
     companion object {
+        internal fun normalizeStateValue(value: String): String =
+            value.trim().lowercase().split(Regex("\\s+")).joinToString(" ")
+
+        internal fun isCompletedState(value: String): Boolean =
+            normalizeStateValue(value) in COMPLETED_STATES
+
         private val COMPLETED_STATES = setOf(
             "submitted",
             "graded",
@@ -123,8 +143,19 @@ class NotificationPolicy(private val settings: NativeSettings) {
         )
         private val UNVERIFIED_STATES = setOf("", "unknown")
         private val VERIFIABLE_TYPES = setOf("assignment", "assign", "quiz")
+        private val VERIFIABLE_MODULES = setOf("assign", "quiz")
         private val COURSES_HOSTS = setOf("courses.ut.edu.vn", "elearning.ut.edu.vn")
-        private val COURSES_WORKER_PREFIXES = listOf("assign:", "quiz:", "scorm:", "lesson:")
+        private val COURSES_WORKER_PREFIXES = listOf("assign:", "quiz:")
+        private val KEY_MODULE_PREFIXES = listOf(
+            "scorm:" to "scorm",
+            "scorm_" to "scorm",
+            "lesson:" to "lesson",
+            "lesson_" to "lesson",
+            "assign:" to "assign",
+            "assign_" to "assign",
+            "quiz:" to "quiz",
+            "quiz_" to "quiz",
+        )
     }
 }
 

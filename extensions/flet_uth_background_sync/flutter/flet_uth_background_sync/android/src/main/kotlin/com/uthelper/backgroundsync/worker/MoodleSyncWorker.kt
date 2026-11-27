@@ -12,6 +12,7 @@ import com.uthelper.backgroundsync.data.UthDatabase
 import com.uthelper.backgroundsync.network.MoodleWsClient
 import com.uthelper.backgroundsync.network.MoodleWsException
 import com.uthelper.backgroundsync.notification.NotificationDispatcher
+import com.uthelper.backgroundsync.notification.NotificationPolicy
 import com.uthelper.backgroundsync.notification.NotificationReconciler
 import com.uthelper.backgroundsync.security.CredentialVault
 import com.uthelper.backgroundsync.security.MoodleCredential
@@ -63,15 +64,11 @@ class MoodleSyncWorker(
                     return@withLock Result.success()
                 }
                 val latestPrevious = dao.activities().associateBy { it.activityKey }
-                val mergedCoursesActivities = discovery.activities.map { activity ->
-                    val old = latestPrevious[activity.activityKey] ?: previous[activity.activityKey]
-                    if (activity.submissionState == "unknown" && old != null) {
-                        activity.copy(
-                            submissionState = old.submissionState,
-                            graded = old.graded,
-                        )
-                    } else activity
-                }
+                val mergedCoursesActivities = mergeCoursesSnapshotActivities(
+                    discovered = discovery.activities,
+                    latestPrevious = latestPrevious,
+                    initialPrevious = previous,
+                )
                 // Preserve unexpired activities imported from foreign Moodle sites
                 // (e.g. thnn.ut.edu.vn / "thnn:*") so background Courses syncs never
                 // delete THNN Room rows or cancel armed THNN AlarmManager notifications.
@@ -134,6 +131,24 @@ class MoodleSyncWorker(
 
     companion object {
         internal val syncMutex = Mutex()
+
+        internal fun mergeCoursesSnapshotActivities(
+            discovered: List<ActivityEntity>,
+            latestPrevious: Map<String, ActivityEntity>,
+            initialPrevious: Map<String, ActivityEntity> = emptyMap(),
+        ): List<ActivityEntity> = discovered.map { activity ->
+            val old = latestPrevious[activity.activityKey] ?: initialPrevious[activity.activityKey]
+            val oldCompleted = old != null &&
+                (old.graded || NotificationPolicy.isCompletedState(old.submissionState))
+            if (activity.submissionState == "unknown" && oldCompleted) {
+                activity.copy(
+                    submissionState = old!!.submissionState,
+                    graded = old.graded,
+                )
+            } else {
+                activity
+            }
+        }
 
         internal fun mergeWithForeignSiteActivities(
             mergedActivities: List<ActivityEntity>,

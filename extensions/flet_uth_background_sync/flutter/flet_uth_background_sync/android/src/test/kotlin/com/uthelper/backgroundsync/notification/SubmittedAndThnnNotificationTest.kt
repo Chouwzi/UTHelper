@@ -158,6 +158,22 @@ class SubmittedAndThnnNotificationTest {
                 entity("quiz:102", "", "quiz", "unknown")
             )
         )
+        // Courses SCORM and Lesson mapped to eventType="quiz" with unknown state -> ACCEPTED!
+        assertTrue(
+            policy.accepts(
+                entity(
+                    "scorm:910",
+                    "https://courses.ut.edu.vn/mod/scorm/view.php?id=910",
+                    "quiz",
+                    "unknown",
+                )
+            )
+        )
+        assertTrue(
+            policy.accepts(
+                entity("lesson:911", "", "quiz", "unknown")
+            )
+        )
         // Courses verified not_submitted -> accepted
         assertTrue(
             policy.accepts(
@@ -258,5 +274,82 @@ class SubmittedAndThnnNotificationTest {
 
         assertEquals(setOf("assign:101", "thnn:quiz:55"), merged.map { it.activityKey }.toSet())
         assertEquals(200L, merged.first { it.activityKey == "thnn:quiz:55" }.lastSeenGeneration)
+    }
+
+    @Test
+    fun failedStatusVerificationDoesNotResurrectStaleNotSubmittedWhilePreservingCompleted() {
+        val policy = NotificationPolicy(settings)
+        val importer = ForegroundActivityImporter()
+
+        val oldNotSubmitted = ActivityEntity(
+            activityKey = "assign:501",
+            activityId = "501",
+            courseId = "10",
+            courseName = "CNPM",
+            title = "Assignment 501",
+            eventType = "assignment",
+            deadlineEpochSeconds = 1_900_000_000L,
+            url = "https://courses.ut.edu.vn/mod/assign/view.php?id=501",
+            submissionState = "not_submitted",
+            graded = false,
+            revision = "r0",
+            lastSeenGeneration = 100L,
+        )
+        val oldSubmitted = oldNotSubmitted.copy(
+            activityKey = "assign:502",
+            activityId = "502",
+            url = "https://courses.ut.edu.vn/mod/assign/view.php?id=502",
+            submissionState = "submitted",
+        )
+        val previousMap = mapOf(
+            oldNotSubmitted.activityKey to oldNotSubmitted,
+            oldSubmitted.activityKey to oldSubmitted,
+        )
+
+        // 1. ForegroundActivityImporter: T0 not_submitted -> T1 submitted on web -> T2 WS failed ("unknown")
+        val reimported = importer.parse(
+            values = listOf(
+                mapOf(
+                    "id" to "501",
+                    "title" to "Assignment 501",
+                    "type" to "assignment",
+                    "deadline" to "2030-03-15 12:00:00",
+                    "url" to "https://courses.ut.edu.vn/mod/assign/view.php?id=501",
+                    "submission_status" to "unknown",
+                    "site_identity" to "courses",
+                ),
+                mapOf(
+                    "id" to "502",
+                    "title" to "Assignment 502",
+                    "type" to "assignment",
+                    "deadline" to "2030-03-15 12:00:00",
+                    "url" to "https://courses.ut.edu.vn/mod/assign/view.php?id=502",
+                    "submission_status" to "unknown",
+                    "site_identity" to "courses",
+                ),
+            ),
+            generation = 200L,
+            previous = previousMap,
+        ).associateBy { it.activityKey }
+
+        assertEquals("unknown", reimported.getValue("assign:501").submissionState)
+        assertFalse(policy.accepts(reimported.getValue("assign:501")))
+        assertEquals("submitted", reimported.getValue("assign:502").submissionState)
+        assertFalse(policy.accepts(reimported.getValue("assign:502")))
+
+        // 2. MoodleSyncWorker: discovered Courses snapshot with WS status timeout ("unknown")
+        val discoveredUnknown = listOf(
+            oldNotSubmitted.copy(submissionState = "unknown", lastSeenGeneration = 200L),
+            oldSubmitted.copy(submissionState = "unknown", lastSeenGeneration = 200L),
+        )
+        val workerMerged = MoodleSyncWorker.mergeCoursesSnapshotActivities(
+            discovered = discoveredUnknown,
+            latestPrevious = previousMap,
+        ).associateBy { it.activityKey }
+
+        assertEquals("unknown", workerMerged.getValue("assign:501").submissionState)
+        assertFalse(policy.accepts(workerMerged.getValue("assign:501")))
+        assertEquals("submitted", workerMerged.getValue("assign:502").submissionState)
+        assertFalse(policy.accepts(workerMerged.getValue("assign:502")))
     }
 }

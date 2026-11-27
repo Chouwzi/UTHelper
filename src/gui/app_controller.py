@@ -5983,9 +5983,9 @@ class AppController:
                         workers,
                         is_cancelled,
                     )
-                    if not _epoch_is_current():
+                    if not _epoch_is_current() or is_cancelled():
                         return
-                    if not is_cancelled() and isinstance(hydrated_map, dict):
+                    if isinstance(hydrated_map, dict):
                         apply_pre_dispatch_status_hydration(
                             result, pre_candidates, hydrated_map
                         )

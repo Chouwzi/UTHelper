@@ -9,6 +9,7 @@ from typing import Iterable
 
 from core.activity_status import (
     COMPLETED_SUBMISSION_STATUSES,
+    is_ws_verifiable_courses_module,
     normalize_submission_status,
 )
 from core.notification_types import (
@@ -87,15 +88,19 @@ class ActivityNotificationPolicy:
             status = normalize_submission_status(activity.submission_status)
             if status in self._IGNORED_STATUSES:
                 return False
-            # On Courses (courses.ut.edu.vn), "unknown" means submission status
-            # has not been verified yet or WS failed -> block false alerts.
-            # On THNN (thnn.ut.edu.vn), "unknown" is authoritative for calendar
-            # items without WS status endpoints -> must remain eligible.
+            # On Courses (courses.ut.edu.vn), "unknown" on WS-verifiable
+            # modules (/mod/assign/, /mod/quiz/) means submission status has
+            # not been verified yet or WS failed -> block false alerts.
+            # Non-WS modules (/mod/scorm/, /mod/lesson/) and THNN calendar
+            # items remain "unknown" authoritatively -> must stay eligible.
             if (
                 status == "unknown"
                 and activity.site_kind == "courses"
                 and activity.event_type.strip().casefold()
                 in self._COURSES_VERIFIABLE_TYPES
+                and is_ws_verifiable_courses_module(
+                    activity.url, activity.activity_id, activity.event_type
+                )
             ):
                 return False
         if self.config.notify_types and activity.event_type:

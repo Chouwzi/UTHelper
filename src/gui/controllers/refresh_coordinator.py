@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from core.activity_status import (
     COMPLETED_SUBMISSION_STATUSES,
     extract_canonical_submission_status,
+    is_ws_verifiable_courses_module,
     normalize_submission_status,
     prefer_known_submission_status,
 )
@@ -72,6 +73,12 @@ def status_hydration_candidates(
             continue
         activity_type = item.get("type")
         if activity_type not in {"assignment", "assign", "quiz"}:
+            continue
+        if not is_ws_verifiable_courses_module(
+            str(item.get("url") or ""),
+            str(item.get("activity_key") or item.get("id") or ""),
+            str(activity_type or ""),
+        ):
             continue
         raw_status = item.get("submission_status")
         raw_norm = str(raw_status or "").strip().casefold()

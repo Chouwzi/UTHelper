@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 
 _CANONICAL_STATUSES = {
@@ -211,3 +212,58 @@ def extract_canonical_submission_status(value: Any) -> str:
     if top_status != "unknown":
         return top_status
     return detail_candidates[0] if detail_candidates else "unknown"
+
+
+_WS_VERIFIABLE_MODULES: frozenset[str] = frozenset({"assign", "quiz"})
+_ID_MODULE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("scorm:", "scorm"),
+    ("scorm_", "scorm"),
+    ("lesson:", "lesson"),
+    ("lesson_", "lesson"),
+    ("assign:", "assign"),
+    ("assign_", "assign"),
+    ("quiz:", "quiz"),
+    ("quiz_", "quiz"),
+    ("attendance:", "attendance"),
+    ("attendance_", "attendance"),
+)
+
+
+def extract_moodle_module_name(
+    url: str = "",
+    activity_id: str = "",
+    event_type: str = "",
+) -> str:
+    """Resolve the underlying Moodle module name (distinguishing scorm/lesson from quiz)."""
+    raw_url = str(url or "").strip()
+    if raw_url:
+        path = urlsplit(raw_url).path.casefold()
+        if "/mod/" in path:
+            mod = path.split("/mod/", 1)[1].split("/", 1)[0].strip()
+            if mod:
+                return mod
+
+    raw_id = str(activity_id or "").strip().casefold()
+    if raw_id.startswith("thnn:"):
+        raw_id = raw_id[5:]
+    for prefix, mod_name in _ID_MODULE_PREFIXES:
+        if raw_id.startswith(prefix):
+            return mod_name
+
+    norm_type = str(event_type or "").strip().casefold()
+    if norm_type == "assignment":
+        return "assign"
+    return norm_type
+
+
+def is_ws_verifiable_courses_module(
+    url: str = "",
+    activity_id: str = "",
+    event_type: str = "",
+) -> bool:
+    """Return True only for Courses modules with authoritative WS status endpoints (assign, quiz)."""
+    return (
+        extract_moodle_module_name(url, activity_id, event_type)
+        in _WS_VERIFIABLE_MODULES
+    )
+

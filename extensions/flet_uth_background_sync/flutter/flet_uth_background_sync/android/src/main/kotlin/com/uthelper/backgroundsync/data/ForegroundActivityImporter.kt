@@ -1,5 +1,6 @@
 package com.uthelper.backgroundsync.data
 
+import com.uthelper.backgroundsync.notification.NotificationPolicy
 import java.net.URI
 import java.security.MessageDigest
 import java.time.Instant
@@ -31,7 +32,9 @@ class ForegroundActivityImporter {
         val deadline = deadline(value) ?: return@mapNotNull null
         val old = previous[key]
         val incomingState = extractNormalizedState(value)
-        val state = if (incomingState == "unknown" && old != null) {
+        val oldCompleted = old != null &&
+            (old.graded || NotificationPolicy.isCompletedState(old.submissionState))
+        val state = if (incomingState == "unknown" && old != null && oldCompleted) {
             old.submissionState
         } else incomingState
         val incomingRevision = value.text("revision", "timemodified", "updated_at")

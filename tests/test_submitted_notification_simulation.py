@@ -348,7 +348,7 @@ def test_rc2_team_submissions_direct_grading_and_ws_failure_safety(
     monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn")
     monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "2251120999")
     monkeypatch.setattr(settings, "NOTIFY_IGNORE_SUBMITTED", True)
-    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180])
+    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180, 30])
     monkeypatch.setattr(settings, "NOTIFY_MILESTONES", [])
     monkeypatch.setattr(settings, "NOTIFY_MINUTES_BEFORE", 0)
     monkeypatch.setattr(settings, "NOTIFY_DND_ENABLE", False)
@@ -617,7 +617,7 @@ def test_rc3_policy_distinguishes_courses_unknown_vs_thnn_unknown_and_promotes_c
     monkeypatch.setattr(settings, "UTH_USERNAME", "2251120999")
     monkeypatch.setattr(settings, "UTH_PASSWORD", "secret-pw")
     monkeypatch.setattr(settings, "NOTIFY_IGNORE_SUBMITTED", True)
-    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180])
+    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180, 30])
     monkeypatch.setattr(settings, "NOTIFY_MILESTONES", [])
     monkeypatch.setattr(settings, "NOTIFY_MINUTES_BEFORE", 0)
     monkeypatch.setattr(settings, "NOTIFY_DND_ENABLE", False)
@@ -749,7 +749,7 @@ def test_rc4_activity_notification_status_normalization_and_thnn_courses_key_iso
     assert act_courses.key != act_thnn.key
 
     monkeypatch.setattr(settings, "NOTIFY_IGNORE_SUBMITTED", True)
-    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180])
+    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180, 30])
     monkeypatch.setattr(settings, "NOTIFY_MILESTONES", [])
     monkeypatch.setattr(settings, "NOTIFY_MINUTES_BEFORE", 0)
     monkeypatch.setattr(settings, "NOTIFY_TYPES", [])
@@ -949,3 +949,244 @@ def test_rc6_native_android_and_ios_parity_contracts() -> None:
     assert "thnn.ut.edu.vn" in swift
     assert "courses.ut.edu.vn" in swift
     assert "released" in swift
+    assert "isWsVerifiableCoursesModule" in swift
+
+
+# ---------------------------------------------------------------------------
+# Adversarial Review Regressions (#300)
+# ---------------------------------------------------------------------------
+def test_adversarial_scorm_and_lesson_courses_deadlines_notify_without_ws_spam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Courses /mod/scorm/ and /mod/lesson/ action events map to type='quiz' with
+    submission_status='unknown' and have no quiz WS endpoint; they must skip quiz
+    WS hydration and remain eligible for notifications and schedules.
+    """
+    from core.ws_functions import ws_events_to_assignments
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "2251120999")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "secret-pw")
+    monkeypatch.setattr(settings, "MOODLE_BASE_URL", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "ws-token-sim")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "2251120999")
+    monkeypatch.setattr(settings, "NOTIFY_IGNORE_SUBMITTED", True)
+    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180, 30])
+    monkeypatch.setattr(settings, "NOTIFY_MILESTONES", [])
+    monkeypatch.setattr(settings, "NOTIFY_MINUTES_BEFORE", 0)
+    monkeypatch.setattr(settings, "NOTIFY_TYPES", [])
+    monkeypatch.setattr(settings, "NOTIFY_MUTED_COURSES", [])
+    monkeypatch.setattr(settings, "NOTIFY_DND_ENABLE", False)
+
+    due_ts = int((datetime.now() + timedelta(hours=2)).timestamp())
+    converted = ws_events_to_assignments(
+        [
+            {
+                "id": 9501,
+                "name": "Bài giảng SCORM Tuần 5",
+                "modulename": "scorm",
+                "instance": 910,
+                "timesort": due_ts,
+                "url": "https://courses.ut.edu.vn/mod/scorm/view.php?id=910",
+                "course": {"id": 303, "fullname": "An toàn thông tin"},
+            },
+            {
+                "id": 9502,
+                "name": "Lesson Tự học Chương 3",
+                "modulename": "lesson",
+                "instance": 911,
+                "timesort": due_ts,
+                "url": "https://courses.ut.edu.vn/mod/lesson/view.php?id=911",
+                "course": {"id": 303, "fullname": "An toàn thông tin"},
+            },
+        ]
+    )
+    assert [c["type"] for c in converted] == ["quiz", "quiz"]
+    assert [c["submission_status"] for c in converted] == ["unknown", "unknown"]
+
+    # Must NOT trigger futile get_quizzes_by_courses status hydration calls
+    assert status_hydration_candidates(converted) == []
+
+    policy = ActivityNotificationPolicy(
+        NotificationPolicyConfig(ignore_submitted=True, milestone_minutes=(180,))
+    )
+    for item in converted:
+        assert policy.accepts(ActivityNotification.from_value(item)) is True
+
+    from core.sync_coordinator import FetchOutcome
+
+    prefetch_mock = Mock(return_value={})
+    orch = SimpleNamespace(
+        is_logged_in=True,
+        fetch_activity_outcome_async=AsyncMock(
+            return_value=FetchOutcome.complete(converted)
+        ),
+        get_cached_details_snapshot=lambda: {},
+        prefetch_activity_statuses=prefetch_mock,
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: None),
+        clear_detail_cache=lambda: None,
+    )
+    channel = _RecordingNotifier()
+    mgr = _make_IsolatedNotificationManager(tmp_path, channel)
+    ctrl = _make_sync_controller(tmp_path, orch, mgr)
+    asyncio.run(ctrl._perform_data_sync("manual"))
+
+    prefetch_mock.assert_not_called()
+    assert len(channel.notified_batches) == 1
+    assert {x["title"] for x in channel.notified_batches[0]} == {
+        "Bài giảng SCORM Tuần 5",
+        "Lesson Tự học Chương 3",
+    }
+    assert len(channel.scheduled_batches) == 1
+    assert {r.activity.title for r in channel.scheduled_batches[0]} == {
+        "Bài giảng SCORM Tuần 5",
+        "Lesson Tự học Chương 3",
+    }
+
+
+def test_adversarial_pre_dispatch_cancel_aborts_before_snapshot_or_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If _prefetch_cancel_event is set while pre-dispatch status hydration is running,
+    _perform_data_sync must abort rather than committing or dispatching unverified 'new' items.
+    """
+    from core.sync_coordinator import FetchOutcome
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "2251120999")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "secret-pw")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN", "ws-token-sim")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "https://courses.ut.edu.vn")
+    monkeypatch.setattr(settings, "MOODLE_WS_TOKEN_USERNAME", "2251120999")
+    monkeypatch.setattr(settings, "NOTIFY_IGNORE_SUBMITTED", True)
+    monkeypatch.setattr(settings, "NOTIFY_MILESTONES_MINUTES", [180])
+
+    due_str = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    raw_action_assign = {
+        "id": "9901",
+        "title": "Unverified Action Assign",
+        "course": "OS",
+        "course_name": "OS",
+        "course_id": 10,
+        "assignment_id": 7701,
+        "deadline": due_str,
+        "url": "https://courses.ut.edu.vn/mod/assign/view.php?id=9901",
+        "type": "assignment",
+        "source": "ws_api",
+        "submission_status": "new",
+    }
+
+    ctrl_holder: dict[str, AppController] = {}
+
+    def _cancel_during_prefetch(_candidates, _workers, _is_cancelled):
+        ctrl_holder["ctrl"]._prefetch_cancel_event.set()
+        return {}
+
+    orch = SimpleNamespace(
+        is_logged_in=True,
+        fetch_activity_outcome_async=AsyncMock(
+            return_value=FetchOutcome.complete([raw_action_assign])
+        ),
+        get_cached_details_snapshot=lambda: {},
+        prefetch_activity_statuses=_cancel_during_prefetch,
+        moodle_service=SimpleNamespace(clear_all_caches=lambda: None),
+        clear_detail_cache=lambda: None,
+    )
+    channel = _RecordingNotifier()
+    mgr = _make_IsolatedNotificationManager(tmp_path, channel)
+    fake_bridge = SimpleNamespace(
+        available=True,
+        configure=AsyncMock(),
+        import_activities=AsyncMock(),
+        diagnostics=AsyncMock(return_value={}),
+    )
+    ctrl = _make_sync_controller(tmp_path, orch, mgr, android_bridge=fake_bridge)
+    ctrl_holder["ctrl"] = ctrl
+
+    asyncio.run(ctrl._perform_data_sync("manual"))
+
+    assert ctrl.all_data == []
+    assert ctrl._data_cache.load_snapshot().activities == []
+    assert channel.notified_batches == []
+    fake_bridge.import_activities.assert_not_awaited()
+
+
+def test_adversarial_quiz_activity_view_status_callback_guards_account_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight QuizActivityView load from Account A must not mutate Account B
+    after an account switch, while same-epoch loads propagate 'submitted'.
+    """
+    from core.courses.activity_service import QuizActivitySummary, QuizAttemptInfo
+    from gui.controllers.courses_coordinator import CoursesCoordinator
+    import gui.components.courses.activity_views as activity_views_mod
+
+    active_epoch = {"value": 5}
+    recorded_calls: list[tuple[str, str, int | None]] = []
+
+    def _status_cb(url: str, status: str, expected_epoch: int | None = None) -> None:
+        if expected_epoch is not None and expected_epoch != active_epoch["value"]:
+            return
+        recorded_calls.append((url, status, expected_epoch))
+
+    pushed_overlays: list = []
+    coord = CoursesCoordinator.__new__(CoursesCoordinator)
+    coord._page = SimpleNamespace(width=1120, height=760, update=lambda: None)
+    coord._activity_service = SimpleNamespace()
+    coord._on_start_quiz = None
+    coord._on_assignment_status_changed = _status_cb
+    coord._account_epoch_getter = lambda: active_epoch["value"]
+    coord.courses_view = SimpleNamespace(
+        pop_overlay=lambda: None,
+        push_overlay=lambda view, tag="": pushed_overlays.append(view),
+        toggle_pane3_expanded=lambda: None,
+    )
+
+    # Prevent background thread race during construction so we control exact timing
+    monkeypatch.setattr(
+        activity_views_mod.QuizActivityView, "_load_async", lambda self: None
+    )
+
+    course = CourseSummary(
+        id=401,
+        source="thnn",
+        fullname="Anh văn 3",
+        shortname="AV3",
+        display_name="Anh văn 3",
+    )
+    quiz_mod = CourseModuleItem(
+        cmid=777,
+        instance_id=20,
+        modname="quiz",
+        name="THNN Quiz Epoch Test",
+        section_id=1,
+        url="https://thnn.ut.edu.vn/mod/quiz/view.php?id=777",
+        web_url="https://thnn.ut.edu.vn/mod/quiz/view.php?id=777",
+    )
+    finished_summary = QuizActivitySummary(
+        cmid=777,
+        quiz_id=20,
+        title="THNN Quiz Epoch Test",
+        web_url="https://thnn.ut.edu.vn/mod/quiz/view.php?id=777",
+        attempts=(
+            QuizAttemptInfo(
+                attempt_number=1,
+                attempt_id=91,
+                state="Đã hoàn thành",
+            ),
+        ),
+    )
+
+    # 1. Open under epoch 5, then switch to epoch 6 BEFORE _render_quiz runs -> discarded!
+    coord._handle_open_webview_activity(course, quiz_mod)
+    stale_view = pushed_overlays[-1]
+    active_epoch["value"] = 6
+    stale_view._render_quiz(finished_summary)
+    assert recorded_calls == []
+
+    # 2. Open under epoch 6 and render while epoch is still 6 -> propagates cleanly with epoch=6!
+    coord._handle_open_webview_activity(course, quiz_mod)
+    current_view = pushed_overlays[-1]
+    current_view._render_quiz(finished_summary)
+    assert recorded_calls == [
+        ("https://thnn.ut.edu.vn/mod/quiz/view.php?id=777", "submitted", 6)
+    ]
