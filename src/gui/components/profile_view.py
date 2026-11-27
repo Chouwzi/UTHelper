@@ -773,9 +773,8 @@ class ProfileView(ft.Container):
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        # A slightly taller banner makes room for the whole campus photo while
-        # extending it towards the student name without distorting its ratio.
-        banner_height = 235
+        # Keep the identity and campus image in a compact desktop header.
+        banner_height = 150
         campus_width = round(banner_height * 845 / 415)
         campus_height = banner_height
         banner = ft.Container(
