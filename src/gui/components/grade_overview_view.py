@@ -47,6 +47,7 @@ class GradeOverviewView(ft.Container):
         page: Optional[ft.Page] = None,
         moodle_courses_provider: Optional[Callable[[], list]] = None,
         on_open_courses: Optional[Callable] = None,
+        on_open_roadmap: Optional[Callable] = None,
         course_grades_lookup: Optional[
             Callable[[Any, str], MoodleCourseGradesResult]
         ] = None,
@@ -62,6 +63,7 @@ class GradeOverviewView(ft.Container):
         self._on_close = on_close
         self._on_refresh = on_refresh
         self._on_open_courses = on_open_courses
+        self._on_open_roadmap = on_open_roadmap
         self._page_ref = page
         self._semesters: list[SemesterGradeData] = []
         self._profiles: list[RadarProfile] = []
@@ -221,10 +223,27 @@ class GradeOverviewView(ft.Container):
         self._progress: Optional[CreditProgress] = None
         self._planner_dialog: Optional[ft.AlertDialog] = None
         self._grade_list_view = AcademicGradeListView(courses=[], on_course_click=self._on_course_clicked, visible=False)
+        self._roadmap_btn = ft.TextButton(
+            "Mở lộ trình học tập",
+            icon=getattr(ft.Icons, "ROUTE_ROUNDED", ft.Icons.MAP_ROUNDED),
+            on_click=self._handle_open_roadmap,
+            style=ft.ButtonStyle(
+                color=C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            ),
+        )
+        self._roadmap_action = ft.Container(
+            content=self._roadmap_btn,
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+            alignment=ft.Alignment(0, 0),
+        )
 
         # Main scrollable body
         self._scrollable_content = ft.Column(
             controls=[
+                self._roadmap_action,
                 self._radar_card,
                 self._grade_list_view,
             ],
@@ -733,6 +752,10 @@ class GradeOverviewView(ft.Container):
         if self._on_open_courses:
             self._on_open_courses()
 
+    def _handle_open_roadmap(self, e: ft.ControlEvent | None = None) -> None:
+        if self._on_open_roadmap:
+            self._on_open_roadmap()
+
     def _handle_close(self, e: ft.ControlEvent) -> None:
         if self._on_close:
             self._on_close()
@@ -767,6 +790,12 @@ class GradeOverviewView(ft.Container):
             padding=ft.Padding.symmetric(horizontal=8, vertical=0),
         )
         self._planner_btn.icon_color = C.TEXT_SECONDARY
+        self._roadmap_action.bgcolor = C.SURFACE
+        self._roadmap_action.border = ft.Border.all(1, C.BORDER)
+        self._roadmap_btn.style = ft.ButtonStyle(
+            color=C.ACCENT,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+        )
 
         # Refresh child subtrees without emitting extra standalone updates.
         self._radar_card.update_theme(update=False)
