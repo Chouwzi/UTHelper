@@ -1,20 +1,22 @@
-"""Fail-closed integrity checks for a Flet Windows bundle."""
+"""Fail-closed integrity and PE Debug-CRT checks for a Flet Windows bundle."""
 
 from __future__ import annotations
 
 import argparse
 import filecmp
 import re
+import struct
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 
 class BundleVerificationError(RuntimeError):
-    """Raised when a Windows bundle is missing a required runtime artifact."""
+    """Raised when a Windows bundle is missing a required runtime artifact or contains forbidden debug binaries."""
 
 
 _NUMERIC_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+_DEBUG_PYTHON_DLL_RE = re.compile(r"^python\d*_d\.dll$")
 _RUNTIME_VERSION_PATH = Path("app") / "assets" / "release-version"
 _REQUIRED_OFFICE_VIEWER_ASSETS = (
     "docx_host.html",
@@ -35,6 +37,23 @@ _REQUIRED_PDF_VIEWER_ASSETS = (
     "pdf.min.mjs",
     "pdf.worker.min.mjs",
 )
+_FORBIDDEN_DEBUG_CRT_DLLS = frozenset(
+    {
+        "vcruntime140d.dll",
+        "vcruntime140_1d.dll",
+        "msvcp140d.dll",
+        "msvcp140_1d.dll",
+        "msvcp140_2d.dll",
+        "ucrtbased.dll",
+        "concrt140d.dll",
+        "vccorlib140d.dll",
+        "dart_bridge_d.dll",
+        "python314_d.dll",
+        "python3_d.dll",
+    }
+)
+_PE_EXTENSIONS = frozenset({".exe", ".dll", ".pyd"})
+_MAX_IMPORT_DESCRIPTORS = 4096
 
 
 def _read_runtime_version(path: Path) -> str | None:
@@ -49,6 +68,193 @@ def _read_runtime_version(path: Path) -> str | None:
     except UnicodeDecodeError:
         return None
     return value if _NUMERIC_VERSION.fullmatch(value) else None
+
+
+def _is_forbidden_debug_import(dll_name: str) -> bool:
+    normalized = dll_name.strip().lower()
+    if normalized in _FORBIDDEN_DEBUG_CRT_DLLS:
+        return True
+    return bool(_DEBUG_PYTHON_DLL_RE.fullmatch(normalized))
+
+
+def _rva_to_file_offset(
+    rva: int,
+    sections: list[tuple[int, int, int, int]],
+    file_len: int,
+    headers_end: int,
+) -> int | None:
+    if rva <= 0:
+        return None
+    for virtual_address, virtual_size, raw_size, raw_ptr in sections:
+        span = max(virtual_size, raw_size)
+        if virtual_address <= rva < virtual_address + span:
+            delta = rva - virtual_address
+            if delta >= raw_size:
+                return None
+            offset = raw_ptr + delta
+            return offset if 0 <= offset < file_len else None
+    if rva < headers_end and rva < file_len:
+        return rva
+    return None
+
+
+def _read_c_string(data: bytes, offset: int, max_len: int = 256) -> str | None:
+    if offset < 0 or offset >= len(data):
+        return None
+    end = data.find(b"\x00", offset, min(len(data), offset + max_len))
+    if end < 0:
+        return None
+    try:
+        return data[offset:end].decode("ascii")
+    except UnicodeDecodeError:
+        return data[offset:end].decode("latin1")
+
+
+def scan_pe_imported_dlls(data: bytes) -> tuple[str, ...]:
+    """Extract imported DLL names from ``IMAGE_DIRECTORY_ENTRY_IMPORT`` (and delay imports).
+
+    Non-PE stub files (such as tiny synthetic unit-test placeholders) return ``()``.
+    """
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return ()
+    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if pe_offset < 0 or pe_offset + 24 > len(data):
+        return ()
+    if data[pe_offset : pe_offset + 4] != b"PE\x00\x00":
+        return ()
+
+    num_sections = struct.unpack_from("<H", data, pe_offset + 6)[0]
+    opt_header_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+    opt_offset = pe_offset + 24
+    if opt_header_size < 96 or opt_offset + opt_header_size > len(data):
+        return ()
+
+    magic = struct.unpack_from("<H", data, opt_offset)[0]
+    if magic == 0x20B:  # PE32+ (64-bit)
+        if opt_header_size < 112:
+            return ()
+        num_rva_and_sizes = struct.unpack_from("<I", data, opt_offset + 108)[0]
+        data_dir_offset = opt_offset + 112
+    elif magic == 0x10B:  # PE32 (32-bit)
+        num_rva_and_sizes = struct.unpack_from("<I", data, opt_offset + 92)[0]
+        data_dir_offset = opt_offset + 96
+    else:
+        return ()
+
+    sec_table_offset = opt_offset + opt_header_size
+    headers_end = sec_table_offset + num_sections * 40
+    if headers_end > len(data):
+        return ()
+
+    sections: list[tuple[int, int, int, int]] = []
+    for idx in range(num_sections):
+        entry_off = sec_table_offset + idx * 40
+        virtual_size, virtual_address, raw_size, raw_ptr = struct.unpack_from(
+            "<IIII", data, entry_off + 8
+        )
+        sections.append((virtual_address, virtual_size, raw_size, raw_ptr))
+
+    imported: list[str] = []
+
+    # DataDirectory[1] == IMAGE_DIRECTORY_ENTRY_IMPORT
+    if num_rva_and_sizes >= 2 and data_dir_offset + 16 <= opt_offset + opt_header_size:
+        import_rva, import_size = struct.unpack_from("<II", data, data_dir_offset + 8)
+        if import_rva > 0 and import_size >= 20:
+            desc_offset = _rva_to_file_offset(
+                import_rva, sections, len(data), headers_end
+            )
+            if desc_offset is not None:
+                for idx in range(_MAX_IMPORT_DESCRIPTORS):
+                    cur = desc_offset + idx * 20
+                    if cur + 20 > len(data):
+                        break
+                    orig_thunk, _ts, _fwd, name_rva, first_thunk = struct.unpack_from(
+                        "<IIIII", data, cur
+                    )
+                    if orig_thunk == 0 and name_rva == 0 and first_thunk == 0:
+                        break
+                    if name_rva != 0:
+                        name_off = _rva_to_file_offset(
+                            name_rva, sections, len(data), headers_end
+                        )
+                        if name_off is not None:
+                            dll_name = _read_c_string(data, name_off)
+                            if dll_name:
+                                imported.append(dll_name)
+
+    # DataDirectory[13] == IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT
+    if (
+        num_rva_and_sizes >= 14
+        and data_dir_offset + 14 * 8 <= opt_offset + opt_header_size
+    ):
+        delay_rva, delay_size = struct.unpack_from(
+            "<II", data, data_dir_offset + 13 * 8
+        )
+        if delay_rva > 0 and delay_size >= 32:
+            delay_off = _rva_to_file_offset(
+                delay_rva, sections, len(data), headers_end
+            )
+            if delay_off is not None:
+                for idx in range(_MAX_IMPORT_DESCRIPTORS):
+                    cur = delay_off + idx * 32
+                    if cur + 32 > len(data):
+                        break
+                    attrs, dll_name_rva = struct.unpack_from("<II", data, cur)
+                    if attrs == 0 and dll_name_rva == 0:
+                        break
+                    if dll_name_rva != 0 and (attrs & 1):
+                        name_off = _rva_to_file_offset(
+                            dll_name_rva, sections, len(data), headers_end
+                        )
+                        if name_off is not None:
+                            dll_name = _read_c_string(data, name_off)
+                            if dll_name:
+                                imported.append(dll_name)
+
+    return tuple(imported)
+
+
+def _inspect_debug_binaries_and_pe_imports(root: Path, issues: list[str]) -> None:
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        lower_name = path.name.lower()
+
+        if lower_name.endswith(".pdb"):
+            issues.append(f"forbidden debug symbol file present: {rel}")
+            continue
+
+        if (
+            lower_name.endswith(("_d.pyd", "_d.dll"))
+            or (lower_name.endswith(".pyd") and "_d.cp" in lower_name)
+        ):
+            issues.append(f"forbidden debug binary present: {rel}")
+
+        if (
+            path.parent == root / "DLLs"
+            and lower_name.endswith(".dll")
+            and (lower_name.startswith("tcl") or lower_name.startswith("tk"))
+        ):
+            issues.append(f"unused Tcl/Tk runtime DLL present: {rel}")
+
+        if path.suffix.lower() in _PE_EXTENSIONS:
+            try:
+                raw = path.read_bytes()
+            except OSError as exc:
+                issues.append(f"unreadable PE binary {rel}: {exc}")
+                continue
+            bad_imports = sorted(
+                {
+                    imp
+                    for imp in scan_pe_imported_dlls(raw)
+                    if _is_forbidden_debug_import(imp)
+                }
+            )
+            if bad_imports:
+                issues.append(
+                    f"forbidden debug CRT import in {rel}: {', '.join(bad_imports)}"
+                )
 
 
 def inspect_bundle(
@@ -72,7 +278,10 @@ def inspect_bundle(
         root / "UTHelper.exe", autostart_runner, shallow=False
     ):
         issues.append("UTHelperAutostart.exe is not byte-identical to UTHelper.exe")
-    if not any(root.glob("python3*.dll")):
+    if not any(
+        p.is_file() and not p.name.lower().endswith("_d.dll")
+        for p in root.glob("python3*.dll")
+    ):
         issues.append("Python runtime DLL is missing")
     if not (root / "flutter_windows.dll").is_file():
         issues.append("Flutter runtime DLL is missing")
@@ -154,6 +363,7 @@ def inspect_bundle(
             if not any((site_packages / "filelock").glob("__init__.py*")):
                 issues.append("packaged filelock module is missing")
 
+    _inspect_debug_binaries_and_pe_imports(root, issues)
     return tuple(issues)
 
 
@@ -163,7 +373,7 @@ def verify_bundle(
     expected_version: str | None = None,
     strict_site_packages: bool = False,
 ) -> None:
-    """Raise with a complete diagnostic when the bundle is incomplete."""
+    """Raise with a complete diagnostic when the bundle is incomplete or unsafe."""
     issues = inspect_bundle(
         bundle_dir,
         expected_version=expected_version,

@@ -30,6 +30,7 @@ void main() {
     expect(settings.domStorageEnabled, isTrue);
     expect(settings.databaseEnabled, isTrue);
     expect(settings.offscreenPreRaster, isFalse);
+    expect(settings.useOnRenderProcessGone, isTrue);
   });
 
   test('can build sink settings with popups disabled', () {
@@ -38,6 +39,7 @@ void main() {
     expect(settings.javaScriptCanOpenWindowsAutomatically, isFalse);
     expect(settings.supportMultipleWindows, isFalse);
     expect(settings.isInspectable, isFalse);
+    expect(settings.useOnRenderProcessGone, isTrue);
     expect(settings.regexToCancelSubFramesLoading, quizSubframeCancelRegex);
   });
 

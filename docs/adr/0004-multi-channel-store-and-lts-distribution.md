@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-20
-- Updated: 2026-11-25
+- Updated: 2026-11-26
 - Extends: [ADR 0003: Platform release update channel](0003-signed-release-update-channel.md)
 
 ## Context
@@ -121,16 +121,17 @@ packages:
     in-place upgrading across tracks.
   - Existing Android `apk_lts` users on legacy `v2.2.8`–`v2.5.0` builds
     (`com.uthelper.uthelper`) will see `"Android đã từ chối gói cập nhật"` if they
-    trigger the shipped `v2.2.8`–`v2.5.0` in-app updater against `v2.5.1`; the
-    `v2.5.1` Release Notes must direct them to perform a one-time manual install
-    of the `io.github.chouwzi.uthelper` APK from GitHub Releases, sign in again,
-    and uninstall the legacy `com.uthelper.uthelper` app. Starting in `v2.5.1`,
+    trigger the shipped `v2.2.8`–`v2.5.0` in-app updater against `v2.6.0`
+    (superseding the unshipped `v2.5.1` hotfix draft); the `v2.6.0` Release Notes
+    must direct them to perform a one-time manual install of the
+    `io.github.chouwzi.uthelper` APK from GitHub Releases, sign in again, and
+    uninstall the legacy `com.uthelper.uthelper` app. Starting in `v2.6.0`,
     `select_candidate` and `android_updates.py` validate `package.signer_identity`
     before download and fall back to manual GitHub Releases download on any future
     package ID mismatch; all subsequent `apk_lts` releases upgrade in place under
     `io.github.chouwzi.uthelper`.
   - Existing iOS sideload users (`Sideloadly` / `AltStore`) migrating from
-    `v2.2.8`–`v2.5.0` (`com.uthelper.UTHelper`) to `v2.5.1`
+    `v2.2.8`–`v2.5.0` (`com.uthelper.UTHelper`) to `v2.6.0`
     (`io.github.chouwzi.uthelper`) must uninstall the old `com.uthelper.UTHelper`
     app before installing the new `.ipa`: iOS implicitly scopes both the app
     sandbox and Keychain (`com.uthelper.app_secrets`, with no explicit

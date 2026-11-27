@@ -403,8 +403,11 @@ class CoursesTabView(ft.Container):
         height = max(200.0, page_h - top - bottom_inset)
         return (left, top, width, height)
 
+    def _is_tab_effectively_visible(self) -> bool:
+        return not self._tab_hidden and bool(getattr(self, "visible", True))
+
     def _sync_pane3_bounds(self) -> None:
-        if not self._overlays:
+        if not self._overlays or not self._is_tab_effectively_visible():
             return
         top = self._overlays[-1]
         sync_fn = getattr(top, "sync_bounds", None)
@@ -591,7 +594,12 @@ class CoursesTabView(ft.Container):
         self._rebuild_layout()
         self._sync_immersive_state()
         self._safe_update()
-        self._sync_pane3_bounds()
+        if not self._is_tab_effectively_visible():
+            suspend_new = getattr(control, "suspend", None)
+            if callable(suspend_new):
+                suspend_new()
+        else:
+            self._sync_pane3_bounds()
 
     def pop_overlay(self) -> bool:
         """Pop top Pane-3 overlay if present; return True if popped."""
@@ -600,14 +608,16 @@ class CoursesTabView(ft.Container):
         removed = self._overlays.pop()
         self._dispose_overlay(removed)
         self._workspace_stack.controls = [self._detail_pane, *self._overlays]
-        if self._overlays:
+        tab_visible = self._is_tab_effectively_visible()
+        if self._overlays and tab_visible:
             resume_fn = getattr(self._overlays[-1], "resume", None)
             if callable(resume_fn):
                 resume_fn()
         self._rebuild_layout()
         self._sync_immersive_state()
         self._safe_update()
-        self._sync_pane3_bounds()
+        if tab_visible:
+            self._sync_pane3_bounds()
         return True
 
     def clear_overlays(self, *, update: bool = True) -> None:
@@ -1324,14 +1334,16 @@ class CoursesTabView(ft.Container):
         self._dispose_overlay(target)
         self._overlays = [item for item in self._overlays if item is not target]
         self._workspace_stack.controls = [self._detail_pane, *self._overlays]
-        if self._overlays:
+        tab_visible = self._is_tab_effectively_visible()
+        if self._overlays and tab_visible:
             resume_fn = getattr(self._overlays[-1], "resume", None)
             if callable(resume_fn):
                 resume_fn()
         self._rebuild_layout()
         self._sync_immersive_state()
         self._safe_update()
-        self._sync_pane3_bounds()
+        if tab_visible:
+            self._sync_pane3_bounds()
 
     async def _handle_open_module_async(self, mod: CourseModuleItem) -> None:
         course = self._state.selected_course()
