@@ -774,7 +774,8 @@ class ProfileView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         banner_height = 188
-        campus_width = round(banner_height * 560 / 292)
+        campus_width = 560
+        campus_height = round(campus_width * 292 / 560)
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
@@ -784,7 +785,7 @@ class ProfileView(ft.Container):
                                 "uth_profile_banner.jpg", "image/jpeg"
                             ),
                             width=campus_width,
-                            height=banner_height,
+                            height=campus_height,
                             fit=ft.BoxFit.CONTAIN,
                             filter_quality=ft.FilterQuality.HIGH,
                             anti_alias=True,
@@ -792,7 +793,7 @@ class ProfileView(ft.Container):
                             key="profile-uth-banner-image",
                         ),
                         width=campus_width,
-                        height=banner_height,
+                        height=campus_height,
                         right=0,
                         top=0,
                     ),
