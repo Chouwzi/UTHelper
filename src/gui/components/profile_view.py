@@ -773,9 +773,11 @@ class ProfileView(ft.Container):
             tight=True,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        banner_height = 188
-        campus_width = 560
-        campus_height = round(campus_width * 292 / 560)
+        # A slightly taller banner makes room for the whole campus photo while
+        # extending it towards the student name without distorting its ratio.
+        banner_height = 235
+        campus_width = round(banner_height * 560 / 292)
+        campus_height = banner_height
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
@@ -807,11 +809,11 @@ class ProfileView(ft.Container):
                             end=ft.Alignment(1, 0),
                             colors=[
                                 C.SURFACE,
-                                ft.Colors.with_opacity(0.75, C.SURFACE),
-                                ft.Colors.with_opacity(0.15, C.SURFACE),
+                                ft.Colors.with_opacity(0.60, C.SURFACE),
+                                ft.Colors.with_opacity(0.08, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            stops=[0, 0.18, 0.40, 0.58],
+                            stops=[0, 0.12, 0.30, 0.44],
                         ),
                     ),
                     ft.Container(
