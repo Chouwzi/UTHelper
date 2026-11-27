@@ -27,9 +27,19 @@ def test_project_version_is_only_authored_version(tmp_path):
 
 def test_hotfix_version_can_upgrade_the_affected_release():
     version = read_project_version(ROOT / "pyproject.toml")
-    assert version == "2.6.3"
-    assert release_build_number(version) == 2_006_003
-    assert release_build_number(version) > release_build_number("2.6.2")
+    assert version == "2.7.0"
+    assert release_build_number(version) == 2_007_000
+    assert release_build_number(version) > release_build_number("2.6.3")
+
+
+def test_release_notes_2_7_0_exist_and_follow_copy_hygiene():
+    notes_path = ROOT / "docs" / "releases" / "2.7.0.md"
+    assert notes_path.is_file(), f"Missing release notes: {notes_path}"
+    text = notes_path.read_text(encoding="utf-8")
+    assert "# UTHelper 2.7.0" in text
+    assert "&" not in text
+    assert "\u2014" not in text
+    assert "\u2013" not in text
 
 
 def test_runtime_version_is_generated_from_the_single_authored_version(tmp_path):
