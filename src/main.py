@@ -534,11 +534,45 @@ def _show_startup_screen(
     page.update()
 
 
+def _normalize_packaged_windows_cwd(
+    *,
+    executable: Path | None = None,
+    development: bool,
+    test_mode: bool,
+    chdir_fn=os.chdir,
+) -> bool:
+    """Ensure packaged Windows launches never run with System32 as cwd."""
+    if development or test_mode:
+        return False
+    try:
+        from pathlib import PureWindowsPath
+        from platform_utils.autostart import get_current_process_executable
+
+        exe = Path(executable or get_current_process_executable())
+    except Exception:
+        return False
+    if PureWindowsPath(str(exe)).stem.casefold() in {"python", "pythonw"}:
+        return False
+    install_dir = exe.parent
+    if not install_dir.is_dir():
+        return False
+    try:
+        chdir_fn(install_dir)
+        return True
+    except OSError:
+        return False
+
+
 def main() -> int:
     web_mode = _is_web_mode(sys.argv, os.environ)
     result = None
     development = _is_source_checkout(Path(__file__))
     desktop_windows = sys.platform == "win32" and not web_mode
+    if desktop_windows:
+        _normalize_packaged_windows_cwd(
+            development=development,
+            test_mode=_TEST_MODE,
+        )
     autostart_launch = desktop_windows and is_autostart_launch()
     if desktop_windows:
         result = bootstrap_windows_instance(
