@@ -848,3 +848,211 @@ def test_app_controller_live_lms_actions_and_grades_surface_maintenance_cleanly(
         page.pop_dialog()
     finally:
         clear_global_webview_occlusion()
+
+
+def test_cross_slice_calendar_portal_403_maintenance_triggers_app_banner_preserves_cached_weeks_and_is_ignored_by_diagnostics(
+    tmp_path,
+):
+    from core.today_schedule import WeekScheduleCache, monday_of
+    from diagnostics.models import AppPhase, CrashConsent, DiagnosticContext
+    from diagnostics.runtime import DiagnosticRuntime
+    from diagnostics.spool import DiagnosticSpool
+    from gui.components.calendar_view import CalendarView
+
+    clear_global_webview_occlusion()
+    try:
+        today = date.today()
+        monday = monday_of(today)
+        cached_session = ClassSession(
+            session_id="maint-cal-1",
+            subject="An toàn thông tin mạng",
+            course_code="010112399901",
+            start_at=datetime.combine(today, time(7, 30)),
+            end_at=datetime.combine(today, time(10, 0)),
+            room="F502 - CS1 (P.Thạnh Mỹ Tây, TP.HCM)",
+            campus="Cơ sở 1",
+            period_start=1,
+            period_end=3,
+            cancelled=False,
+            note="",
+        )
+        week_cache = WeekScheduleCache(cache_dir=tmp_path / "sched", namespace="maint-cal")
+        week_cache.save_week(monday, {today: (cached_session,)}, datetime.now())
+
+        def _failing_opener(req, timeout=None):
+            del timeout
+            raise _make_http_error(
+                req.full_url,
+                403,
+                LIVE_UTH_403_MAINTENANCE_HTML,
+                gzip_compress=True,
+            )
+
+        portal = PortalClient(
+            "https://portal.ut.edu.vn/api/v1",
+            opener=_failing_opener,
+        )
+        portal._store_token("valid-portal-jwt", "2251120001")
+
+        # Set up DiagnosticRuntime (CrashConsent.ENABLED) to prove real UthMaintenanceError / PortalMaintenanceError are ignored
+        spool = DiagnosticSpool(
+            tmp_path / "telemetry" / "pending",
+            clock=lambda: datetime(2026, 11, 28, 2, 5, tzinfo=timezone.utc),
+        )
+        diag_runtime = DiagnosticRuntime(
+            data_dir=tmp_path / "diag_data",
+            spool=spool,
+            delivery=SimpleNamespace(flush_once=lambda _c: None),
+            context_provider=lambda phase, unclean: DiagnosticContext(
+                source_root=tmp_path,
+                app_version="2.7.0",
+                release_channel="release",
+                install_type="exe_lts",
+                distribution_channel="exe_lts",
+                package_format="exe",
+                os_family="Windows",
+                os_version="11",
+                architecture="AMD64",
+                python_version="3.13.5",
+                flet_version="0.86.5",
+                phase=phase,
+                window_state="foreground",
+                unclean_previous_exit=unclean,
+            ),
+            consent_provider=lambda: CrashConsent.ENABLED,
+            evidence_reader=lambda **_kw: (),
+            clock=lambda: datetime(2026, 11, 28, 2, 5, tzinfo=timezone.utc),
+        )
+        diag_runtime.start()
+
+        shown_dialogs: list[ft.AlertDialog] = []
+        dialogs_controls: list[ft.AlertDialog] = []
+        captured_portal_errors: list[PortalMaintenanceError] = []
+
+        def _fetch_week_via_portal(week_anchor: date):
+            try:
+                return portal.fetch_week(week_anchor, "2251120001", "secret-pass")
+            except PortalMaintenanceError as exc:
+                captured_portal_errors.append(exc)
+                assert diag_runtime.record_exception(exc, AppPhase.GUI) is None
+                assert (
+                    diag_runtime.record_exception(
+                        UthMaintenanceError(exc.notice), AppPhase.GUI
+                    )
+                    is None
+                )
+                raise
+
+        async def scenario():
+            tasks: list[asyncio.Task] = []
+
+            def _show_dialog(dlg: ft.AlertDialog) -> None:
+                dlg.open = True
+                dialogs_controls.append(dlg)
+                shown_dialogs.append(dlg)
+
+            def _pop_dialog():
+                dlg = next(
+                    (d for d in reversed(dialogs_controls) if getattr(d, "open", False)),
+                    None,
+                )
+                if dlg is not None:
+                    dlg.open = False
+                return dlg
+
+            class _Page:
+                width = 1120
+                height = 760
+                web = False
+                platform = ft.PagePlatform.WINDOWS
+                overlay: list = []
+                dialog = None
+                _dialogs = SimpleNamespace(controls=dialogs_controls)
+                show_dialog = staticmethod(_show_dialog)
+                pop_dialog = staticmethod(_pop_dialog)
+
+                @staticmethod
+                def update(*_controls):
+                    pass
+
+                @staticmethod
+                def run_task(coro_fn, *args, **kwargs):
+                    t = asyncio.create_task(coro_fn(*args, **kwargs))
+                    tasks.append(t)
+                    return t
+
+            page = _Page()
+            ctrl = AppController.__new__(AppController)
+            ctrl.page = page
+            ctrl._seen_maintenance_keys = set()
+            ctrl._init_maintenance_banner()
+            ctrl._install_page_dialog_occlusion_bridge()
+            ctrl.orchestrator = SimpleNamespace(
+                client=SimpleNamespace(last_maintenance_notice=None),
+                thnn_client=SimpleNamespace(last_maintenance_notice=None),
+            )
+            ctrl._portal_client = portal
+            ctrl._portal_week_client = portal
+            ctrl._academic_grade_service = None
+
+            cal = CalendarView(
+                page,
+                fetch_schedule_week=_fetch_week_via_portal,
+                schedule_cache=week_cache,
+            )
+            cal._schedule_view.on_maintenance = ctrl._handle_uth_maintenance
+            ctrl.calendar_view = cal
+
+            # Open Calendar in unified Week mode: hydrates cached session in 0ms, then hits Portal 403 maintenance
+            cal.show([])
+            cal._toggle_view_mode("week")
+            pending = [t for t in tasks if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            # 1. Portal token & Calendar cached week sessions remain 100% intact
+            assert portal._token == "valid-portal-jwt"
+            assert captured_portal_errors
+            assert cal._schedule_view.sessions_for_day(today) == (cached_session,)
+            assert cal._portal_status_row.visible is True
+            assert len(cal._day_list.controls) == 1
+
+            # 2. AppController top banner is visible & 1-time popup opened once
+            assert ctrl._maintenance_banner.visible is True
+            assert "01h00 - 04h00" in ctrl._maintenance_text.value
+            assert len(shown_dialogs) == 1
+            page.pop_dialog()
+
+            # 3. Manual Calendar schedule reload forces popup immediately (force=True)
+            cal._reload_active_schedule_week()
+            pending = [t for t in tasks if not t.done()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            assert len(shown_dialogs) == 2
+            page.pop_dialog()
+
+            # 4. Responsive resize through AppController adapts CalendarView 3-tab -> 2-tab mode bar
+            assert cal._mode_schedule_btn.visible is True
+            cal._toggle_view_mode("schedule")
+            page.width = 480
+            ctrl._current_page_width = lambda w=None: float(w or page.width)
+            ctrl._current_page_height = lambda h=None: 760.0
+            ctrl._nav_shell = None
+            ctrl.courses_view = None
+            ctrl.grade_overview_view = None
+            ctrl._sync_app_webview_bounds = lambda *_a: None
+            ctrl._content_area = None
+            ctrl._apply_responsive_layout(480, 760)
+            assert cal._mode_schedule_btn.visible is False
+            assert cal._view_mode == "week"
+
+            # 5. DiagnosticRuntime spooled ZERO crash reports for UthMaintenanceError / PortalMaintenanceError
+            assert spool.pending() == ()
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            diag_runtime.close(clean=True)
+    finally:
+        clear_global_webview_occlusion()
+

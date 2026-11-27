@@ -1073,6 +1073,10 @@ class AppController:
 
     async def _show_quiz_auth_dialog(self, retry_callback):
         """Reuse the app credential dialog, then retry Moodle session setup."""
+        active_maint = self._resolve_active_maintenance_notice("uth")
+        if active_maint is not None:
+            self._handle_uth_maintenance(active_maint, user_initiated=True)
+            return
         from gui.components.login_dialog import show_login_dialog
 
         self._invalidate_active_webviews_before_credential_mutation()
@@ -3403,6 +3407,27 @@ class AppController:
             client_provider=self._quiz_client_for_site,
             on_auth_required=self._show_quiz_auth_dialog,
         )
+        orig_open_quiz_activity = getattr(self.quiz_player_view, "open_activity", None)
+        if callable(orig_open_quiz_activity):
+
+            def _guarded_open_quiz_activity(activity, *q_args, **q_kwargs):
+                quiz_url = (
+                    str(activity.get("url") or "")
+                    if isinstance(activity, dict)
+                    else ""
+                )
+                site_kind = _classify_uth_url(quiz_url) if quiz_url else "courses"
+                if site_kind not in {"courses", "thnn"}:
+                    site_kind = "courses"
+                active_maint = self._resolve_active_maintenance_notice(site_kind)
+                if active_maint is not None:
+                    self._handle_uth_maintenance(
+                        active_maint, user_initiated=True
+                    )
+                    return None
+                return orig_open_quiz_activity(activity, *q_args, **q_kwargs)
+
+            self.quiz_player_view.open_activity = _guarded_open_quiz_activity
         self._app_webview_pane = None
         self._app_webview_host = ft.Container(
             expand=True,
@@ -3806,6 +3831,11 @@ class AppController:
         grade_view = getattr(self, "grade_overview_view", None)
         if grade_view is not None and callable(getattr(grade_view, "set_width", None)):
             grade_view.set_width(content_width)
+        cal_view = getattr(self, "calendar_view", None)
+        if cal_view is not None and callable(
+            getattr(cal_view, "handle_viewport_resize", None)
+        ):
+            cal_view.handle_viewport_resize(resolved_width)
         self._sync_app_webview_bounds(resolved_width, resolved_height)
 
         content_area = getattr(self, "_content_area", None)
