@@ -501,9 +501,8 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     assert abs(campus_image.width / campus_image.height - 560 / 292) < 0.01
     assert campus_layer.right == 0
     assert campus_layer.top == 0
-    assert stack.controls[1].width == campus_image.width
-
-    identity = stack.controls[2].content
+    assert campus_image.height == banner.height
+    identity = stack.controls[1].content
     assert len(identity.controls) == 3
     assert identity.controls[0] is view._avatar
     name_block = identity.controls[1]

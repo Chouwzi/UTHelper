@@ -800,23 +800,6 @@ class ProfileView(ft.Container):
                         top=0,
                     ),
                     ft.Container(
-                        width=campus_width,
-                        right=0,
-                        top=0,
-                        bottom=0,
-                        gradient=ft.LinearGradient(
-                            begin=ft.Alignment(-1, 0),
-                            end=ft.Alignment(1, 0),
-                            colors=[
-                                C.SURFACE,
-                                C.SURFACE,
-                                ft.Colors.with_opacity(0.45, C.SURFACE),
-                                ft.Colors.with_opacity(0, C.SURFACE),
-                            ],
-                            stops=[0, 0.10, 0.40, 0.68],
-                        ),
-                    ),
-                    ft.Container(
                         content=identity,
                         padding=ft.Padding.symmetric(horizontal=36, vertical=12),
                         alignment=ft.Alignment(-1, 0),
