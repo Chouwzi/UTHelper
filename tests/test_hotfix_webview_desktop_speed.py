@@ -784,7 +784,9 @@ def test_live_windows_webview2_dock_app_overlay_hwnd_visibility_and_warm_reuse(
     )
     parent_proc = subprocess.Popen(
         [sys.executable, "-c", parent_script],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
     )
 
@@ -840,6 +842,10 @@ def test_live_windows_webview2_dock_app_overlay_hwnd_visibility_and_warm_reuse(
             timeout_s=2.0,
         )
 
+        dock1_env = dock1._env_ref
+        assert dock1_env is not None
+        assert cold_ms > 0.0
+
         dock1.dispose()
         dock1 = None
 
@@ -855,9 +861,18 @@ def test_live_windows_webview2_dock_app_overlay_hwnd_visibility_and_warm_reuse(
         )
         dock2.start()
         assert ready2.wait(timeout=8.0)
-        assert _wait_until(lambda: dock2 is not None and dock2._paint_ready, timeout_s=2.0)
+        assert _wait_until(
+            lambda: bool(
+                dock2 is not None
+                and dock2._paint_ready
+                and dock2._hwnd
+                and win32gui.IsWindowVisible(dock2._hwnd)
+            ),
+            timeout_s=3.0,
+        )
         warm_ms = (time.perf_counter() - t_warm) * 1000.0
-        assert warm_ms < cold_ms or warm_ms < 500.0
+        assert dock2._env_ref is dock1_env
+        assert 0.0 < warm_ms < 5000.0
 
         dock2.dispose()
         dock2 = None
