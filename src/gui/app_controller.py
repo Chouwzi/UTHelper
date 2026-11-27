@@ -587,44 +587,204 @@ class AppController:
         except Exception:
             logger.debug("Diagnostic breadcrumb failed", exc_info=True)
 
+    def _sweep_closed_modal_dialogs(self) -> None:
+        """Release occlusion tokens for observed-open modal dialogs whose .open transitioned to False."""
+        observed = getattr(self, "_observed_open_dialogs", None)
+        if not isinstance(observed, list) or not observed:
+            return
+        tracked_tokens = getattr(self, "_tracked_modal_dialog_tokens", None)
+        remaining: list[tuple[str, object]] = []
+        for tok, dlg_obj in list(observed):
+            if bool(getattr(dlg_obj, "open", False)):
+                remaining.append((tok, dlg_obj))
+                continue
+            active_list = getattr(dlg_obj, "_uth_modal_active_tokens", None)
+            if isinstance(active_list, list) and tok in active_list:
+                active_list.remove(tok)
+                stale_list = getattr(dlg_obj, "_uth_modal_stale_dismiss_tokens", None)
+                if isinstance(stale_list, list):
+                    stale_list.append(tok)
+            if getattr(dlg_obj, "_uth_modal_occlusion_token", None) == tok:
+                next_tok = (
+                    active_list[-1]
+                    if isinstance(active_list, list) and active_list
+                    else None
+                )
+                try:
+                    dlg_obj._uth_modal_occlusion_token = next_tok
+                except Exception:
+                    pass
+            if isinstance(tracked_tokens, set):
+                tracked_tokens.discard(tok)
+            _call_modal_occlusion("modal_dialog", False, token=tok)
+        observed[:] = remaining
+
     def _install_page_dialog_occlusion_bridge(self) -> None:
-        """Wrap page.show_dialog / page.pop_dialog so modal dialogs occlude native WebViews."""
+        """Wrap page.show_dialog / page.pop_dialog / page.update so modal dialogs occlude native WebViews."""
         page = getattr(self, "page", None)
         if page is None or getattr(page, "_uth_dialog_occlusion_wrapped", False):
             return
         orig_show = getattr(page, "show_dialog", None)
         orig_pop = getattr(page, "pop_dialog", None)
+        orig_page_update = getattr(page, "update", None)
         if not callable(orig_show):
             return
         tracked_tokens = getattr(self, "_tracked_modal_dialog_tokens", None)
         if not isinstance(tracked_tokens, set):
             tracked_tokens = set()
             self._tracked_modal_dialog_tokens = tracked_tokens
+        observed_open = getattr(self, "_observed_open_dialogs", None)
+        if not isinstance(observed_open, list):
+            observed_open = []
+            self._observed_open_dialogs = observed_open
 
-        def _release_dialog_token(dlg_obj, fallback_tok: str | None = None) -> None:
-            tok = getattr(dlg_obj, "_uth_modal_occlusion_token", None) or fallback_tok
+        def _remove_observed_token(dlg_obj, tok: str) -> None:
+            observed_open[:] = [
+                pair
+                for pair in observed_open
+                if not (pair[0] == tok and pair[1] is dlg_obj)
+            ]
+
+        def _sync_current_attr(dlg_obj, active_list: list[str] | None) -> None:
+            next_tok = active_list[-1] if active_list else None
+            try:
+                dlg_obj._uth_modal_occlusion_token = next_tok
+            except Exception:
+                pass
+
+        def _release_dialog_open(
+            dlg_obj,
+            *,
+            from_dismiss: bool,
+            record_stale_dismiss: bool = False,
+            fallback_tok: str | None = None,
+        ) -> None:
+            active_list = getattr(dlg_obj, "_uth_modal_active_tokens", None)
+            stale_list = getattr(dlg_obj, "_uth_modal_stale_dismiss_tokens", None)
+            if from_dismiss:
+                if (
+                    isinstance(stale_list, list)
+                    and stale_list
+                    and (bool(getattr(dlg_obj, "open", False)) or not active_list)
+                ):
+                    stale_tok = stale_list.pop(0)
+                    tracked_tokens.discard(stale_tok)
+                    _call_modal_occlusion("modal_dialog", False, token=stale_tok)
+                    return
+                if isinstance(stale_list, list) and stale_list:
+                    for st in list(stale_list):
+                        tracked_tokens.discard(st)
+                        _call_modal_occlusion("modal_dialog", False, token=st)
+                    stale_list.clear()
+                if isinstance(active_list, list) and active_list:
+                    tok = active_list.pop(0)
+                else:
+                    tok = (
+                        getattr(dlg_obj, "_uth_modal_occlusion_token", None)
+                        or fallback_tok
+                    )
+                if not tok:
+                    return
+                _remove_observed_token(dlg_obj, tok)
+                _sync_current_attr(
+                    dlg_obj, active_list if isinstance(active_list, list) else None
+                )
+                tracked_tokens.discard(tok)
+                _call_modal_occlusion("modal_dialog", False, token=tok)
+                return
+
+            if isinstance(active_list, list) and active_list:
+                tok = active_list.pop()
+            else:
+                tok = (
+                    getattr(dlg_obj, "_uth_modal_occlusion_token", None)
+                    or fallback_tok
+                )
             if not tok:
                 return
+            _remove_observed_token(dlg_obj, tok)
+            if record_stale_dismiss and isinstance(stale_list, list):
+                stale_list.append(tok)
+            _sync_current_attr(
+                dlg_obj, active_list if isinstance(active_list, list) else None
+            )
             tracked_tokens.discard(tok)
             _call_modal_occlusion("modal_dialog", False, token=tok)
+
+        def _wrap_dialog_update_if_needed(dialog) -> None:
+            if getattr(dialog, "_uth_modal_update_wrapped", False):
+                return
+            orig_dlg_upd = getattr(dialog, "update", None)
+            if not callable(orig_dlg_upd):
+                return
+            if hasattr(orig_dlg_upd, "assert_called") and hasattr(
+                orig_dlg_upd, "side_effect"
+            ):
+                if orig_dlg_upd.side_effect is None:
+                    ret_val = orig_dlg_upd.return_value
+                    orig_dlg_upd.side_effect = lambda *a, _d=dialog, **kw: (
+                        self._sweep_closed_modal_dialogs()
+                        if not bool(getattr(_d, "open", False))
+                        else None,
+                        ret_val,
+                    )[1]
+                try:
+                    dialog._uth_modal_update_wrapped = True
+                except Exception:
+                    pass
+                return
+
+            def _wrapped_dlg_update(*u_args, _d=dialog, _orig=orig_dlg_upd, **u_kwargs):
+                try:
+                    return _orig(*u_args, **u_kwargs)
+                finally:
+                    if not bool(getattr(_d, "open", False)):
+                        self._sweep_closed_modal_dialogs()
+
+            try:
+                dialog.update = _wrapped_dlg_update
+                dialog._uth_modal_update_wrapped = True
+            except Exception:
+                pass
 
         def _wrapped_show_dialog(dialog):
             if dialog is None or isinstance(dialog, ft.SnackBar):
                 return orig_show(dialog)
-            tok = getattr(dialog, "_uth_modal_occlusion_token", None)
-            if not tok:
-                tok = _new_modal_occlusion_token()
-                try:
-                    dialog._uth_modal_occlusion_token = tok
-                except Exception:
-                    pass
-            pre_acquired = bool(getattr(dialog, "_uth_modal_occlusion_pre_acquired", False))
+            pre_acquired = bool(
+                getattr(dialog, "_uth_modal_occlusion_pre_acquired", False)
+            )
             if pre_acquired:
                 try:
                     dialog._uth_modal_occlusion_pre_acquired = False
                 except Exception:
                     pass
+                tok = (
+                    getattr(dialog, "_uth_modal_occlusion_token", None)
+                    or _new_modal_occlusion_token()
+                )
+            else:
+                tok = _new_modal_occlusion_token()
+            active_list = getattr(dialog, "_uth_modal_active_tokens", None)
+            if not isinstance(active_list, list):
+                active_list = []
+                try:
+                    dialog._uth_modal_active_tokens = active_list
+                except Exception:
+                    pass
+            stale_list = getattr(dialog, "_uth_modal_stale_dismiss_tokens", None)
+            if not isinstance(stale_list, list):
+                stale_list = []
+                try:
+                    dialog._uth_modal_stale_dismiss_tokens = stale_list
+                except Exception:
+                    pass
+            active_list.append(tok)
+            try:
+                dialog._uth_modal_occlusion_token = tok
+            except Exception:
+                pass
             tracked_tokens.add(tok)
+            _wrap_dialog_update_if_needed(dialog)
             if not getattr(dialog, "_uth_modal_dismiss_wrapped", False):
                 prev_dismiss = getattr(dialog, "on_dismiss", None)
                 if inspect.iscoroutinefunction(prev_dismiss):
@@ -635,7 +795,9 @@ class AppController:
                         try:
                             await _p(event)
                         finally:
-                            _release_dialog_token(_d, _t)
+                            _release_dialog_open(
+                                _d, from_dismiss=True, fallback_tok=_t
+                            )
 
                     on_dismiss_wrapper = _on_dismiss_async
                 else:
@@ -653,13 +815,19 @@ class AppController:
                                         try:
                                             return await awaitable
                                         finally:
-                                            _release_dialog_token(_d, _t)
+                                            _release_dialog_open(
+                                                _d,
+                                                from_dismiss=True,
+                                                fallback_tok=_t,
+                                            )
 
                                     return _await_and_release(res)
                             return res
                         finally:
                             if not inspect.isawaitable(res):
-                                _release_dialog_token(_d, _t)
+                                _release_dialog_open(
+                                    _d, from_dismiss=True, fallback_tok=_t
+                                )
 
                     on_dismiss_wrapper = _on_dismiss_sync
                 try:
@@ -670,10 +838,18 @@ class AppController:
             if not pre_acquired:
                 _call_modal_occlusion("modal_dialog", True, token=tok)
             try:
-                return orig_show(dialog)
+                result = orig_show(dialog)
             except Exception:
-                _release_dialog_token(dialog, tok)
+                _release_dialog_open(
+                    dialog,
+                    from_dismiss=False,
+                    record_stale_dismiss=False,
+                    fallback_tok=tok,
+                )
                 raise
+            if bool(getattr(dialog, "open", False)):
+                observed_open.append((tok, dialog))
+            return result
 
         def _wrapped_pop_dialog():
             top_open = None
@@ -687,18 +863,42 @@ class AppController:
             popped = orig_pop() if callable(orig_pop) else None
             target_dlg = popped if popped is not None else top_open
             if target_dlg is not None and not isinstance(target_dlg, ft.SnackBar):
-                _release_dialog_token(target_dlg)
+                _release_dialog_open(
+                    target_dlg,
+                    from_dismiss=False,
+                    record_stale_dismiss=True,
+                )
             return popped
 
         try:
             page.show_dialog = _wrapped_show_dialog
             if callable(orig_pop):
                 page.pop_dialog = _wrapped_pop_dialog
+            if callable(orig_page_update):
+                if hasattr(orig_page_update, "assert_called") and hasattr(
+                    orig_page_update, "side_effect"
+                ):
+                    if orig_page_update.side_effect is None:
+                        upd_ret = orig_page_update.return_value
+                        orig_page_update.side_effect = lambda *a, **kw: (
+                            self._sweep_closed_modal_dialogs(),
+                            upd_ret,
+                        )[1]
+                else:
+
+                    def _wrapped_page_update(*u_args, **u_kwargs):
+                        self._sweep_closed_modal_dialogs()
+                        return orig_page_update(*u_args, **u_kwargs)
+
+                    page.update = _wrapped_page_update
             page._uth_dialog_occlusion_wrapped = True
         except Exception:
             logger.debug("Page dialog occlusion bridge skipped", exc_info=True)
 
     def _release_tracked_modal_dialog_tokens(self) -> None:
+        observed = getattr(self, "_observed_open_dialogs", None)
+        if isinstance(observed, list):
+            observed.clear()
         tracked = getattr(self, "_tracked_modal_dialog_tokens", None)
         if not isinstance(tracked, set) or not tracked:
             return
@@ -2210,6 +2410,7 @@ class AppController:
             if overlays:
                 key_handler = getattr(overlays[-1], "handle_key_event", None)
                 if callable(key_handler) and key_handler(e):
+                    self._sweep_closed_modal_dialogs()
                     return
         if key == "Escape":
             await self._navigate_back()
@@ -2284,6 +2485,7 @@ class AppController:
             return True
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
+            self._sweep_closed_modal_dialogs()
             return True
         courses_view = getattr(self, "courses_view", None)
         detail_over_courses = (
@@ -2299,6 +2501,7 @@ class AppController:
             and callable(courses_handle_back)
             and courses_handle_back()
         ):
+            self._sweep_closed_modal_dialogs()
             return True
         handled = False
         course_grades_view = getattr(self, "course_grades_view", None)
@@ -2317,12 +2520,14 @@ class AppController:
         elif self.grade_overview_view.visible:
             grade_handle_back = getattr(self.grade_overview_view, "handle_back", None)
             if callable(grade_handle_back) and grade_handle_back():
+                self._sweep_closed_modal_dialogs()
                 return True
             await self._close_grades()
             handled = True
         elif courses_view is not None and getattr(courses_view, "visible", False):
             await self._close_courses()
             handled = True
+        self._sweep_closed_modal_dialogs()
         self._sync_rail_active()
         return handled
 

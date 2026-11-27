@@ -705,3 +705,126 @@ def test_open_url_in_app_supports_var_keyword_legacy_signature_and_reused_dialog
     assert _has_occlusion_reason("desktop_filter") is False
     assert controller.detail_view.visible is True
 
+
+def test_programmatic_dialog_open_false_releases_modal_occlusion_via_update_and_navigate_back(
+    monkeypatch,
+):
+    controller, _ = _build_controller_with_view_manager(monkeypatch)
+    controller._install_page_dialog_occlusion_bridge()
+
+    # 1. TodaySchedulePanel.close_surface() pattern: dlg.open = False + _safe_update(dlg)
+    #    (where unmounted ft.AlertDialog.update() raises AssertionError/RuntimeError)
+    dlg_sched = ft.AlertDialog(title=ft.Text("Lịch học hôm nay"))
+    controller.page.show_dialog(dlg_sched)
+    assert dlg_sched.open is True
+    assert _has_occlusion_reason("modal_dialog") is True
+
+    dlg_sched.open = False
+    try:
+        dlg_sched.update()
+    except (AssertionError, RuntimeError):
+        pass
+    assert _has_occlusion_reason("modal_dialog") is False
+
+    # 2. _navigate_back() -> schedule_component.handle_back() setting open=False without dlg.update()
+    sheet = ft.BottomSheet(content=ft.Text("Chi tiết buổi học"))
+    controller.page.show_dialog(sheet)
+    assert sheet.open is True
+    assert _has_occlusion_reason("modal_dialog") is True
+
+    def _close_sheet_on_back() -> bool:
+        sheet.open = False
+        return True
+
+    controller._today_schedule_component.handle_back = _close_sheet_on_back
+    assert asyncio.run(controller._navigate_back()) is True
+    assert _has_occlusion_reason("modal_dialog") is False
+
+    # 3. DocumentReaderView._close_pdf_outline_sheet() via _on_keyboard_event(Escape)
+    #    (safe_control_update skips sheet.update() when sheet.page is None)
+    outline_sheet = ft.BottomSheet(content=ft.Text("Mục lục PDF"))
+    controller.view_manager.show_courses()
+    controller.page.show_dialog(outline_sheet)
+    assert _has_occlusion_reason("modal_dialog") is True
+
+    def _overlay_esc(ev) -> bool:
+        if getattr(ev, "key", "") == "Escape":
+            outline_sheet.open = False
+            return True
+        return False
+
+    controller.courses_view._overlays = [SimpleNamespace(handle_key_event=_overlay_esc)]
+    asyncio.run(controller._on_keyboard_event(SimpleNamespace(key="Escape")))
+    assert _has_occlusion_reason("modal_dialog") is False
+
+    # 4. page.update() sweeps closed dialogs while preserving Mock.assert_called()
+    dlg_page_upd = ft.AlertDialog(title=ft.Text("Đóng qua page.update"))
+    controller.page.show_dialog(dlg_page_upd)
+    assert _has_occlusion_reason("modal_dialog") is True
+    dlg_page_upd.open = False
+    controller.page.update()
+    controller.page.update.assert_called()
+    assert _has_occlusion_reason("modal_dialog") is False
+
+    # 5. Mock() show_dialog that leaves dialog.open == False is NOT swept prematurely by page.update()
+    mock_page = SimpleNamespace(
+        show_dialog=Mock(),
+        pop_dialog=Mock(return_value=None),
+        update=Mock(),
+    )
+    mock_ctrl = AppController.__new__(AppController)
+    mock_ctrl.page = mock_page
+    mock_ctrl._install_page_dialog_occlusion_bridge()
+    inert_dlg = ft.AlertDialog(title=ft.Text("Mock Show"))
+    assert inert_dlg.open is False
+    mock_ctrl.page.show_dialog(inert_dlg)
+    assert _has_occlusion_reason("modal_dialog") is True
+    mock_ctrl.page.update()
+    assert _has_occlusion_reason("modal_dialog") is True
+    inert_dlg.on_dismiss(None)
+    assert _has_occlusion_reason("modal_dialog") is False
+
+
+def test_reused_dialog_delayed_on_dismiss_from_previous_open_never_unoccludes_active_reopen(
+    monkeypatch,
+):
+    controller, _ = _build_controller_with_view_manager(monkeypatch)
+    controller._install_page_dialog_occlusion_bridge()
+
+    dismiss_events: list[str] = []
+    reusable_dlg = ft.AlertDialog(
+        title=ft.Text("Xác nhận thoát"),
+        on_dismiss=lambda _e: dismiss_events.append("dismiss"),
+    )
+
+    # Open #1
+    controller.page.show_dialog(reusable_dlg)
+    tok_1 = getattr(reusable_dlg, "_uth_modal_occlusion_token", None)
+    assert tok_1
+    assert _has_occlusion_reason("modal_dialog") is True
+
+    # Close #1 via programmatic pop_dialog() (Flutter's async on_dismiss has NOT arrived yet!)
+    controller.page.pop_dialog()
+    assert reusable_dlg.open is False
+    assert _has_occlusion_reason("modal_dialog") is False
+
+    # Open #2 immediately on the SAME dialog instance before Open #1's on_dismiss fires
+    controller.page.show_dialog(reusable_dlg)
+    tok_2 = getattr(reusable_dlg, "_uth_modal_occlusion_token", None)
+    assert tok_2 and tok_2 != tok_1
+    assert reusable_dlg.open is True
+    assert _has_occlusion_reason("modal_dialog") is True
+
+    # Delayed async on_dismiss from Open #1 arrives while Open #2 is still open!
+    reusable_dlg.on_dismiss(None)
+    assert dismiss_events == ["dismiss"]
+    # Open #2 MUST stay occluded!
+    assert _has_occlusion_reason("modal_dialog") is True
+
+    # Finally, Open #2 closes via barrier dismiss (open -> False, then on_dismiss)
+    reusable_dlg.open = False
+    reusable_dlg.on_dismiss(None)
+    assert dismiss_events == ["dismiss", "dismiss"]
+    assert _has_occlusion_reason("modal_dialog") is False
+
+
