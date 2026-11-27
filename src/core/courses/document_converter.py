@@ -3133,6 +3133,103 @@ def _pptx_r_style(r_pr: Optional[ET.Element], *, href: str = "") -> dict[str, ob
     }
 
 
+_PPTX_SYMBOL_FONT_NAMES: frozenset[str] = frozenset(
+    {
+        "wingdings",
+        "wingdings 2",
+        "wingdings 3",
+        "webdings",
+        "symbol",
+        "monotype sorts",
+        "mt extra",
+        "zapfdingbats",
+        "bookshelf symbol 7",
+    }
+)
+
+_PPTX_WINGDINGS_BULLETS: dict[str, str] = {
+    "n": "■",
+    "l": "●",
+    "m": "❍",
+    "o": "□",
+    "p": "□",
+    "q": "❑",
+    "r": "❑",
+    "s": "▪",
+    "t": "❖",
+    "u": "❖",
+    "v": "❖",
+    "w": "▪",
+    "x": "☒",
+    "\xa7": "▪",
+    "\xa8": "○",
+    "\xb7": "•",
+    "\xd8": "➢",
+    "\xdc": "➲",
+    "\xe0": "➔",
+    "\xe8": "➔",
+    "\xf0": "➔",
+    "\xfb": "✗",
+    "\xfc": "✓",
+    "\xfe": "☑",
+    "F": "☞",
+    "H": "☞",
+}
+
+_PPTX_SYMBOL_BULLETS: dict[str, str] = {
+    "\xb7": "•",
+    "o": "○",
+    "-": "−",
+    "\xa7": "♣",
+    "\xa8": "♦",
+    "\xa9": "♥",
+    "\xaa": "♠",
+    "\xae": "→",
+    "\xde": "⇒",
+}
+
+_PPTX_WEBDINGS_BULLETS: dict[str, str] = {
+    "=": "■",
+    "<": "■",
+    "g": "■",
+    "n": "●",
+    "a": "✓",
+    "r": "✗",
+    "4": "▸",
+    "8": "▸",
+}
+
+
+def _normalize_pptx_bullet_char(raw_char: str, typeface: str = "") -> str:
+    """Convert legacy Wingdings/Symbol/Webdings & PUA bullet codepoints to Unicode."""
+    cleaned = (raw_char or "").strip()
+    if not cleaned:
+        return "•"
+    ch = cleaned[0]
+    code = ord(ch)
+    was_pua = 0xF020 <= code <= 0xF0FF
+    low = chr(code - 0xF000) if was_pua else ch
+    tf = (typeface or "").strip().lower()
+    is_sym_font = tf in _PPTX_SYMBOL_FONT_NAMES or tf.startswith(("wingdings", "bookshelf symbol"))
+    if not was_pua and not is_sym_font:
+        return cleaned
+    if tf == "symbol":
+        return _PPTX_SYMBOL_BULLETS.get(low) or _PPTX_WINGDINGS_BULLETS.get(low) or "•"
+    if tf == "webdings":
+        return _PPTX_WEBDINGS_BULLETS.get(low) or _PPTX_WINGDINGS_BULLETS.get(low) or "•"
+    if tf in {"wingdings 2", "wingdings 3", "monotype sorts", "zapfdingbats"}:
+        if low in {"P", "Q"}:
+            return "✓"
+        if low in {"O", "N"}:
+            return "✗"
+        return _PPTX_WINGDINGS_BULLETS.get(low) or "▸"
+    return (
+        _PPTX_WINGDINGS_BULLETS.get(low)
+        or _PPTX_SYMBOL_BULLETS.get(low)
+        or ("■" if low == "n" else "•")
+    )
+
+
 def _pptx_tx_body_paragraphs(
     tx_body: ET.Element,
     hyperlinks: Optional[dict[str, str]] = None,
@@ -3160,7 +3257,10 @@ def _pptx_tx_body_paragraphs(
                 bullet = ""
             elif p_pr.find(f"{{{_A_NS}}}buChar") is not None:
                 bu_char = p_pr.find(f"{{{_A_NS}}}buChar")
-                bullet = (bu_char.attrib.get("char") or "•") if bu_char is not None else "•"
+                bu_font = p_pr.find(f"{{{_A_NS}}}buFont")
+                raw_bu = (bu_char.attrib.get("char") or "•") if bu_char is not None else "•"
+                bu_tf = (bu_font.attrib.get("typeface") or "") if bu_font is not None else ""
+                bullet = _normalize_pptx_bullet_char(raw_bu, bu_tf)
             elif p_pr.find(f"{{{_A_NS}}}buAutoNum") is not None:
                 bu_auto = p_pr.find(f"{{{_A_NS}}}buAutoNum")
                 auto_type = (bu_auto.attrib.get("type") or "").lower() if bu_auto is not None else ""
