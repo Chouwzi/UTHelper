@@ -123,7 +123,7 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
             "C:/app-cache/uthelper_update/UTHelper-2.2.0.apk",
             "ab" * 32,
             123,
-            "com.uthelper.uthelper",
+            "io.github.chouwzi.uthelper",
             2_002_000,
             "cd" * 32,
         )
@@ -138,7 +138,7 @@ def test_install_update_forwards_identity_version_signer_and_cancel():
                 "C:/app-cache/uthelper_update/UTHelper-2.2.0.apk",
                 "ab" * 32,
                 123,
-                "com.uthelper.uthelper",
+                "io.github.chouwzi.uthelper",
                 2_002_000,
                 "cd" * 32,
             ),
@@ -166,7 +166,7 @@ def test_durable_update_download_bridge_preserves_pinned_identity_and_void_cance
     bridge = AndroidBackgroundBridge.__new__(AndroidBackgroundBridge)
     bridge.service = Service()
     identity = ("https://github.com/Chouwzi/UTHelper/releases/download/v2.5.1/app.apk",
-                "a" * 64, 100, "com.uthelper.uthelper", 2_005_001, "b" * 64)
+                "a" * 64, 100, "io.github.chouwzi.uthelper", 2_005_001, "b" * 64)
     assert asyncio.run(bridge.start_update_download(*identity)) == {"status": "running"}
     assert asyncio.run(bridge.get_update_download_status(*identity))["status"] == "completed"
     assert asyncio.run(bridge.cancel_update_download(*identity)) == {"status": "cancelled"}

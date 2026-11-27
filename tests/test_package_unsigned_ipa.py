@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import stat
 import struct
+import tomllib
 import zipfile
 
 import pytest
@@ -21,9 +22,26 @@ from scripts.package_unsigned_ipa import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
 VERSION = "2.2.0"
 BUILD = "2002000"
-BUNDLE_ID = "com.uthelper.UTHelper"
+BUNDLE_ID = "io.github.chouwzi.uthelper"
+
+
+def test_ios_bundle_id_matches_pyproject_and_release_verifiers():
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    verify_sh = (ROOT / "scripts" / "verify_ipa_release.sh").read_text(encoding="utf-8")
+    release_yml = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    benchmark_yml = (ROOT / ".github" / "workflows" / "package-benchmark.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert BUNDLE_ID == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert '[[ "$BUNDLE_ID" == "io.github.chouwzi.uthelper" ]]' in verify_sh
+    assert "--bundle-id io.github.chouwzi.uthelper" in release_yml
+    assert "--bundle-id io.github.chouwzi.uthelper" in benchmark_yml
 
 
 def _make_app(

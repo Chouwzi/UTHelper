@@ -14,6 +14,6 @@ def test_accepts_isolated_identity_and_successful_native_launch():
 
 def test_refuses_user_app_identity_and_unsuccessful_launch():
     with pytest.raises(ValueError, match="Only com.uthelper.benchmark"):
-        package_identity("package: name='com.uthelper.uthelper' versionCode='2004001'")
+        package_identity("package: name='io.github.chouwzi.uthelper' versionCode='2004001'")
     with pytest.raises(ValueError, match="successful"):
         launch_fields("Status: timeout\nTotalTime: 0\n")

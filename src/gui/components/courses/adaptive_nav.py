@@ -1,4 +1,4 @@
-"""Adaptive 6-destination navigation rail (>= 600px) and bottom bar (< 600px)."""
+"""Adaptive 5-destination navigation rail (>= 600px) and bottom bar (< 600px)."""
 
 from __future__ import annotations
 
@@ -51,12 +51,6 @@ NAV_DESTINATIONS: tuple[NavDestinationSpec, ...] = (
         ft.Icons.INSIGHTS_ROUNDED,
     ),
     NavDestinationSpec(
-        "roadmap",
-        "Lộ trình",
-        getattr(ft.Icons, "ROUTE_OUTLINED", ft.Icons.MAP_OUTLINED),
-        getattr(ft.Icons, "ROUTE_ROUNDED", ft.Icons.MAP_ROUNDED),
-    ),
-    NavDestinationSpec(
         "settings",
         "Cài đặt",
         ft.Icons.SETTINGS_OUTLINED,
@@ -105,6 +99,14 @@ class AdaptiveNavShell:
             bgcolor=C.SURFACE,
             border=ft.Border.only(right=ft.BorderSide(1, C.BORDER)),
             visible=False,
+        )
+        # Permanently visible slot keeps sibling main_stack at index 1 in Row
+        # across <600dp <-> >=600dp (Samsung Pop-up View) so PlatformViews never unmount.
+        self.rail_slot = ft.Container(
+            content=self.rail_host,
+            width=0,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            visible=True,
         )
         self.bar = ft.NavigationBar(
             selected_index=0,
@@ -163,6 +165,7 @@ class AdaptiveNavShell:
                 use_rail = False
         self.rail_visible = use_rail
         self.rail_host.visible = use_rail
+        self.rail_slot.width = None if use_rail else 0
         self.bar.visible = (not use_rail) and (not self._immersive)
         return use_rail
 

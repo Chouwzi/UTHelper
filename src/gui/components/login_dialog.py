@@ -1,6 +1,7 @@
 import flet as ft
 import asyncio
 from config import settings, save_settings
+from core.demo_sandbox import is_demo_account, normalize_demo_username
 from gui.core.theme import C
 
 async def show_login_dialog(
@@ -125,13 +126,20 @@ async def show_login_dialog(
         loading_bar.visible = True
         page.update()
 
+        raw_username = username_field.value.strip()
+        canonical_username = (
+            normalize_demo_username(raw_username)
+            if is_demo_account(raw_username)
+            else raw_username
+        )
         success = await asyncio.to_thread(
-            orchestrator.client.login, username_field.value.strip(),
+            orchestrator.client.login, canonical_username,
             password_field.value, True
         )
 
         if success:
-            settings.UTH_USERNAME = username_field.value.strip()
+            username_field.value = canonical_username
+            settings.UTH_USERNAME = canonical_username
             settings.UTH_PASSWORD = password_field.value
             orchestrator.is_logged_in = True
             await asyncio.to_thread(save_settings)

@@ -65,8 +65,75 @@ if ($Channel -eq "chplay" -and $Target -ne "aab") {
 }
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$fletCommand = Get-Command flet -ErrorAction Stop
-$patchCommand = Get-Command flet-android-notifications-patch -ErrorAction Stop
+
+function Resolve-BuildPythonExecutable {
+    param([Parameter(Mandatory = $true)][string]$WorkspaceRoot)
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    [void]$candidates.Add((Join-Path $WorkspaceRoot ".venv\Scripts\python.exe"))
+    if (-not [string]::IsNullOrWhiteSpace($env:VIRTUAL_ENV)) {
+        [void]$candidates.Add((Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"))
+        [void]$candidates.Add((Join-Path $env:VIRTUAL_ENV "bin/python"))
+    }
+    $gitPointer = Join-Path $WorkspaceRoot ".git"
+    if (Test-Path -LiteralPath $gitPointer -PathType Leaf) {
+        $gitLine = (Get-Content -LiteralPath $gitPointer -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($gitLine -match '^\s*gitdir:\s*(.+?)\s*$') {
+            $gitDirPath = $Matches[1].Replace('/', '\')
+            if (-not [IO.Path]::IsPathRooted($gitDirPath)) {
+                $gitDirPath = [IO.Path]::GetFullPath((Join-Path $WorkspaceRoot $gitDirPath))
+            }
+            $worktreesParent = Split-Path -Path $gitDirPath -Parent
+            $dotGitDir = if ($worktreesParent) { Split-Path -Path $worktreesParent -Parent } else { $null }
+            $mainRepoRoot = if ($dotGitDir) { Split-Path -Path $dotGitDir -Parent } else { $null }
+            if ($mainRepoRoot) {
+                [void]$candidates.Add((Join-Path $mainRepoRoot ".venv\Scripts\python.exe"))
+            }
+        }
+    }
+    $parentOne = Split-Path -Path $WorkspaceRoot -Parent
+    if ($parentOne) {
+        $parentTwo = Split-Path -Path $parentOne -Parent
+        if ($parentTwo) {
+            [void]$candidates.Add((Join-Path $parentTwo ".venv\Scripts\python.exe"))
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return $candidate
+        }
+    }
+    return (Get-Command python -ErrorAction Stop).Source
+}
+
+$pythonExe = Resolve-BuildPythonExecutable -WorkspaceRoot $projectRoot
+$venvPatchExe = Join-Path ([IO.Path]::GetDirectoryName($pythonExe)) "flet-android-notifications-patch.exe"
+$patchCommandPath = if (Test-Path -LiteralPath $venvPatchExe -PathType Leaf) {
+    $venvPatchExe
+} else {
+    (Get-Command flet-android-notifications-patch -ErrorAction Stop).Source
+}
+
+function Invoke-FletCliBuild {
+    param(
+        [Parameter(Mandatory = $true)][string]$BuildTarget,
+        [string[]]$BuildOptions = @()
+    )
+
+    # Invoke .venv\Scripts\python.exe -c directly instead of the uv flet.exe
+    # trampoline (which re-injects PYTHONHOME / UV_INTERNAL__PYTHONHOME and
+    # inherits PYTHONPATH, hanging serious_python's bundled pip).
+    $pyCode = @"
+import os
+import sys
+for _key in ("PYTHONHOME", "UV_INTERNAL__PYTHONHOME", "PYTHONPATH"):
+    os.environ.pop(_key, None)
+import flet_cli.cli
+sys.argv = ["flet", "build", *sys.argv[1:]]
+flet_cli.cli.main()
+"@
+    & $pythonExe -c $pyCode $BuildTarget "--yes" @BuildOptions "--verbose"
+}
 
 # Default apk_lts to ARM64 legacy packaging; chplay uses universal AAB with
 # uncompressed 16 KB-aligned native libraries and stripped updater permissions.
@@ -143,7 +210,7 @@ function Set-AndroidChannelBuildConfig {
         [Parameter(Mandatory = $true)][string]$DistributionChannel
     )
 
-    python (Join-Path $ProjectRoot "scripts\prepare_android_flutter_project.py") `
+    & $pythonExe (Join-Path $ProjectRoot "scripts\prepare_android_flutter_project.py") `
         --project-root (Join-Path $ProjectRoot "build\flutter") `
         --channel $DistributionChannel `
         --target-sdk 36
@@ -155,21 +222,21 @@ function Set-AndroidChannelBuildConfig {
 $channelAssetPath = Join-Path $projectRoot "src\assets\distribution-channel.json"
 Push-Location $projectRoot
 try {
-    $buildVersion = (python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --print-version).Trim()
+    $buildVersion = (& $pythonExe (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --print-version).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "Canonical release version lookup failed before initial Android build."
     }
-    $buildNumber = (python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))").Trim()
+    $buildNumber = (& $pythonExe -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))").Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "Canonical Android build number lookup failed before initial Android build."
     }
     $fletOptions += @("--build-version", $buildVersion, "--build-number", $buildNumber)
 
-    python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
+    & $pythonExe (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before initial Android build."
     }
-    python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "com.uthelper.uthelper"
+    & $pythonExe (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics and distribution channel config generation failed before initial Android build."
     }
@@ -177,28 +244,28 @@ try {
     if (Test-Path -LiteralPath $gradleProperties -PathType Leaf) {
         Set-BoundedAndroidGradleConfig -GradlePropertiesPath $gradleProperties
     }
-    & $fletCommand.Source build $Target @fletOptions --verbose
+    Invoke-FletCliBuild -BuildTarget $Target -BuildOptions $fletOptions
     $firstExit = $LASTEXITCODE
     if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "build/flutter"))) {
         throw "Flet did not create build/flutter (exit $firstExit)."
     }
 
-    & $patchCommand.Source --project-root (Join-Path $projectRoot "build/flutter")
+    & $patchCommandPath --project-root (Join-Path $projectRoot "build/flutter")
     if ($LASTEXITCODE -ne 0) {
         throw "Notification patcher failed with exit code $LASTEXITCODE."
     }
     Set-BoundedAndroidGradleConfig -GradlePropertiesPath $gradleProperties
     Set-AndroidChannelBuildConfig -ProjectRoot $projectRoot -DistributionChannel $Channel
 
-    python (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
+    & $pythonExe (Join-Path $projectRoot "scripts\release_metadata.py") --pyproject (Join-Path $projectRoot "pyproject.toml") --runtime-output (Join-Path $projectRoot "src\assets\release-version")
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before final Android build."
     }
-    python (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "com.uthelper.uthelper"
+    & $pythonExe (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics and distribution channel config generation failed before final Android build."
     }
-    & $fletCommand.Source build $Target @fletOptions --verbose
+    Invoke-FletCliBuild -BuildTarget $Target -BuildOptions $fletOptions
     if ($LASTEXITCODE -ne 0) {
         throw "Final Android build failed with exit code $LASTEXITCODE."
     }

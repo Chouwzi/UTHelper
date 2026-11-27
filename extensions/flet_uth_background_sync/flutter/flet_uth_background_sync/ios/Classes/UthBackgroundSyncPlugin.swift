@@ -37,10 +37,22 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "configure":
             let arguments = call.arguments as? [String: Any]
             let settings = arguments?["settings"] as? [String: Any] ?? [:]
+            let enabled = bool(settings["enabled"], default: true)
             defaults.set(settings, forKey: Self.settingsKey)
+            guard enabled else {
+                clearDeadlineNotifications()
+                finish(result, [
+                    "enabled": false,
+                    "permission_granted": false,
+                    "scheduled": 0,
+                    "cancelled": 0,
+                    "error": "",
+                ])
+                return
+            }
             center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
                 self.finish(result, [
-                    "enabled": self.bool(settings["enabled"], default: true),
+                    "enabled": true,
                     "permission_granted": granted,
                     "scheduled": 0,
                     "cancelled": 0,
@@ -140,6 +152,32 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "request_exact_alarm_access":
             // Calendar notifications do not have Android's exact-alarm permission.
             result(true)
+
+        case "launch_external_intent":
+            let arguments = call.arguments as? [String: Any]
+            let rawUri = text(arguments?["uri"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let allowedSchemes: Set<String> = [
+                "zalo", "zoomus", "zoomphonecall", "zoom", "msteams",
+                "mailto", "tel", "sms", "tg", "fb-messenger", "whatsapp",
+                "viber", "skype", "slack", "discord", "googledocs",
+                "googlesheets", "googleslides", "googlemeet", "googleclassroom",
+                "googledrive", "vnd.youtube", "ms-word", "ms-excel",
+                "ms-powerpoint", "ms-onenote", "ms-outlook", "onedrive"
+            ]
+            guard !rawUri.isEmpty,
+                  !rawUri.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7F }),
+                  let url = URL(string: rawUri),
+                  let scheme = url.scheme?.lowercased(),
+                  allowedSchemes.contains(scheme)
+            else {
+                result(false)
+                return
+            }
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { ok in
+                    self.finish(result, ok)
+                }
+            }
 
         case "schedule_periodic":
             result(["scheduled": false, "reason": "ios_foreground_snapshot_only"])

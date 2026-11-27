@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from scripts.release_metadata import (
+    DEFAULT_ANDROID_PACKAGE_ID,
     ReleaseMetadata,
     ReleaseMetadataError,
     read_project_version,
@@ -26,8 +27,9 @@ def test_project_version_is_only_authored_version(tmp_path):
 
 def test_hotfix_version_can_upgrade_the_affected_release():
     version = read_project_version(ROOT / "pyproject.toml")
-    assert version == "2.5.1"
-    assert release_build_number(version) > release_build_number("2.5.0")
+    assert version == "2.6.2"
+    assert release_build_number(version) == 2_006_002
+    assert release_build_number(version) > release_build_number("2.6.1")
 
 
 def test_runtime_version_is_generated_from_the_single_authored_version(tmp_path):
@@ -68,9 +70,10 @@ def test_distribution_channel_asset_contract_is_deterministic(tmp_path):
         write_distribution_channel,
     )
 
+    assert DEFAULT_ANDROID_PACKAGE_ID == "io.github.chouwzi.uthelper"
     target = write_distribution_channel(tmp_path / "assets" / "distribution-channel.json", "apk_lts")
     assert target.read_text(encoding="utf-8") == (
-        '{\n  "android_package_id": "com.uthelper.uthelper",\n'
+        '{\n  "android_package_id": "io.github.chouwzi.uthelper",\n'
         '  "channel": "apk_lts",\n  "schema_version": 1\n}\n'
     )
     assert build_distribution_channel_payload("EXE_LTS") == {

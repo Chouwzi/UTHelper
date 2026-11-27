@@ -13,7 +13,7 @@ from scripts.verify_android_release import AndroidVerificationError, verify_andr
 
 VERSION = "2.2.0"
 BUILD_NUMBER = 2_002_000
-PACKAGE_ID = "com.uthelper.uthelper"
+PACKAGE_ID = "io.github.chouwzi.uthelper"
 FINGERPRINT = "AB" * 32
 COMMIT_SHA = "1" * 40
 

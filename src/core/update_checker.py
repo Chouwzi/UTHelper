@@ -45,15 +45,85 @@ _MAX_JSON_BYTES = 1024 * 1024
 _APPROVED_GITHUB_HOSTS = frozenset(
     {"github.com", "objects.githubusercontent.com"}
 )
-_APPROVED_REDIRECT_HOSTS = frozenset(
+_APPROVED_GITHUB_REDIRECT_HOSTS = frozenset(
     {
         "api.github.com",
         "github.com",
         "objects.githubusercontent.com",
         "release-assets.githubusercontent.com",
+        "raw.githubusercontent.com",
+        "codeload.github.com",
     }
 )
 _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
+
+
+def _is_native_urlopen(fn: object) -> bool:
+    """Return True only when urllib.request.urlopen is the unpatched stdlib function."""
+    return (
+        callable(fn)
+        and getattr(fn, "__module__", None) == "urllib.request"
+        and getattr(fn, "__qualname__", None) == "urlopen"
+        and not hasattr(fn, "__wrapped__")
+    )
+
+
+def _is_approved_github_url(url: str) -> bool:
+    """Allow only HTTPS GitHub/GitHubusercontent URLs on default port without userinfo."""
+    if not isinstance(url, str):
+        return False
+    raw = url.strip()
+    if not raw or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    if port not in (None, 443):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return host in _APPROVED_GITHUB_REDIRECT_HOSTS or (
+        host.endswith(".githubusercontent.com")
+        and not host.startswith(".")
+        and ".." not in host
+    )
+
+
+class _ApprovedGitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject HTTP downgrades and off-GitHub redirects during update discovery/download."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        if not _is_approved_github_url(redirected.full_url):
+            raise urllib.error.URLError("Blocked untrusted update redirect target")
+        return redirected
+
+
+def _open_github_url(request: urllib.request.Request, *, timeout: float):
+    """Open an update request with strict GitHub HTTPS redirect pinning."""
+    if not _is_native_urlopen(urllib.request.urlopen):
+        return urllib.request.urlopen(request, timeout=timeout)
+    opener = urllib.request.build_opener(_ApprovedGitHubRedirectHandler())
+    response = opener.open(request, timeout=timeout)
+    geturl = getattr(response, "geturl", None)
+    final_url = str(geturl() or "") if callable(geturl) else ""
+    if (
+        final_url
+        and final_url != request.full_url
+        and not _is_approved_github_url(final_url)
+    ):
+        response.close()
+        raise urllib.error.URLError("Blocked untrusted update final URL")
+    return response
 
 
 class UpdateError(RuntimeError):
@@ -155,46 +225,6 @@ def _close_response_quietly(response: object) -> None:
                 pass
             except Exception:
                 pass
-
-
-def _is_approved_github_url(value: object) -> bool:
-    """Return True only for plain HTTPS URLs on approved GitHub hosts."""
-    if not isinstance(value, str) or len(value) > 2048:
-        return False
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname in _APPROVED_REDIRECT_HOSTS
-        and parsed.username is None
-        and parsed.password is None
-        and port in (None, 443)
-    )
-
-
-class _ApprovedGitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects that leave the approved GitHub HTTPS hosts."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        absolute = urllib.parse.urljoin(req.full_url, newurl)
-        if not _is_approved_github_url(absolute):
-            raise urllib.error.URLError("Blocked untrusted update redirect")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-_ORIGINAL_URLOPEN = urllib.request.urlopen
-
-
-def _open_github_url(request, timeout):
-    """Open a request, pinning every redirect hop to approved GitHub hosts."""
-    if urllib.request.urlopen is not _ORIGINAL_URLOPEN:
-        # urlopen has been replaced (e.g. by tests); honour the replacement.
-        return urllib.request.urlopen(request, timeout=timeout)
-    opener = urllib.request.build_opener(_ApprovedGitHubRedirectHandler())
-    return opener.open(request, timeout=timeout)
 
 
 def _request_json(url: str, timeout: int = _SOCKET_TIMEOUT_SECONDS) -> dict:

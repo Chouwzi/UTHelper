@@ -35,6 +35,22 @@ function Resolve-PythonExecutable([string]$ExplicitPath, [string]$WorkspaceRoot)
         [void]$candidates.Add((Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"))
     }
     [void]$candidates.Add((Join-Path $WorkspaceRoot ".venv\Scripts\python.exe"))
+    $gitPointer = Join-Path $WorkspaceRoot ".git"
+    if (Test-Path -LiteralPath $gitPointer -PathType Leaf) {
+        $gitLine = (Get-Content -LiteralPath $gitPointer -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($gitLine -match '^\s*gitdir:\s*(.+?)\s*$') {
+            $gitDirPath = $Matches[1].Replace('/', '\')
+            if (-not [IO.Path]::IsPathRooted($gitDirPath)) {
+                $gitDirPath = [IO.Path]::GetFullPath((Join-Path $WorkspaceRoot $gitDirPath))
+            }
+            $worktreesParent = Split-Path -Path $gitDirPath -Parent
+            $dotGitDir = if ($worktreesParent) { Split-Path -Path $worktreesParent -Parent } else { $null }
+            $mainRepoRoot = if ($dotGitDir) { Split-Path -Path $dotGitDir -Parent } else { $null }
+            if ($mainRepoRoot) {
+                [void]$candidates.Add((Join-Path $mainRepoRoot ".venv\Scripts\python.exe"))
+            }
+        }
+    }
     $parentOne = Split-Path -Path $WorkspaceRoot -Parent
     if ($parentOne) {
         $parentTwo = Split-Path -Path $parentOne -Parent
@@ -56,8 +72,16 @@ function Resolve-PythonExecutable([string]$ExplicitPath, [string]$WorkspaceRoot)
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
         if (-not $seen.Add($candidate)) { continue }
-        & $candidate -c "import PIL" 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $candidate -c "import PIL" *>$null
+            $probeExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $prevEap
+        }
+        if ($probeExit -eq 0) {
             return $candidate
         }
     }
@@ -185,7 +209,7 @@ try {
         schema_version     = 1
         channel            = $Channel
         store_product_id   = $normalizedProductId
-        android_package_id = "com.uthelper.uthelper"
+        android_package_id = "io.github.chouwzi.uthelper"
     }
     $channelJson = ($channelPayload | ConvertTo-Json -Depth 4) + "`n"
 
