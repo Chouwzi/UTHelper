@@ -774,6 +774,7 @@ class ProfileView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         banner_height = 188
+        campus_width = round(banner_height * 1280 / 470)
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
@@ -782,19 +783,18 @@ class ProfileView(ft.Container):
                             src=_asset_image_source(
                                 "uth_campus_banner.jpg", "image/jpeg"
                             ),
-                            expand=True,
-                            # Scale proportionally and crop to the wide banner;
-                            # never stretch the campus photo horizontally.
-                            fit=ft.BoxFit.COVER,
+                            width=campus_width,
+                            height=banner_height,
+                            fit=ft.BoxFit.CONTAIN,
                             filter_quality=ft.FilterQuality.HIGH,
                             anti_alias=True,
                             semantics_label="Khuôn viên UTH",
                             key="profile-uth-banner-image",
                         ),
-                        left=0,
+                        width=campus_width,
+                        height=banner_height,
                         right=0,
                         top=0,
-                        bottom=0,
                     ),
                     ft.Container(
                         left=0,
@@ -806,13 +806,13 @@ class ProfileView(ft.Container):
                             end=ft.Alignment(1, 0),
                             colors=[
                                 ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.92, C.SURFACE),
-                                ft.Colors.with_opacity(0.14, C.SURFACE),
+                                ft.Colors.with_opacity(0.98, C.SURFACE),
+                                ft.Colors.with_opacity(0.25, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
                             # White holds until ~40% (name/badge zone) so the
                             # building starts exactly where the mockup puts it.
-                            stops=[0, 0.40, 0.52, 0.60],
+                            stops=[0, 0.48, 0.62, 0.72],
                         ),
                     ),
                     ft.Container(
