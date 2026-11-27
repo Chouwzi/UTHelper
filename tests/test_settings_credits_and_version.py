@@ -62,26 +62,26 @@ def _restore_theme():
     load_theme_from_settings()
 
 
-def test_app_version_matches_pyproject_2_6_0_in_source_and_packaged_modes(tmp_path):
+def test_app_version_matches_pyproject_2_6_1_in_source_and_packaged_modes(tmp_path):
     import gui.app_controller as app_controller
     import src.main as app_main
 
-    assert APP_VERSION == "2.6.0"
-    assert app_controller.APP_VERSION == "v2.6.0"
-    assert app_main.__version__ == "2.6.0"
+    assert APP_VERSION == "2.6.1"
+    assert app_controller.APP_VERSION == "v2.6.1"
+    assert app_main.__version__ == "2.6.1"
 
     runtime_version = tmp_path / "release-version"
-    runtime_version.write_bytes(b"2.6.0\n")
+    runtime_version.write_bytes(b"2.6.1\n")
     assert (
         get_app_version(
             pyproject_path=tmp_path / "missing-pyproject.toml",
             runtime_version_path=runtime_version,
         )
-        == "2.6.0"
+        == "2.6.1"
     )
 
 
-@pytest.mark.parametrize("stale_bytes", [b"2.5.0\n", b"2.5.1\n"])
+@pytest.mark.parametrize("stale_bytes", [b"2.5.0\n", b"2.5.1\n", b"2.6.0\n"])
 def test_prepare_windows_bundle_syncs_stale_release_version_from_pyproject(
     tmp_path: Path, stale_bytes: bytes
 ):
@@ -93,13 +93,13 @@ def test_prepare_windows_bundle_syncs_stale_release_version_from_pyproject(
     alias = prepare_windows_bundle(tmp_path)
 
     assert alias == tmp_path / "UTHelperAutostart.exe"
-    assert runtime_file.read_bytes() == b"2.6.0\n"
+    assert runtime_file.read_bytes() == b"2.6.1\n"
     assert (
         get_app_version(
             pyproject_path=tmp_path / "missing-pyproject.toml",
             runtime_version_path=runtime_file,
         )
-        == "2.6.0"
+        == "2.6.1"
     )
 
 
@@ -109,15 +109,15 @@ def test_prepare_windows_bundle_cli_supports_explicit_pyproject_sync(tmp_path: P
     (bundle_dir / "UTHelper.exe").write_bytes(b"MZ-runner")
     runtime_file = bundle_dir / "app" / "assets" / "release-version"
     runtime_file.parent.mkdir(parents=True)
-    runtime_file.write_bytes(b"2.5.0\n")
+    runtime_file.write_bytes(b"2.6.0\n")
 
     custom_pyproject = tmp_path / "pyproject.toml"
-    custom_pyproject.write_text('[project]\nversion = "2.6.0"\n', encoding="utf-8")
+    custom_pyproject.write_text('[project]\nversion = "2.6.1"\n', encoding="utf-8")
 
     rc = prepare_bundle_main([str(bundle_dir), "--pyproject", str(custom_pyproject)])
 
     assert rc == 0
-    assert runtime_file.read_bytes() == b"2.6.0\n"
+    assert runtime_file.read_bytes() == b"2.6.1\n"
 
 
 def test_quiz_client_bootstrap_syncs_stale_local_release_version(
@@ -127,7 +127,7 @@ def test_quiz_client_bootstrap_syncs_stale_local_release_version(
     flutter_package = extension_root / "flutter" / "flet_uth_quiz"
     flutter_package.mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nversion = "2.6.0"\n[tool.flet.windows]\n',
+        '[project]\nversion = "2.6.1"\n[tool.flet.windows]\n',
         encoding="utf-8",
     )
     (extension_root / "pyproject.toml").write_text(
@@ -137,7 +137,7 @@ def test_quiz_client_bootstrap_syncs_stale_local_release_version(
 
     stale_src_version = tmp_path / "src" / "assets" / "release-version"
     stale_src_version.parent.mkdir(parents=True)
-    stale_src_version.write_bytes(b"2.5.0\n")
+    stale_src_version.write_bytes(b"2.6.0\n")
 
     observed_during_build: list[bytes] = []
 
@@ -168,24 +168,24 @@ def test_quiz_client_bootstrap_syncs_stale_local_release_version(
 
     quiz_client_bootstrap.ensure_windows_quiz_client(tmp_path)
 
-    assert observed_during_build == [b"2.6.0\n"]
-    assert stale_src_version.read_bytes() == b"2.6.0\n"
+    assert observed_during_build == [b"2.6.1\n"]
+    assert stale_src_version.read_bytes() == b"2.6.1\n"
     assert (
         tmp_path / "build" / "windows" / "app" / "assets" / "release-version"
-    ).read_bytes() == b"2.6.0\n"
+    ).read_bytes() == b"2.6.1\n"
 
 
 @pytest.mark.parametrize(
     ("channel", "expected_hub_label"),
     [
-        (DistributionChannel.SOURCE, "UTHelper v2.6.0"),
-        (DistributionChannel.EXE_LTS, "UTHelper v2.6.0"),
-        (DistributionChannel.APK_LTS, "UTHelper v2.6.0"),
-        (DistributionChannel.MSSTORE, "UTHelper v2.6.0 · Microsoft Store"),
-        (DistributionChannel.CHPLAY, "UTHelper v2.6.0 · Google Play"),
+        (DistributionChannel.SOURCE, "UTHelper v2.6.1"),
+        (DistributionChannel.EXE_LTS, "UTHelper v2.6.1"),
+        (DistributionChannel.APK_LTS, "UTHelper v2.6.1"),
+        (DistributionChannel.MSSTORE, "UTHelper v2.6.1 · Microsoft Store"),
+        (DistributionChannel.CHPLAY, "UTHelper v2.6.1 · Google Play"),
     ],
 )
-def test_settings_version_labels_display_2_6_0_across_all_distribution_channels(
+def test_settings_version_labels_display_2_6_1_across_all_distribution_channels(
     channel: DistributionChannel, expected_hub_label: str
 ):
     page = _make_dummy_page()
@@ -205,18 +205,18 @@ def test_settings_version_labels_display_2_6_0_across_all_distribution_channels(
     # 2. Settings -> Hệ thống
     view._navigate_to_detail("system")
     system_texts = _collect_text_values(view._detail_content_holder)
-    assert any("v2.6.0" in text for text in system_texts)
+    assert any("v2.6.1" in text for text in system_texts)
     assert hasattr(view, "_system_version_text")
-    assert "v2.6.0" in view._system_version_text.value
+    assert "v2.6.1" in view._system_version_text.value
 
     # 3. Settings -> Debug Device Info
     view._debug_info_text.update = Mock()
     view._do_show_device_info()
-    assert "App: v2.6.0" in view._debug_info_text.value
+    assert "App: v2.6.1" in view._debug_info_text.value
 
 
-def test_no_hardcoded_stale_2_5_version_in_gui_or_packaging_sources():
-    stale_pattern = re.compile(r"\b2\.5\.(?:0|1)\b")
+def test_no_hardcoded_stale_2_5_or_2_6_0_version_in_gui_or_packaging_sources():
+    stale_pattern = re.compile(r"\b(?:2\.5\.(?:0|1)|2\.6\.0)\b")
     violations: list[str] = []
 
     for root in (ROOT / "src" / "gui", ROOT / "packaging" / "windows"):
@@ -242,7 +242,7 @@ def test_settings_hub_preserves_eight_cards_and_exposes_credits_entry_pill():
     assert callable(view._credits_entry_pill.on_click)
 
     pill_texts = _collect_text_values(view._credits_entry_pill)
-    assert any("UTHelper v2.6.0" in text for text in pill_texts)
+    assert any("UTHelper v2.6.1" in text for text in pill_texts)
     assert "Giới thiệu" in pill_texts
     assert all("&" not in text and "\u2014" not in text and "\u2013" not in text for text in pill_texts)
 
@@ -271,7 +271,7 @@ def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_h
     assert view._current_screen == "credits"
     assert view._active_category_id == "credits"
     assert view._detail_title.value == "Giới thiệu"
-    assert view._detail_subtitle.value == "UTHelper v2.6.0 - Thông tin dự án"
+    assert view._detail_subtitle.value == "UTHelper v2.6.1 - Thông tin dự án"
     assert view._sticky_footer.visible is False
     assert view.has_changes() is False
     assert view._unsaved_dot.visible is False
@@ -284,7 +284,7 @@ def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_h
 
     identity_texts = _collect_text_values(view._credits_identity_card)
     assert "UTHelper" in identity_texts
-    assert "v2.6.0" in identity_texts
+    assert "v2.6.1" in identity_texts
     assert "Microsoft Store" in identity_texts
 
     founder_texts = _collect_text_values(view._credits_founder_card)
