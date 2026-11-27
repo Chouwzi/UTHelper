@@ -169,9 +169,12 @@ jobs:
           }
 
           // Plugin resolution in settings starts before settingsEvaluated.
-          // Register the mirror first so Gradle can use it for those requests.
+          // Explicit repositories replace Gradle's default Plugin Portal, so
+          // retain it for plugins that are not published on Maven Central.
           gradle.beforeSettings { settings ->
+              settings.pluginManagement.repositories.google()
               settings.pluginManagement.repositories.maven { url = mirrorUrl }
+              settings.pluginManagement.repositories.gradlePluginPortal()
           }
 
           settingsEvaluated { settings ->
