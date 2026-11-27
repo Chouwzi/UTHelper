@@ -73,8 +73,10 @@ let userZoom = 1.0;
 const pageSlots = new Map();
 const renderedPages = new Map();
 const renderingPages = new Map();
+const inflightRenders = new Map();
 const visiblePages = new Set();
 let renderGeneration = 0;
+let windowScheduleTimer = null;
 let baseViewportSize = { width: 595, height: 842 };
 let intersectionObserver = null;
 let searchHits = [];
@@ -85,6 +87,12 @@ let textCache = null;
 function computeFitWidthScale(pageWidth) {
   const containerW = Math.max(240, (pagesEl.clientWidth || window.innerWidth || 360) - 16);
   return Math.max(0.25, Math.min(4.0, (containerW / Math.max(1, pageWidth)) * userZoom));
+}
+
+function computeTargetDpr() {
+  const rawDpr = window.devicePixelRatio || 1;
+  const maxDpr = window.innerWidth < 600 && userZoom <= 1.05 ? 1.5 : 2.0;
+  return Math.min(rawDpr, maxDpr);
 }
 
 function updateNavControls() {
@@ -108,6 +116,48 @@ function updateSearchControls() {
   for (const [pNum, slot] of pageSlots.entries()) {
     const active = searchHits.length > 0 && searchHits[searchHitIndex] === pNum;
     slot.classList.toggle("search-hit", active);
+  }
+}
+
+function isSlotOnScreen(pNum) {
+  const slot = pageSlots.get(pNum);
+  if (!slot) return false;
+  const rect = slot.getBoundingClientRect();
+  const winH = window.innerHeight || document.documentElement.clientHeight || 720;
+  return rect.bottom > 44 && rect.top < winH;
+}
+
+function pickBestVisiblePage() {
+  const winH = window.innerHeight || document.documentElement.clientHeight || 720;
+  const topEdge = 44;
+  let bestPage = null;
+  let bestPixels = 0;
+  const sorted = [...visiblePages].sort((a, b) => a - b);
+  for (const pNum of sorted) {
+    const slot = pageSlots.get(pNum);
+    if (!slot) continue;
+    const rect = slot.getBoundingClientRect();
+    const overlap = Math.min(rect.bottom, winH) - Math.max(rect.top, topEdge);
+    if (overlap > bestPixels + 2) {
+      bestPixels = overlap;
+      bestPage = pNum;
+    }
+  }
+  return bestPage;
+}
+
+function cancelDistantInflightRenders(anchorPage) {
+  for (const [pNum, active] of inflightRenders.entries()) {
+    if (Math.abs(pNum - anchorPage) > 2 && !isSlotOnScreen(pNum)) {
+      if (active.renderTask) {
+        try { active.renderTask.cancel(); } catch (_) {}
+      }
+      if (active.textLayer) {
+        try { active.textLayer.cancel(); } catch (_) {}
+      }
+      inflightRenders.delete(pNum);
+      renderingPages.delete(pNum);
+    }
   }
 }
 
@@ -145,17 +195,18 @@ async function renderPage(pNum) {
   if (renderingPages.has(pNum)) return;
   const myGen = renderGeneration;
   renderingPages.set(pNum, myGen);
+  let committed = false;
 
   try {
     const page = await pdfDoc.getPage(pNum);
-    if (myGen !== renderGeneration) return;
+    if (myGen !== renderGeneration || renderingPages.get(pNum) !== myGen) return;
     const baseVp = page.getViewport({ scale: 1.0 });
     slot.dataset.baseWidth = String(baseVp.width);
     slot.dataset.baseHeight = String(baseVp.height);
 
     const effScale = computeFitWidthScale(baseVp.width);
     const viewport = page.getViewport({ scale: effScale });
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = computeTargetDpr();
 
     slot.style.width = `${Math.round(viewport.width)}px`;
     slot.style.height = `${Math.round(viewport.height)}px`;
@@ -164,7 +215,11 @@ async function renderPage(pNum) {
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
     canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 
     const textDiv = document.createElement("div");
     textDiv.className = "textLayer";
@@ -176,6 +231,7 @@ async function renderPage(pNum) {
       if (existing.textLayer) {
         try { existing.textLayer.cancel(); } catch (_) {}
       }
+      renderedPages.delete(pNum);
     }
 
     slot.replaceChildren(canvas, textDiv);
@@ -186,11 +242,13 @@ async function renderPage(pNum) {
       transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
     };
     const renderTask = page.render(renderContext);
-    const state = { scale: effScale, renderTask, textLayer: null };
-    renderedPages.set(pNum, state);
+    const activeState = { gen: myGen, scale: effScale, renderTask, textLayer: null };
+    inflightRenders.set(pNum, activeState);
 
     await renderTask.promise;
-    if (myGen !== renderGeneration) return;
+    if (myGen !== renderGeneration || inflightRenders.get(pNum) !== activeState) return;
+    committed = true;
+    renderedPages.set(pNum, activeState);
     markReady();
 
     if (typeof pdfjsLib.TextLayer === "function") {
@@ -200,7 +258,7 @@ async function renderPage(pNum) {
           container: textDiv,
           viewport,
         });
-        state.textLayer = textLayer;
+        activeState.textLayer = textLayer;
         await textLayer.render();
         if (myGen !== renderGeneration) return;
         const endDiv = document.createElement("div");
@@ -210,25 +268,58 @@ async function renderPage(pNum) {
     }
   } catch (err) {
     if (err && err.name === "RenderingCancelledException") {
+      if (!committed) {
+        for (const cvs of slot.querySelectorAll("canvas")) {
+          cvs.width = 0;
+          cvs.height = 0;
+        }
+        slot.replaceChildren();
+      }
       return;
     }
     if (!readyEmitted) {
       markError(err);
     }
   } finally {
+    const curActive = inflightRenders.get(pNum);
+    if (curActive && curActive.gen === myGen) {
+      inflightRenders.delete(pNum);
+    }
     if (renderingPages.get(pNum) === myGen) {
       renderingPages.delete(pNum);
     }
   }
 }
 
-function scheduleWindowRender(centerPage) {
-  const start = Math.max(1, centerPage - 2);
-  const end = Math.min(totalPages, centerPage + 2);
-  for (let p = start; p <= end; p++) {
-    renderPage(p);
+async function renderWindowPrioritized(centerPage) {
+  const myGen = renderGeneration;
+  cancelDistantInflightRenders(centerPage);
+  await renderPage(centerPage);
+  if (myGen !== renderGeneration || currentPage !== centerPage) return;
+  const neighbors = [centerPage + 1, centerPage - 1, centerPage + 2];
+  for (const p of neighbors) {
+    if (p >= 1 && p <= totalPages) {
+      if (myGen !== renderGeneration || Math.abs(currentPage - centerPage) > 1) return;
+      renderPage(p);
+    }
   }
   releaseFarPages(centerPage);
+}
+
+function scheduleWindowRender(centerPage, immediate = false) {
+  cancelDistantInflightRenders(centerPage);
+  if (windowScheduleTimer !== null) {
+    clearTimeout(windowScheduleTimer);
+    windowScheduleTimer = null;
+  }
+  if (immediate) {
+    renderWindowPrioritized(centerPage);
+    return;
+  }
+  windowScheduleTimer = setTimeout(() => {
+    windowScheduleTimer = null;
+    renderWindowPrioritized(currentPage);
+  }, 40);
 }
 
 function jumpToPage(targetPage) {
@@ -239,13 +330,21 @@ function jumpToPage(targetPage) {
   if (slot) {
     slot.scrollIntoView({ behavior: "auto", block: "start" });
   }
-  scheduleWindowRender(clamped);
+  scheduleWindowRender(clamped, true);
 }
 
 function applyZoom(newZoom) {
   userZoom = Math.max(0.5, Math.min(3.0, Math.round(newZoom * 100) / 100));
   updateNavControls();
   renderGeneration += 1;
+  for (const state of inflightRenders.values()) {
+    if (state.renderTask) {
+      try { state.renderTask.cancel(); } catch (_) {}
+    }
+    if (state.textLayer) {
+      try { state.textLayer.cancel(); } catch (_) {}
+    }
+  }
   for (const state of renderedPages.values()) {
     if (state.renderTask) {
       try { state.renderTask.cancel(); } catch (_) {}
@@ -262,9 +361,10 @@ function applyZoom(newZoom) {
     slot.style.height = `${Math.round(bh * scale)}px`;
     slot.style.setProperty("--scale-factor", String(scale));
   }
+  inflightRenders.clear();
   renderedPages.clear();
   renderingPages.clear();
-  scheduleWindowRender(currentPage);
+  scheduleWindowRender(currentPage, true);
 }
 
 async function runSearch(query) {
@@ -448,7 +548,9 @@ pagesEl.addEventListener("touchmove", (e) => {
       url: src.href,
       isEvalSupported: false,
       useSystemFonts: true,
-      rangeChunkSize: 65536,
+      disableAutoFetch: false,
+      disableStream: false,
+      rangeChunkSize: 524288,
     });
     pdfDoc = await loadingTask.promise;
     totalPages = pdfDoc.numPages || 0;
@@ -482,27 +584,22 @@ pagesEl.addEventListener("touchmove", (e) => {
     if (typeof IntersectionObserver === "function") {
       intersectionObserver = new IntersectionObserver(
         (entries) => {
-          let bestPage = null;
-          let bestRatio = 0;
           for (const entry of entries) {
             const pNum = Number(entry.target.dataset.pageNumber);
             if (entry.isIntersecting) {
               visiblePages.add(pNum);
-              if (entry.intersectionRatio >= bestRatio) {
-                bestRatio = entry.intersectionRatio;
-                bestPage = pNum;
-              }
             } else {
               visiblePages.delete(pNum);
             }
           }
-          if (bestPage !== null) {
+          const bestPage = pickBestVisiblePage();
+          if (bestPage !== null && bestPage !== currentPage) {
             currentPage = bestPage;
             updateNavControls();
-            scheduleWindowRender(bestPage);
+            scheduleWindowRender(bestPage, false);
           }
         },
-        { rootMargin: "600px 0px", threshold: [0.05, 0.35, 0.7] }
+        { rootMargin: "350px 0px", threshold: [0, 0.25, 0.6] }
       );
       for (const slot of pageSlots.values()) {
         intersectionObserver.observe(slot);
@@ -510,7 +607,7 @@ pagesEl.addEventListener("touchmove", (e) => {
     }
 
     await renderPage(1);
-    scheduleWindowRender(1);
+    scheduleWindowRender(1, true);
     try {
       const outline = await pdfDoc.getOutline();
       await buildOutline(outline);
