@@ -1386,19 +1386,7 @@ class ProfileView(ft.Container):
                         tight=True,
                         expand=True,
                     ),
-                    ft.Column(
-                        controls=[
-                            ft.Icon(
-                                ft.Icons.CHEVRON_RIGHT_ROUNDED,
-                                size=20,
-                                color=C.TEXT_SECONDARY,
-                            ),
-                            self._status_chip(row.status),
-                        ],
-                        spacing=4,
-                        tight=True,
-                        horizontal_alignment=ft.CrossAxisAlignment.END,
-                    ),
+                    self._status_chip(row.status),
                 ],
                 spacing=8,
                 tight=True,
