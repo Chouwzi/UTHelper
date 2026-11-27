@@ -1,4 +1,4 @@
-"""Refined About and Credits detail view for SettingsView."""
+"""Minimal, understated About and Credits detail view for SettingsView."""
 
 from __future__ import annotations
 
@@ -12,19 +12,10 @@ from gui.core.theme import C
 FOUNDER_GITHUB_URL = "https://github.com/Chouwzi"
 PROJECT_GITHUB_URL = "https://github.com/Chouwzi/UTHelper"
 
-COMMUNITY_CONTRIBUTORS: tuple[tuple[str, str], ...] = (
-    (
-        "Nguyễn Trương Bảo (@Baong123)",
-        "Đóng góp nhánh thử nghiệm nhắc lịch học và hồ sơ học phí",
-    ),
-    (
-        "@nguyen2006-dev",
-        "Đóng góp cấu hình chuẩn bị phân phối trên iOS",
-    ),
-    (
-        "ThienNguyen-Dev (@ThienNguyen0210)",
-        "Đóng góp nhánh thử nghiệm lộ trình học tập",
-    ),
+COMMUNITY_CONTRIBUTORS: tuple[str, ...] = (
+    "Nguyễn Trương Bảo (@Baong123)",
+    "@nguyen2006-dev",
+    "ThienNguyen-Dev (@ThienNguyen0210)",
 )
 
 
@@ -114,7 +105,7 @@ def refresh_credits_section_colors(view) -> None:
 
 
 def build_credits_section(view) -> ft.Control:
-    """Build the subtle, Apple-HIG inspired About detail view."""
+    """Build the clean, minimal About detail view without boastful descriptions."""
     profile = _get_distribution_profile(view)
 
     primary_texts: list[ft.Text] = []
@@ -142,7 +133,7 @@ def build_credits_section(view) -> ft.Control:
     )
     app_name_text = ft.Text(
         "UTHelper",
-        size=16,
+        size=15.5,
         weight=ft.FontWeight.W_700,
         color=C.TEXT_PRIMARY,
     )
@@ -159,7 +150,7 @@ def build_credits_section(view) -> ft.Control:
         content=version_badge_text,
         bgcolor=ft.Colors.with_opacity(0.12, C.ACCENT),
         border_radius=999,
-        padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+        padding=ft.Padding.symmetric(horizontal=8, vertical=2),
     )
 
     identity_header_controls: list[ft.Control] = [app_name_text, version_badge]
@@ -177,52 +168,46 @@ def build_credits_section(view) -> ft.Control:
             bgcolor=C.BG,
             border=ft.Border.all(1, C.BORDER),
             border_radius=999,
-            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
         )
         identity_header_controls.append(channel_badge)
 
-    app_description_text = ft.Text(
-        "Ứng dụng độc lập hỗ trợ sinh viên UTH theo dõi bài tập, lịch học, tài liệu môn học và kết quả học tập.",
+    app_tagline_text = ft.Text(
+        "Trợ lý học tập dành cho sinh viên UTH",
         size=12,
         color=C.TEXT_SECONDARY,
     )
-    secondary_texts.append(app_description_text)
+    secondary_texts.append(app_tagline_text)
 
     identity_card = ft.Container(
-        content=ft.Column(
+        content=ft.Row(
             controls=[
-                ft.Row(
+                app_icon_box,
+                ft.Column(
                     controls=[
-                        app_icon_box,
-                        ft.Column(
-                            controls=[
-                                ft.Row(
-                                    controls=identity_header_controls,
-                                    spacing=8,
-                                    run_spacing=4,
-                                    wrap=True,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
+                        ft.Row(
+                            controls=identity_header_controls,
+                            spacing=8,
+                            run_spacing=4,
+                            wrap=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
+                        app_tagline_text,
                     ],
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    spacing=2,
+                    expand=True,
                 ),
-                app_description_text,
             ],
-            spacing=10,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         bgcolor=C.SURFACE,
         border=ft.Border.all(1, C.BORDER),
         border_radius=14,
-        padding=16,
+        padding=ft.Padding.symmetric(horizontal=16, vertical=13),
     )
 
-    # 2. Prominent Primary Card - Founder and Lead Architect
+    # 2. Primary Card - Founder (clean, understated, zero resume-like copy)
     founder_section_label = ft.Text(
         "Tác giả chính",
         size=11.5,
@@ -233,22 +218,22 @@ def build_credits_section(view) -> ft.Control:
 
     founder_icon = ft.Icon(
         ft.Icons.WORKSPACE_PREMIUM_ROUNDED,
-        size=22,
+        size=19,
         color=C.ACCENT,
     )
     accent_icons.append(founder_icon)
     founder_avatar = ft.Container(
         content=founder_icon,
-        width=44,
-        height=44,
-        border_radius=12,
+        width=38,
+        height=38,
+        border_radius=10,
         bgcolor=ft.Colors.with_opacity(0.12, C.ACCENT),
         alignment=ft.Alignment(0, 0),
     )
 
     founder_name = ft.Text(
         "Nguyễn Trần Đình Chương",
-        size=14.5,
+        size=13.5,
         weight=ft.FontWeight.W_700,
         color=C.TEXT_PRIMARY,
     )
@@ -256,7 +241,7 @@ def build_credits_section(view) -> ft.Control:
 
     founder_handle = ft.Text(
         "@Chouwzi",
-        size=11.5,
+        size=11,
         weight=ft.FontWeight.W_600,
         color=C.ACCENT,
     )
@@ -268,32 +253,31 @@ def build_credits_section(view) -> ft.Control:
         padding=ft.Padding.symmetric(horizontal=7, vertical=2),
     )
 
-    founder_role = ft.Text(
-        "Khởi xướng dự án - Kiến trúc hệ thống và phát triển chính",
+    founder_github_icon = ft.Icon(
+        ft.Icons.OPEN_IN_NEW_ROUNDED,
+        size=14,
+        color=C.ACCENT,
+    )
+    accent_icons.append(founder_github_icon)
+    founder_github_label = ft.Text(
+        "GitHub",
         size=12,
         weight=ft.FontWeight.W_600,
-        color=C.TEXT_PRIMARY,
+        color=C.ACCENT,
     )
-    primary_texts.append(founder_role)
-
-    founder_scope = ft.Text(
-        "Xây dựng và phát triển xuyên suốt nền tảng lõi, giao diện đa thiết bị (Windows, Android, iOS), trình đọc tài liệu, hệ thống đồng bộ, bảo mật và đóng gói phát hành từ tháng 03/2026.",
-        size=11.5,
-        color=C.TEXT_SECONDARY,
-    )
-    secondary_texts.append(founder_scope)
-
-    founder_divider = ft.Divider(height=1, color=C.BORDER)
-    dividers.append(founder_divider)
-
+    accent_texts.append(founder_github_label)
     founder_github_btn = ft.TextButton(
-        "Trang GitHub tác giả (@Chouwzi)",
-        icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+        content=ft.Row(
+            controls=[founder_github_icon, founder_github_label],
+            spacing=4,
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
         on_click=lambda _: _open_external_link(view, FOUNDER_GITHUB_URL),
         style=ft.ButtonStyle(
             color=C.ACCENT,
             overlay_color=ft.Colors.with_opacity(0.08, C.ACCENT),
-            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=4),
         ),
     )
     accent_buttons.append(founder_github_btn)
@@ -305,65 +289,41 @@ def build_credits_section(view) -> ft.Control:
                 ft.Row(
                     controls=[
                         founder_avatar,
-                        ft.Column(
-                            controls=[
-                                ft.Row(
-                                    controls=[founder_name, founder_handle_badge],
-                                    spacing=8,
-                                    run_spacing=4,
-                                    wrap=True,
-                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                                ),
-                                founder_role,
-                                founder_scope,
-                            ],
-                            spacing=4,
+                        ft.Row(
+                            controls=[founder_name, founder_handle_badge],
+                            spacing=8,
+                            run_spacing=4,
+                            wrap=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             expand=True,
                         ),
+                        founder_github_btn,
                     ],
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                ),
-                founder_divider,
-                ft.Row(
-                    controls=[founder_github_btn],
-                    alignment=ft.MainAxisAlignment.START,
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ],
-            spacing=10,
+            spacing=8,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
         bgcolor=C.SURFACE,
         border=ft.Border.all(1.2, ft.Colors.with_opacity(0.32, C.ACCENT)),
         border_radius=14,
-        padding=16,
+        padding=ft.Padding.symmetric(horizontal=16, vertical=13),
     )
 
-    # 3. Subordinate Secondary Card - Community Feature Contributors
+    # 3. Secondary Card - Community Contributors (names only, clean single-line rows)
     contributors_title = ft.Text(
         "Đóng góp cộng đồng",
-        size=12.5,
-        weight=ft.FontWeight.W_600,
-        color=C.TEXT_PRIMARY,
-    )
-    primary_texts.append(contributors_title)
-
-    contributors_caption = ft.Text(
-        "Đóng góp tính năng thử nghiệm",
-        size=11.5,
+        size=12,
         weight=ft.FontWeight.W_600,
         color=C.TEXT_SECONDARY,
     )
-    secondary_texts.append(contributors_caption)
+    secondary_texts.append(contributors_title)
 
-    contributor_controls: list[ft.Control] = [
-        ft.Column(
-            controls=[contributors_title, contributors_caption],
-            spacing=2,
-        )
-    ]
+    contributor_controls: list[ft.Control] = [contributors_title]
 
-    for index, (display_name, scope_note) in enumerate(COMMUNITY_CONTRIBUTORS):
+    for index, display_name in enumerate(COMMUNITY_CONTRIBUTORS):
         if index > 0:
             row_divider = ft.Divider(height=1, color=C.BORDER)
             dividers.append(row_divider)
@@ -371,16 +331,16 @@ def build_credits_section(view) -> ft.Control:
 
         person_icon = ft.Icon(
             ft.Icons.PERSON_OUTLINE_ROUNDED,
-            size=16,
+            size=15,
             color=C.TEXT_SECONDARY,
         )
         secondary_icons.append(person_icon)
 
         person_avatar = ft.Container(
             content=person_icon,
-            width=30,
-            height=30,
-            border_radius=15,
+            width=28,
+            height=28,
+            border_radius=14,
             bgcolor=C.BG,
             border=ft.Border.all(1, C.BORDER),
             alignment=ft.Alignment(0, 0),
@@ -390,48 +350,35 @@ def build_credits_section(view) -> ft.Control:
         name_text = ft.Text(
             display_name,
             size=12.5,
-            weight=ft.FontWeight.W_600,
+            weight=ft.FontWeight.W_500,
             color=C.TEXT_PRIMARY,
+            expand=True,
         )
         primary_texts.append(name_text)
 
-        note_text = ft.Text(
-            scope_note,
-            size=11.5,
-            color=C.TEXT_SECONDARY,
-        )
-        secondary_texts.append(note_text)
-
         contributor_controls.append(
             ft.Row(
-                controls=[
-                    person_avatar,
-                    ft.Column(
-                        controls=[name_text, note_text],
-                        spacing=2,
-                        expand=True,
-                    ),
-                ],
+                controls=[person_avatar, name_text],
                 spacing=10,
-                vertical_alignment=ft.CrossAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
 
     contributors_card = ft.Container(
         content=ft.Column(
             controls=contributor_controls,
-            spacing=10,
+            spacing=8,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
         bgcolor=C.SURFACE,
         border=ft.Border.all(1, C.BORDER),
         border_radius=14,
-        padding=ft.Padding.symmetric(horizontal=14, vertical=12),
+        padding=ft.Padding.symmetric(horizontal=16, vertical=13),
     )
 
-    # 4. Quiet Project and License Footer
+    # 4. Quiet Project Link and Legal Non-Affiliation Note
     project_github_btn = ft.TextButton(
-        "Mã nguồn dự án trên GitHub",
+        "Mã nguồn trên GitHub",
         icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
         on_click=lambda _: _open_external_link(view, PROJECT_GITHUB_URL),
         style=ft.ButtonStyle(
@@ -443,7 +390,7 @@ def build_credits_section(view) -> ft.Control:
     accent_buttons.append(project_github_btn)
 
     disclaimer_text = ft.Text(
-        "Dự án độc lập vì sinh viên, không đại diện cho cổng thông tin chính thức của Trường ĐH Giao thông vận tải TP.HCM.",
+        "Ứng dụng độc lập, không trực thuộc Trường ĐH Giao thông vận tải TP.HCM.",
         size=11,
         color=C.TEXT_SECONDARY,
         text_align=ft.TextAlign.CENTER,
@@ -456,7 +403,7 @@ def build_credits_section(view) -> ft.Control:
                 project_github_btn,
                 disclaimer_text,
             ],
-            spacing=4,
+            spacing=3,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         padding=ft.Padding.only(top=2, bottom=10, left=8, right=8),

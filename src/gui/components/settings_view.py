@@ -93,7 +93,7 @@ class SettingsView(ft.Container):
         self.visible  = False
         self.expand   = True
         self.bgcolor  = C.BG
-        self._selected_theme = getattr(settings, 'THEME', 'midnight_blue')
+        self._selected_theme = getattr(settings, 'THEME', 'steel_light')
         self._original_theme = self._selected_theme  # For revert on discard
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
         self._hint_containers = []
@@ -1543,7 +1543,7 @@ class SettingsView(ft.Container):
 
     def _apply_theme_colors(self, theme_key: str):
         """Fill color text fields from preset values."""
-        preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["midnight_blue"])
+        preset = THEME_PRESETS.get(theme_key, THEME_PRESETS["steel_light"])
         self._c_tb_critical.value = preset["critical"]
         self._c_tb_warning.value = preset["warning"]
         self._c_tb_safe.value = preset["safe"]
@@ -1623,13 +1623,13 @@ class SettingsView(ft.Container):
 
 
     async def _handle_reset_defaults(self, e):
-        # Reset theme to default
-        self._selected_theme = "midnight_blue"
-        self._apply_theme_colors("midnight_blue")
+        # Reset theme to default light preset
+        self._selected_theme = "steel_light"
+        self._apply_theme_colors("steel_light")
         # Apply theme live preview
-        apply_theme("midnight_blue")
+        apply_theme("steel_light")
         from gui.core.theme import set_page_theme
-        set_page_theme(self._page, theme_name="midnight_blue")
+        set_page_theme(self._page, theme_name="steel_light")
         self.bgcolor = C.BG
         self._refresh_section_colors()
         if self._on_theme_preview:

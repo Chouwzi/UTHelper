@@ -28,16 +28,16 @@ class ClassScheduleLeadHoursError(SettingsFormValidationError):
     """
 
 
-DEFAULT_THEME = "midnight_blue"
+DEFAULT_THEME = "steel_light"
 DEFAULT_COLORS = {
-    "color_critical": "#EF4444",
-    "color_warning": "#F59E0B",
-    "color_safe": "#10B981",
+    "color_critical": "#DC2626",
+    "color_warning": "#9A6700",
+    "color_safe": "#147D3F",
     "color_quiz": "#7C3AED",
     "color_assignment": "#2563EB",
-    "color_attendance": "#D97706",
-    "color_open": "#0891B2",
-    "color_other": "#6B7280",
+    "color_attendance": "#8A6100",
+    "color_open": "#087F73",
+    "color_other": "#57534E",
 }
 DEFAULT_NOTIFY_TYPES = ("assignment", "attendance", "quiz")
 DEFAULT_MILESTONES = (4320, 1440, 180, 60, 30, 5)

@@ -8,10 +8,11 @@
 from dataclasses import fields, is_dataclass, replace
 from typing import Iterable
 
-from gui.core.theme_presets import THEME_PRESETS, THEME_ORDER
+from gui.core.theme_presets import DEFAULT_THEME, THEME_PRESETS, THEME_ORDER
 
 __all__ = [
     "C",
+    "DEFAULT_THEME",
     "THEME_PRESETS",
     "THEME_ORDER",
     "apply_theme",
@@ -29,24 +30,24 @@ __all__ = [
 # apply_theme() sẽ cập nhật các giá trị ở mức class-level → có hiệu lực toàn cục ngay lập tức.
 
 class C:
-    BG             = "#0B0F1A"
-    SURFACE        = "#141B2D"
-    SURFACE_HOVER  = "#1A2340"
-    ACCENT         = "#3B82F6"
-    CRITICAL       = "#EF4444"
-    WARNING        = "#F59E0B"
-    SAFE           = "#10B981"
-    TEXT_PRIMARY   = "#F1F5F9"
-    TEXT_SECONDARY = "#94A3B8"
-    BORDER         = "#1E293B"
-    BORDER_STRONG  = "#94A3B8"
-    SURFACE_ELEVATED = "#1A2340"
+    BG             = "#F8FAFC"
+    SURFACE        = "#FFFFFF"
+    SURFACE_HOVER  = "#F1F5F9"
+    ACCENT         = "#1D4ED8"
+    CRITICAL       = "#DC2626"
+    WARNING        = "#9A6700"
+    SAFE           = "#147D3F"
+    TEXT_PRIMARY   = "#0F172A"
+    TEXT_SECONDARY = "#475569"
+    BORDER         = "#E2E8F0"
+    BORDER_STRONG  = "#475569"
+    SURFACE_ELEVATED = "#F1F5F9"
     ON_ACCENT      = "#FFFFFF"
     ON_CRITICAL    = "#FFFFFF"
-    ON_WARNING     = "#0B0F1A"
-    ON_SAFE        = "#0B0F1A"
-    UPDATE         = "#F59E0B"
-    ON_UPDATE      = "#0B0F1A"
+    ON_WARNING     = "#FFFFFF"
+    ON_SAFE        = "#FFFFFF"
+    UPDATE         = "#9A6700"
+    ON_UPDATE      = "#FFFFFF"
     SCRIM          = "#99000000"
     SHADOW         = "#66000000"
 
@@ -291,10 +292,10 @@ _DEADLINE_TYPES = {"deadline", "quiz", "assignment"}
 _TYPE_COLORS = {
     "quiz":       "#7C3AED",   # tím
     "assignment": "#2563EB",   # xanh dương
-    "attendance": "#D97706",   # cam
+    "attendance": "#8A6100",   # cam sẫm đạt chuẩn tương phản trên nền sáng
     "deadline":   "#2563EB",   # giống màu bài tập
-    "open":       "#0891B2",   # xanh lơ
-    "other":      "#6B7280",   # xám
+    "open":       "#087F73",   # xanh ngọc
+    "other":      "#57534E",   # xám
 }
 
 
@@ -304,10 +305,10 @@ def apply_theme(theme_name: str) -> None:
     """Áp dụng một theme preset vào các hằng số giao diện toàn cục C và từ điển _TYPE_COLORS.
 
     Args:
-        theme_name: Khóa (key) trong THEME_PRESETS (ví dụ "midnight_blue").
-                    Nếu khóa không hợp lệ, sẽ tự động rollback về "midnight_blue".
+        theme_name: Khóa (key) trong THEME_PRESETS (ví dụ "steel_light").
+                    Nếu khóa không hợp lệ, sẽ tự động rollback về DEFAULT_THEME ("steel_light").
     """
-    preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
+    preset = THEME_PRESETS.get(theme_name, THEME_PRESETS[DEFAULT_THEME])
 
     # Các màu UI cơ sở
     C.BG             = preset["bg"]
@@ -348,12 +349,12 @@ def load_theme_from_settings():
         from config import settings
 
         # 1. Áp dụng preset trước (thiết lập toàn bộ màu sắc nền tảng)
-        theme_name = getattr(settings, 'THEME', 'midnight_blue')
+        theme_name = getattr(settings, 'THEME', DEFAULT_THEME)
         apply_theme(theme_name)
 
         # 2. Ghi đè bằng các màu sắc tùy chỉnh riêng lẻ nếu người dùng đã chỉnh sửa
         #    (các giá trị settings.COLOR_* khác biệt so với mặc định của preset)
-        preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
+        preset = THEME_PRESETS.get(theme_name, THEME_PRESETS[DEFAULT_THEME])
 
         custom_map = {
             'COLOR_CRITICAL':   ('critical',   lambda v: setattr(C, 'CRITICAL', v)),
@@ -402,8 +403,8 @@ def set_page_theme(page, theme_name: str | None = None) -> None:
     # A live preview has not been persisted to settings yet. Callers can pass
     # the draft theme so Flet's light/dark mode stays in sync with the colors
     # already applied to the semantic palette.
-    theme_name = theme_name or getattr(settings, 'THEME', 'midnight_blue')
-    preset = THEME_PRESETS.get(theme_name, THEME_PRESETS["midnight_blue"])
+    theme_name = theme_name or getattr(settings, 'THEME', DEFAULT_THEME)
+    preset = THEME_PRESETS.get(theme_name, THEME_PRESETS[DEFAULT_THEME])
     is_light = preset.get("mode", "dark") == "light"
 
     theme_obj = ft.Theme(
