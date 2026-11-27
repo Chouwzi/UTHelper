@@ -1789,13 +1789,6 @@ class CalendarView(ft.Container):
             self._leave_schedule_mode()
 
         if mode == "month":
-            # Update toggle styling
-            self._mode_month_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
-            self._mode_month_icon.color = C.TEXT_PRIMARY
-            self._mode_month_text.color = C.TEXT_PRIMARY
-            self._mode_week_btn.bgcolor = "transparent"
-            self._mode_week_icon.color = C.TEXT_SECONDARY
-            self._mode_week_text.color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = True
             self._week_strip.visible = False
@@ -1805,13 +1798,6 @@ class CalendarView(ft.Container):
                 self._month = self._selected_date.month
                 self._selected_day = self._selected_date.day
         else:
-            # Update toggle styling
-            self._mode_week_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
-            self._mode_week_icon.color = C.TEXT_PRIMARY
-            self._mode_week_text.color = C.TEXT_PRIMARY
-            self._mode_month_btn.bgcolor = "transparent"
-            self._mode_month_icon.color = C.TEXT_SECONDARY
-            self._mode_month_text.color = C.TEXT_SECONDARY
             # Show/hide
             self._grid.visible = False
             self._week_strip.visible = True
@@ -1823,12 +1809,15 @@ class CalendarView(ft.Container):
                     self._selected_date = sel
                 except ValueError:
                     pass
+        # Apply all three tab states before rendering. The render methods may
+        # call update_page immediately; styling after that update leaves the
+        # schedule tab highlighted on screen when switching back to Week.
+        self._style_mode_buttons()
         self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
-        self._style_mode_buttons()
 
     # Schedule (Portal timetable) mode
     def _style_mode_buttons(self) -> None:

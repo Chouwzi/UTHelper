@@ -2706,6 +2706,14 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `uv run ruff check src tests`: **All checks passed!**.
   - `pytest tests -q --tb=short`: **3443 passed, 26 skipped, 0 failed** (verified in live Flet Web Desktop + Mobile browser renders).
 
+## Calendar Schedule-to-Week Highlight Fix (2026-11-27)
+
+- **Scope**: `src/gui/components/calendar_view.py`.
+- Apply the three mode-button styles before rendering month/week content. The
+  render path can update the page immediately; styling afterward left the
+  schedule tab's active background visible when switching back to Week.
+- **Verification**: not run in this change.
+
 
 
 
