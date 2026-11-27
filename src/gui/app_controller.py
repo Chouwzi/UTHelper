@@ -229,7 +229,7 @@ class _LoginDialogClientProxy:
         ok = self._client.login(*args, **kwargs)
         if not ok:
             notice = getattr(self._client, "last_maintenance_notice", None)
-            if notice is not None and callable(self._on_maintenance):
+            if isinstance(notice, MaintenanceNotice) and callable(self._on_maintenance):
                 self._on_maintenance(notice)
         return ok
 
@@ -242,7 +242,9 @@ class _LoginDialogOrchestratorProxy:
 
     def __init__(self, orchestrator, on_maintenance) -> None:
         self._orchestrator = orchestrator
-        self.client = _LoginDialogClientProxy(orchestrator.client, on_maintenance)
+        client_obj = getattr(orchestrator, "client", None)
+        if client_obj is not None:
+            self.client = _LoginDialogClientProxy(client_obj, on_maintenance)
 
     @property
     def is_logged_in(self) -> bool:
@@ -265,9 +267,9 @@ class _MaintenanceAwareSubmissionWorkflow(SubmissionWorkflow):
 
     def _notify_if_maintenance(self, exc: BaseException | None = None) -> None:
         notice = getattr(exc, "notice", None) if exc is not None else None
-        if notice is None:
+        if not isinstance(notice, MaintenanceNotice):
             notice = getattr(self.client, "last_maintenance_notice", None)
-        if notice is not None and callable(self._on_maintenance):
+        if isinstance(notice, MaintenanceNotice) and callable(self._on_maintenance):
             self._on_maintenance(notice)
 
     def _mutate_files(self, *args, **kwargs):
@@ -1058,11 +1060,16 @@ class AppController:
             await self._complete_login_success()
 
         try:
-            login_orch = _LoginDialogOrchestratorProxy(
-                self.orchestrator,
-                lambda notice: self._notify_maintenance_from_worker(
-                    notice, user_initiated=True
-                ),
+            orch = getattr(self, "orchestrator", None)
+            login_orch = (
+                _LoginDialogOrchestratorProxy(
+                    orch,
+                    lambda notice: self._notify_maintenance_from_worker(
+                        notice, user_initiated=True
+                    ),
+                )
+                if getattr(orch, "client", None) is not None
+                else orch
             )
             await show_login_dialog(self.page, login_orch, _on_login_success)
         except Exception:
@@ -1096,11 +1103,16 @@ class AppController:
                     await result
 
         try:
-            login_orch = _LoginDialogOrchestratorProxy(
-                self.orchestrator,
-                lambda notice: self._notify_maintenance_from_worker(
-                    notice, user_initiated=True
-                ),
+            orch = getattr(self, "orchestrator", None)
+            login_orch = (
+                _LoginDialogOrchestratorProxy(
+                    orch,
+                    lambda notice: self._notify_maintenance_from_worker(
+                        notice, user_initiated=True
+                    ),
+                )
+                if getattr(orch, "client", None) is not None
+                else orch
             )
             await show_login_dialog(
                 self.page,
@@ -2903,9 +2915,10 @@ class AppController:
             )
         for obj in candidates:
             notice = getattr(obj, "last_maintenance_notice", None)
-            if notice is not None:
+            if isinstance(notice, MaintenanceNotice):
                 return notice
-        return getattr(self, "_active_maintenance_notice", None)
+        active = getattr(self, "_active_maintenance_notice", None)
+        return active if isinstance(active, MaintenanceNotice) else None
 
     def _notify_maintenance_from_worker(
         self, notice: MaintenanceNotice, *, user_initiated: bool = False
@@ -6567,7 +6580,7 @@ class AppController:
                 except Exception as exc:
                     logger.warning("Credit progress load failed: %s", exc)
                 svc_maint = getattr(service, "last_maintenance_notice", None)
-                if svc_maint is not None:
+                if isinstance(svc_maint, MaintenanceNotice):
                     self._handle_uth_maintenance(
                         svc_maint, user_initiated=force_refresh
                     )

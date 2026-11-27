@@ -13,7 +13,7 @@ from core.activity_status import (
 )
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.grade_monitor import GradeMonitor
-from core.maintenance import UthMaintenanceError
+from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.moodle_service import MoodleService
 from config import settings
 from models import Assignment
@@ -389,6 +389,11 @@ class DataOrchestrator:
             logger.warning("Smart poll failed, falling back to full fetch: %s", e)
             return None
 
+    @staticmethod
+    def _client_maintenance_notice(client_obj: Any) -> Optional[MaintenanceNotice]:
+        notice = getattr(client_obj, "last_maintenance_notice", None)
+        return notice if isinstance(notice, MaintenanceNotice) else None
+
     def login(self) -> bool:
         """Đăng nhập bằng WS token (stateless, không kick browser)."""
         self._sync_account_scope()
@@ -406,7 +411,7 @@ class DataOrchestrator:
         if self.is_logged_in:
             logger.info("Đăng nhập WS token thành công.")
             return True
-        maint_notice = getattr(self.client, "last_maintenance_notice", None)
+        maint_notice = self._client_maintenance_notice(self.client)
         if maint_notice is not None:
             raise UthMaintenanceError(maint_notice)
         return self.is_logged_in
@@ -433,7 +438,7 @@ class DataOrchestrator:
             start_gen = self._course_grades_generation
         courses = fetch_current_courses_with_grades(self)
         if not courses:
-            maint_notice = getattr(self.client, "last_maintenance_notice", None)
+            maint_notice = self._client_maintenance_notice(self.client)
             if maint_notice is not None:
                 raise UthMaintenanceError(maint_notice)
         with self._course_grades_lock:
@@ -512,7 +517,7 @@ class DataOrchestrator:
 
 
     def _thnn_login_was_deferred(self) -> bool:
-        if getattr(self.thnn_client, "last_maintenance_notice", None) is not None:
+        if self._client_maintenance_notice(self.thnn_client) is not None:
             return True
         login_err = str(
             getattr(self.thnn_client, "last_login_error", "")
@@ -744,7 +749,7 @@ class DataOrchestrator:
             # Tối ưu PERF: Bước 1 - Lấy userid (cần thiết cho danh sách môn học)
             userid = self._get_userid()
             if userid is None:
-                maint_notice = getattr(self.client, "last_maintenance_notice", None)
+                maint_notice = self._client_maintenance_notice(self.client)
                 if maint_notice is not None:
                     raise UthMaintenanceError(maint_notice)
                 logger.warning("Không xác định được Moodle user id; snapshot không đầy đủ.")
@@ -798,7 +803,7 @@ class DataOrchestrator:
             )
 
             if not isinstance(calendar_result, dict) or not isinstance(courses_result, list):
-                maint_notice = getattr(self.client, "last_maintenance_notice", None)
+                maint_notice = self._client_maintenance_notice(self.client)
                 if maint_notice is not None:
                     raise UthMaintenanceError(maint_notice)
                 logger.warning("Moodle trả snapshot calendar/course không đầy đủ.")
@@ -892,7 +897,7 @@ class DataOrchestrator:
             except UthMaintenanceError:
                 raise
             except Exception as e:
-                maint_notice = getattr(self.client, "last_maintenance_notice", None)
+                maint_notice = self._client_maintenance_notice(self.client)
                 if maint_notice is not None:
                     raise UthMaintenanceError(maint_notice) from e
                 logger.warning("Merge activities failed; snapshot is partial: %s", e)
@@ -909,7 +914,7 @@ class DataOrchestrator:
         except UthMaintenanceError:
             raise
         except Exception as e:
-            maint_notice = getattr(self.client, "last_maintenance_notice", None)
+            maint_notice = self._client_maintenance_notice(self.client)
             if maint_notice is not None:
                 raise UthMaintenanceError(maint_notice) from e
             logger.warning("WS API fetch thất bại: %s", e)
