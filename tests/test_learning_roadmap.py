@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 if "config" not in sys.modules:
     _cfg = types.ModuleType("config")
     _cfg.settings = types.SimpleNamespace(
-        PORTAL_API_BASE="https://portal.test/api/v1",
+        PORTAL_API_BASE="https://portal.ut.edu.vn/api/v1",
         UTH_USERNAME="", UTH_PASSWORD="", MOODLE_USERNAME="", MOODLE_PASSWORD="",
     )
     _cfg.get_data_dir = lambda: Path(tempfile.gettempdir())
@@ -496,7 +496,7 @@ class FakePortal:
 
 class PortalClientRoadmapTests(unittest.TestCase):
     def client(self, portal):
-        return PortalClient("https://portal.test/api/v1", opener=portal)
+        return PortalClient("https://portal.ut.edu.vn/api/v1", opener=portal)
 
     def test_bundle_collects_everything_and_picks_latest_semester(self):
         portal = FakePortal()
@@ -535,7 +535,9 @@ class PortalClientRoadmapTests(unittest.TestCase):
         def opener(request, timeout=None):
             return _Resp({"success": False, "status": 401})
         with self.assertRaises(PortalAuthenticationError):
-            PortalClient("https://portal.test/api/v1", opener=opener).fetch_roadmap_bundle("u", "bad")
+            PortalClient(
+                "https://portal.ut.edu.vn/api/v1", opener=opener
+            ).fetch_roadmap_bundle("u", "bad")
 
     def test_missing_credentials_raise_before_any_request(self):
         portal = FakePortal()
