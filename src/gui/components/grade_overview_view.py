@@ -76,6 +76,9 @@ class GradeOverviewView(ft.Container):
         self._next_dialog_token: int = 0
         self._scroll_restore_token: int = 0
         self._is_restoring_scroll: bool = False
+        self._in_scroll_to_call: bool = False
+        self._restore_in_post_cooldown: bool = False
+        self._pending_post_restore_pin: bool = False
         self._dialog_closers: dict[int, Callable[[], None]] = {}
         self._active_dialog_token: Optional[int] = None
         self._active_dialog_closer: Optional[Callable[[], None]] = None
@@ -212,7 +215,7 @@ class GradeOverviewView(ft.Container):
             ft.Icons.CLOUD_OFF_ROUNDED, size=15, color=C.WARNING
         )
         self._stale_text = ft.Text(
-            "", size=11.5, color=C.WARNING, expand=True
+            "", size=11.5, color=C.TEXT_PRIMARY, expand=True
         )
         self._stale_banner = ft.Container(
             content=ft.Row(
@@ -220,7 +223,7 @@ class GradeOverviewView(ft.Container):
                 spacing=6,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            bgcolor=C.SURFACE,
+            bgcolor=C.SURFACE_ELEVATED,
             border=ft.Border.all(1, C.WARNING),
             border_radius=8,
             padding=ft.Padding.symmetric(horizontal=10, vertical=7),
@@ -359,6 +362,49 @@ class GradeOverviewView(ft.Container):
         except Exception:
             pass
 
+    def reset(self) -> None:
+        """Clear all account-specific transcript, radar, planner, and modal state."""
+        open_closers = list(reversed(list(self._dialog_closers.values())))
+        self._dialog_closers.clear()
+        self._open_dialog_tokens.clear()
+        self._active_dialog_token = None
+        self._active_dialog_closer = None
+        self._scroll_restore_token += 1
+        self._is_restoring_scroll = False
+        self._in_scroll_to_call = False
+        self._restore_in_post_cooldown = False
+        self._pending_post_restore_pin = False
+        self._saved_scroll_offset = 0.0
+        for closer in open_closers:
+            try:
+                closer()
+            except Exception:
+                logger.debug("GradeOverview dialog close on reset failed", exc_info=True)
+        self._planner_dialog = None
+        self._gpa_target_card = GpaTargetCard()
+        self._graduation_card = GraduationGpaCard()
+        self._semesters = []
+        self._profiles = []
+        self._progress = None
+        self._selected_semester_idx = 0
+        self._stale_text.value = ""
+        self._stale_banner.visible = False
+        self._loading_row.visible = False
+        self._error_state.visible = False
+        self._empty_state.visible = False
+        self._radar_card.visible = False
+        self._grade_list_view.visible = False
+        self._radar_card.set_profiles([], selected_index=0)
+        self._grade_list_view.update_courses([])
+        if self._defer_self_update:
+            return
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    clear = reset
+
     def update_academic_data(
         self,
         semesters: list[SemesterGradeData],
@@ -375,7 +421,11 @@ class GradeOverviewView(ft.Container):
         self._saved_scroll_offset = 0.0
         self._open_dialog_tokens.clear()
         self._dialog_closers.clear()
+        self._scroll_restore_token += 1
         self._is_restoring_scroll = False
+        self._in_scroll_to_call = False
+        self._restore_in_post_cooldown = False
+        self._pending_post_restore_pin = False
         self._active_dialog_token = None
         self._active_dialog_closer = None
 
@@ -676,7 +726,9 @@ class GradeOverviewView(ft.Container):
             self._schedule_scroll_restore(pinned)
 
     def _on_content_scroll(self, event: Any) -> None:
-        if self._is_restoring_scroll:
+        if self._in_scroll_to_call:
+            return
+        if self._is_restoring_scroll and not self._restore_in_post_cooldown:
             return
         raw_pixels = getattr(event, "pixels", None)
         if raw_pixels is None:
@@ -689,6 +741,11 @@ class GradeOverviewView(ft.Container):
         if not math.isfinite(pixels) or not math.isfinite(minimum):
             return
         current_pixels = max(0.0, pixels - minimum)
+        if self._is_restoring_scroll:
+            pinned_cooldown = self._pinned_modal_offset()
+            if pinned_cooldown is not None and abs(current_pixels - pinned_cooldown) > 2.0:
+                self._pending_post_restore_pin = True
+            return
         pinned = self._pinned_modal_offset()
         if pinned is not None:
             if abs(current_pixels - pinned) > 2.0:
@@ -754,23 +811,48 @@ class GradeOverviewView(ft.Container):
         self._scroll_restore_token += 1
         restore_token = self._scroll_restore_token
         self._is_restoring_scroll = True
+        self._restore_in_post_cooldown = False
+        self._pending_post_restore_pin = False
         self._saved_scroll_offset = target_offset
+
+        async def _invoke_scroll(offset_val: float) -> None:
+            scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
+            if not callable(scroll_fn):
+                return
+            self._in_scroll_to_call = True
+            try:
+                res = scroll_fn(offset=offset_val, duration=0)
+                if inspect.isawaitable(res):
+                    await res
+            finally:
+                self._in_scroll_to_call = False
 
         async def _restore() -> None:
             try:
                 await asyncio.sleep(0.03)
                 if restore_token != self._scroll_restore_token:
                     return
-                scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
-                if callable(scroll_fn):
-                    res = scroll_fn(offset=target_offset, duration=0)
-                    if inspect.isawaitable(res):
-                        await res
+                await _invoke_scroll(target_offset)
+                if restore_token != self._scroll_restore_token:
+                    return
+                self._pending_post_restore_pin = False
+                self._restore_in_post_cooldown = True
                 await asyncio.sleep(0.02)
+                self._restore_in_post_cooldown = False
+                if (
+                    restore_token == self._scroll_restore_token
+                    and self._pending_post_restore_pin
+                ):
+                    self._pending_post_restore_pin = False
+                    followup = self._pinned_modal_offset()
+                    if followup is not None:
+                        await _invoke_scroll(followup)
             except Exception:
                 logger.debug("GradeOverview scroll restore failed", exc_info=True)
             finally:
                 if restore_token == self._scroll_restore_token:
+                    self._restore_in_post_cooldown = False
+                    self._pending_post_restore_pin = False
                     self._is_restoring_scroll = False
 
         page = self._get_page()
@@ -786,6 +868,7 @@ class GradeOverviewView(ft.Container):
         except RuntimeError:
             scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
             if callable(scroll_fn) and not inspect.iscoroutinefunction(scroll_fn):
+                self._in_scroll_to_call = True
                 try:
                     res = scroll_fn(offset=target_offset, duration=0)
                     if inspect.isawaitable(res):
@@ -794,6 +877,8 @@ class GradeOverviewView(ft.Container):
                             close_fn()
                 except Exception:
                     pass
+                finally:
+                    self._in_scroll_to_call = False
             self._is_restoring_scroll = False
             return
         loop.create_task(_restore())
@@ -906,10 +991,10 @@ class GradeOverviewView(ft.Container):
         self._error_text.color = C.TEXT_SECONDARY
         self._error_retry_btn.bgcolor = C.ACCENT
         self._error_retry_btn.color = C.ON_ACCENT
-        self._stale_banner.bgcolor = C.SURFACE
+        self._stale_banner.bgcolor = C.SURFACE_ELEVATED
         self._stale_banner.border = ft.Border.all(1, C.WARNING)
         self._stale_icon.color = C.WARNING
-        self._stale_text.color = C.WARNING
+        self._stale_text.color = C.TEXT_PRIMARY
         self._courses_btn.style = ft.ButtonStyle(
             color=C.ACCENT,
             padding=ft.Padding.symmetric(horizontal=8, vertical=0),

@@ -1259,19 +1259,159 @@ def test_grade_overview_preserves_rendered_radar_and_semester_data_on_refresh_er
     assert gv._loading_row.visible is True
 
     gv.show_error("Hệ thống UTH đang tạm ngưng bảo trì (01h00 - 04h00).")
+    from gui.core.theme import C, apply_theme
+    from config import settings
+
     assert gv._loading_row.visible is False
     assert gv._radar_card.visible is True
     assert gv._grade_list_view.visible is True
     assert gv._error_state.visible is False
     assert gv._stale_banner.visible is True
+    assert gv._stale_banner.bgcolor == C.SURFACE_ELEVATED
+    assert gv._stale_text.color == C.TEXT_PRIMARY
+    assert gv._stale_icon.color == C.WARNING
     assert "bảo trì" in gv._stale_text.value
     assert gv._semesters == [sem1, sem2]
     assert gv._profiles == [p1, p2]
     assert len(gv._grade_list_view.courses) == 6
     assert gv._saved_scroll_offset == 420.0
 
+    orig_theme = settings.THEME
+    try:
+        apply_theme("steel_light")
+        gv.update_theme()
+        assert gv._stale_banner.bgcolor == C.SURFACE_ELEVATED
+        assert gv._stale_text.color == C.TEXT_PRIMARY
+        assert gv._stale_icon.color == C.WARNING
+    finally:
+        apply_theme(orig_theme)
+
     # 4. Subsequent successful update clears stale banner
     gv.update_academic_data([sem1, sem2], [p1, p2])
     assert gv._stale_banner.visible is False
+
+
+def test_grade_overview_reset_and_clear_prevent_cross_account_transcript_leak():
+    from core.academic_radar.gpa_planner import CreditProgress
+
+    pops: list[bool] = []
+    shown: list[ft.AlertDialog] = []
+    page = SimpleNamespace(
+        width=400,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown.append,
+        pop_dialog=lambda: pops.append(True),
+        update=lambda: None,
+    )
+    gv = GradeOverviewView(page=page)
+
+    sem1 = _make_sample_semester(75, "HK2 2025-2026")
+    p1 = calculate_radar_profile(sem1)
+    gv.update_academic_data([sem1], [p1], CreditProgress(earned_credits=90, required_credits=120))
+    gv._gpa_target_card._target_text = "3.8"
+    gv._graduation_card._target_text = "3.6"
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=480.0, min_scroll_extent=0.0, out_of_range=False)
+    )
+    gv._on_course_clicked(None, sem1.courses[0])
+    gv.show_error("Mất mạng tạm thời")
+    assert gv._stale_banner.visible is True
+    assert len(gv._open_dialog_tokens) == 1
+
+    # AppController._teardown_account_session invokes clear() or reset()
+    assert gv.clear == gv.reset
+    gv.clear()
+
+    assert len(pops) == 1
+    assert gv._open_dialog_tokens == {}
+    assert gv._dialog_closers == {}
+    assert gv.handle_back() is False
+    assert gv._semesters == []
+    assert gv._profiles == []
+    assert gv._progress is None
+    assert gv._saved_scroll_offset == 0.0
+    assert gv._radar_card.profiles == []
+    assert gv._grade_list_view.courses == []
+    assert gv._gpa_target_card._target_text == ""
+    assert gv._graduation_card._target_text == ""
+    assert gv._stale_banner.visible is False
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+    # User B logs in and opens Bảng điểm while offline/maintenance: ZERO User A data leaks!
+    gv.show_loading()
+    assert gv._loading_row.visible is True
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+    gv.show_error("Hệ thống UTH đang bảo trì.")
+    assert gv._error_state.visible is True
+    assert gv._stale_banner.visible is False
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+
+def test_synthetic_zero_scroll_during_post_scroll_to_20ms_cooldown_triggers_followup_pin():
+    import asyncio
+
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+
+    async def scenario():
+        shown: list[ft.AlertDialog] = []
+        scroll_calls: list[dict[str, object]] = []
+        pending_tasks: list[asyncio.Task] = []
+
+        first_scroll_done = asyncio.Event()
+
+        async def _fake_scroll_to(**kw):
+            scroll_calls.append(kw)
+            first_scroll_done.set()
+
+        page = SimpleNamespace(
+            width=400,
+            height=800,
+            dialogs=[],
+            overlay=[],
+            show_dialog=shown.append,
+            pop_dialog=lambda: None,
+            update=lambda: None,
+            run_task=lambda fn: pending_tasks.append(asyncio.create_task(fn())),
+        )
+        gv = GradeOverviewView(page=page)
+        gv.update_academic_data([sem], [profile])
+        gv._scrollable_content.scroll_to = _fake_scroll_to
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=580.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+
+        # t = 0ms: modal opens and schedules _restore() (30ms sleep -> scroll_to -> 20ms cooldown)
+        gv._on_course_clicked(None, sem.courses[0])
+        assert len(pending_tasks) == 1
+
+        # Wait deterministically until first scroll_to(580.0) has executed and _restore() enters 20ms cooldown
+        await first_scroll_done.wait()
+        await asyncio.sleep(0)
+        assert len(scroll_calls) == 1
+        assert scroll_calls[0] == {"offset": 580.0, "duration": 0}
+        assert gv._is_restoring_scroll is True
+        assert gv._restore_in_post_cooldown is True
+
+        # Flutter emits delayed synthetic pixels=0.0 during the 20ms cooldown!
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+        assert gv._saved_scroll_offset == 580.0
+
+        # Wait for _restore() to finish: must perform bounded follow-up scroll_to(580.0)
+        await asyncio.gather(*pending_tasks)
+        assert len(scroll_calls) == 2
+        assert scroll_calls[1] == {"offset": 580.0, "duration": 0}
+        assert gv._is_restoring_scroll is False
+        assert gv._saved_scroll_offset == 580.0
+
+    asyncio.run(scenario())
 
 
