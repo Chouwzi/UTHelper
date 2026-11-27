@@ -121,6 +121,7 @@ def test_source_python_startup_never_clobbers_real_windows_autostart_registry(
             "Source/dev python runs must never auto-write HKCU Run\\UTHelper"
         )
 
+    monkeypatch.delenv("UTH_TEST_MODE", raising=False)
     monkeypatch.setattr(ac_mod, "apply_initial_autostart_default", _fail_if_called)
     monkeypatch.setattr(autostart_mod, "has_package_identity", lambda: False)
     monkeypatch.setattr(

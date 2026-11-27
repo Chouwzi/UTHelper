@@ -6,7 +6,7 @@ import sys
 import ctypes
 import threading
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List
 from models import Assignment
 from config import BASE_DIR, _USER_DATA_DIR
@@ -106,11 +106,12 @@ def reconcile_windows_start_menu_shortcuts(
         return "machine_shortcut_present"
 
     exe = Path(executable)
-    if exe.stem.casefold() in {"python", "pythonw"}:
+    win_exe = PureWindowsPath(str(executable))
+    if win_exe.stem.casefold() in {"python", "pythonw"}:
         _safe_unlink_file(user_programs_dir / "UTHelper.lnk")
         return "skipped_interpreter"
 
-    if exe.name.casefold() == "uthelperautostart.exe":
+    if win_exe.name.casefold() == "uthelperautostart.exe":
         sibling = exe.with_name("UTHelper.exe")
         if sibling.is_file():
             exe = sibling

@@ -545,12 +545,13 @@ def _normalize_packaged_windows_cwd(
     if development or test_mode:
         return False
     try:
+        from pathlib import PureWindowsPath
         from platform_utils.autostart import get_current_process_executable
 
         exe = Path(executable or get_current_process_executable())
     except Exception:
         return False
-    if exe.stem.casefold() in {"python", "pythonw"}:
+    if PureWindowsPath(str(exe)).stem.casefold() in {"python", "pythonw"}:
         return False
     install_dir = exe.parent
     if not install_dir.is_dir():

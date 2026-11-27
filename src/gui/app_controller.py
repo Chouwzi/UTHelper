@@ -1315,6 +1315,7 @@ class AppController:
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
         from dataclasses import replace as _dc_replace
+        from pathlib import PureWindowsPath
         from platform_utils.autostart import (
             create_autostart_service,
             get_current_process_executable,
@@ -1326,7 +1327,7 @@ class AppController:
         try:
             if not has_package_identity():
                 exe = get_current_process_executable()
-                if exe.stem.casefold() in {"python", "pythonw"}:
+                if PureWindowsPath(str(exe)).stem.casefold() in {"python", "pythonw"}:
                     return
         except Exception:
             logger.debug(
