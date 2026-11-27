@@ -374,7 +374,9 @@ class UpcomingScheduleCache:
             fetched_at = datetime.fromisoformat(str(payload["fetched_at"]))
             current = now or datetime.now(tz=fetched_at.tzinfo)
             age = (current - fetched_at).total_seconds()
-            if not 0 <= age < UPCOMING_SCHEDULE_CACHE_TTL_SECONDS:
+            # The cached 14-day window is anchored to the calendar day it was
+            # fetched. After midnight it is missing the new fourteenth day.
+            if current.date() != fetched_at.date() or not 0 <= age < UPCOMING_SCHEDULE_CACHE_TTL_SECONDS:
                 return None
             sessions = tuple(
                 ClassSession.from_dict(row) for row in rows if isinstance(row, dict)

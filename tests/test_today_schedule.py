@@ -211,6 +211,12 @@ def test_upcoming_schedule_cache_is_account_scoped_and_expires_after_three_hours
     ) is None
 
 
+def test_upcoming_schedule_cache_expires_at_midnight(tmp_path):
+    cache = UpcomingScheduleCache(tmp_path, namespace="portal|student")
+    assert cache.save((_session(),), fetched_at=datetime(2026, 8, 11, 23, 59))
+    assert cache.load_fresh(now=datetime(2026, 8, 12, 0, 1)) is None
+
+
 def test_next_schedule_refresh_uses_midnight_and_six_am_boundaries():
     assert next_schedule_refresh_at(datetime(2026, 8, 11, 0, 0)) == datetime(
         2026, 8, 11, 6, 0

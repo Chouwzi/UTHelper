@@ -577,6 +577,15 @@ def _isolate_upcoming_schedule_cache(controller, tmp_path, credentials):
     )
 
 
+def test_fetch_upcoming_sessions_never_calls_portal_for_demo_account():
+    from unittest.mock import Mock
+
+    controller = AppController.__new__(AppController)
+    controller._portal_client = SimpleNamespace(fetch_day=Mock())
+    assert asyncio.run(controller._fetch_upcoming_sessions(("uthelper_demo", "demo"))) == ()
+    controller._portal_client.fetch_day.assert_not_called()
+
+
 def test_fetch_upcoming_sessions_requests_the_full_two_week_window(tmp_path):
     """Days +1..+14 after today are fetched with the reconciler's credentials."""
     controller = AppController.__new__(AppController)

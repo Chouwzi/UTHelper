@@ -3868,7 +3868,7 @@ class AppController:
         if credentials is None:
             credentials = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         username, password = credentials
-        if not username or not password:
+        if not username or not password or is_demo_account(username):
             return ()
         expected_identity = (username, password)
         has_identity_snapshot = hasattr(self, "_settings_identity")
@@ -3943,7 +3943,10 @@ class AppController:
             effective_sessions,
             clear_only=effective_clear_only,
             fetch_day=self._fetch_upcoming_sessions,
-            identity_getter=lambda: getattr(self, "_settings_identity", None),
+            identity_getter=lambda: (
+                getattr(self, "_settings_identity", None),
+                getattr(self, "_account_epoch", None),
+            ),
             android_bridge=getattr(self, "_android_background", None),
         )
 
