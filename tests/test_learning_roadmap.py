@@ -518,11 +518,12 @@ class PortalClientRoadmapTests(unittest.TestCase):
         self.assertEqual(b["errors"], {"exemptions": "HTTP 500"})
         self.assertIn("curriculum", b["bodies"])
 
-    def test_expired_token_relogs_in_once_and_continues(self):
+    def test_expired_token_clears_session_and_stops_bundle(self):
         portal = FakePortal(expire_first_token=True)
-        b = self.client(portal).fetch_roadmap_bundle("u", "p")
-        self.assertEqual(b["errors"], {})
-        self.assertGreaterEqual(portal.logins, 2)
+        with self.assertRaises(PortalAuthenticationError):
+            self.client(portal).fetch_roadmap_bundle("u", "p")
+        self.assertEqual(portal.logins, 1)
+        self.assertEqual(portal.calls, ["user/login", "hoctap/chuongtrinhkhung"])
 
     def test_network_failure_aborts_instead_of_hammering(self):
         portal = FakePortal({"hoctap/chuongtrinhkhung": urllib.error.URLError("offline")})
