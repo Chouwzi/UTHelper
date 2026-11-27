@@ -556,10 +556,11 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
 
 
 def test_profile_view_keeps_student_card_and_avatar_mounted_when_switching_sections(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     from gui.components import profile_view as profile_view_module
 
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
     snapshot = _make_snapshot()
     snapshot = ProfileSnapshot(
         **{**snapshot.__dict__, "avatar": "data:image/png;base64,QUJD"}
@@ -572,6 +573,11 @@ def test_profile_view_keeps_student_card_and_avatar_mounted_when_switching_secti
         student_card_host = view._student_card_host
         avatar = view._avatar
         avatar_image = view._avatar_image
+        display_src = avatar_image.src
+        if mobile:
+            from pathlib import Path
+
+            assert Path(display_src).read_bytes() == b"ABC"
 
         view.select_semester(SEMESTER_1)
         view.select_tab(TAB_OTHER)
@@ -584,8 +590,35 @@ def test_profile_view_keeps_student_card_and_avatar_mounted_when_switching_secti
         assert view._student_card is student_card
         assert view._avatar is avatar
         assert view._avatar_image is avatar_image
-        assert view._avatar_image.src == "data:image/png;base64,QUJD"
+        assert view._avatar_image.src == display_src
         assert view._avatar_image.gapless_playback is True
+        if mobile:
+            view.clear()
+            assert not Path(display_src).exists()
+
+
+def test_mobile_profile_refresh_keeps_avatar_and_card_mounted(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from gui.components import profile_view as profile_view_module
+
+    monkeypatch.setattr(profile_view_module.platform_utils, "UI_IS_MOBILE", True)
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    snapshot = replace(_make_snapshot(), avatar="data:image/png;base64,QUJD")
+    view = _make_view()
+    view.update_snapshot(snapshot)
+    card, avatar, photo = view._student_card, view._avatar, view._avatar_image
+    view.update_snapshot(replace(snapshot, profile=replace(snapshot.profile, phone="123")))
+    assert view._student_card is card
+    assert view._avatar is avatar
+    assert view._avatar_image is photo
+    assert view._student_card.content.controls[0] is avatar
+    previous_src = photo.src
+    view.update_snapshot(replace(snapshot, avatar="data:image/png;base64,QUJE"))
+    assert view._student_card is card
+    assert view._avatar_image is photo
+    assert photo.src != previous_src
+    assert photo.gapless_playback is True
+    view.clear()
 
 
 def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):

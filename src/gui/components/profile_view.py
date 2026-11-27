@@ -26,10 +26,12 @@ then fresh), so the screen renders instantly offline and refreshes itself.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import re
 import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
@@ -161,6 +163,7 @@ class ProfileView(ft.Container):
         self._on_close = on_close
         self._on_refresh = on_refresh
         self._page_ref = page
+        self._avatar_temp_dir: tempfile.TemporaryDirectory | None = None
 
         self._snapshot: ProfileSnapshot | None = None
         self._from_cache = False
@@ -417,6 +420,12 @@ class ProfileView(ft.Container):
         self._avatar_text = None
         self._avatar_image = None
         self._avatar_src = ""
+        if self._avatar_temp_dir is not None:
+            try:
+                self._avatar_temp_dir.cleanup()
+            except OSError:
+                logger.warning("Cannot clean up temporary profile photo", exc_info=True)
+            self._avatar_temp_dir = None
         self._student_card = None
         self._student_card_key = None
         for attr in ("_profile_sheet", "_detail_sheet", "_semester_sheet"):
@@ -589,16 +598,20 @@ class ProfileView(ft.Container):
         avatar_size = 52 if mobile else 112
         if avatar_src.startswith(("data:image/", "http://", "https://")):
             if self._avatar_image is None or self._avatar_src != avatar_src:
-                self._avatar_image = ft.Image(
-                    src=avatar_src,
-                    width=avatar_size,
-                    height=avatar_size,
-                    fit=ft.BoxFit.COVER,
-                    border_radius=avatar_size // 2,
-                    anti_alias=True,
-                    gapless_playback=True,
-                    key="profile-student-avatar-image",
-                )
+                display_src = self._stable_avatar_source(avatar_src) if mobile else avatar_src
+                if self._avatar_image is None:
+                    self._avatar_image = ft.Image(
+                        src=display_src,
+                        width=avatar_size,
+                        height=avatar_size,
+                        fit=ft.BoxFit.COVER,
+                        border_radius=avatar_size // 2,
+                        anti_alias=True,
+                        gapless_playback=True,
+                        key="profile-student-avatar-image",
+                    )
+                else:
+                    self._avatar_image.src = display_src
                 self._avatar_src = avatar_src
             avatar_content: ft.Control = self._avatar_image
             self._avatar_text = None
@@ -722,6 +735,14 @@ class ProfileView(ft.Container):
             # popup; keep the compact student card at a fixed height.
             self._avatar.ink = True
             self._avatar.on_click = self._open_student_details
+            if self._student_card is not None and self._student_card_key[-1] is True:
+                # Refresh text in place rather than reparenting the avatar.
+                existing_identity = self._student_card.content
+                existing_identity.controls[1].controls = [
+                    self._name_text, self._sid_text, badge
+                ]
+                self._student_card_key = card_key
+                return self._student_card
             identity = ft.Row(
                 controls=[
                     self._avatar,
@@ -913,6 +934,32 @@ class ProfileView(ft.Container):
         )
         self._student_card_key = card_key
         return self._student_card
+
+    def _stable_avatar_source(self, source: str) -> str:
+        """Use a stable private file for mobile's Flutter image cache."""
+        if not source.startswith("data:image/"):
+            return source
+        try:
+            header, encoded = source.split(",", 1)
+            if ";base64" not in header.lower():
+                return source
+            data = base64.b64decode(encoded, validate=True)
+            if not data or len(data) > 2 * 1024 * 1024:
+                return source
+            if self._avatar_temp_dir is None:
+                from config import get_data_dir
+
+                self._avatar_temp_dir = tempfile.TemporaryDirectory(
+                    prefix="profile-avatar-", dir=get_data_dir()
+                )
+            digest = hashlib.sha256(data).hexdigest()
+            path = Path(self._avatar_temp_dir.name) / f"{digest}.img"
+            if not path.exists():
+                path.write_bytes(data)
+            return str(path)
+        except (OSError, ValueError):
+            logger.warning("Cannot cache profile photo for display", exc_info=True)
+            return source
 
     def _build_summary(self) -> ft.Container:
         rows = self._filtered_rows()
