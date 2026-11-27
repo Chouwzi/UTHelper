@@ -2,6 +2,7 @@ package com.uthelper.backgroundsync.notification
 
 import com.uthelper.backgroundsync.data.ActivityEntity
 import com.uthelper.backgroundsync.data.NativeSettings
+import java.net.URI
 import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -22,7 +23,10 @@ class NotificationPolicy(private val settings: NativeSettings) {
         if (settings.mutedCourses.any { it.trim().equals(activity.courseName.trim(), ignoreCase = true) }) {
             return false
         }
-        if (settings.ignoreSubmitted && isCompleted(activity)) return false
+        if (settings.ignoreSubmitted) {
+            if (isCompleted(activity)) return false
+            if (isUnverifiedCoursesActivity(activity)) return false
+        }
         return true
     }
 
@@ -80,11 +84,47 @@ class NotificationPolicy(private val settings: NativeSettings) {
         return candidate.toEpochSecond()
     }
 
+    private fun normalizeState(value: String): String =
+        value.trim().lowercase().split(Regex("\\s+")).joinToString(" ")
+
     private fun isCompleted(activity: ActivityEntity): Boolean =
-        activity.graded || activity.submissionState.lowercase() in COMPLETED_STATES
+        activity.graded || normalizeState(activity.submissionState) in COMPLETED_STATES
+
+    private fun isThnnActivity(activity: ActivityEntity): Boolean {
+        if (activity.activityKey.startsWith("thnn:")) return true
+        val host = runCatching { URI(activity.url).host?.lowercase().orEmpty() }.getOrDefault("")
+        return host == "thnn.ut.edu.vn" || host.endsWith(".thnn.ut.edu.vn")
+    }
+
+    private fun isUnverifiedCoursesActivity(activity: ActivityEntity): Boolean {
+        if (normalizeState(activity.submissionState) !in UNVERIFIED_STATES) return false
+        if (isThnnActivity(activity)) return false
+        if (activity.eventType.trim().lowercase() !in VERIFIABLE_TYPES) return false
+        val host = runCatching { URI(activity.url).host?.lowercase().orEmpty() }.getOrDefault("")
+        if (host in COURSES_HOSTS) return true
+        return activity.url.isBlank() &&
+            COURSES_WORKER_PREFIXES.any { prefix -> activity.activityKey.startsWith(prefix) }
+    }
 
     companion object {
-        private val COMPLETED_STATES = setOf("submitted", "graded", "đã nộp", "đã chấm")
+        private val COMPLETED_STATES = setOf(
+            "submitted",
+            "graded",
+            "finished",
+            "submitted for grading",
+            "đã nộp",
+            "đã nộp, chờ chấm",
+            "đã làm",
+            "đã hoàn thành",
+            "đã chấm",
+            "đã chấm điểm",
+            "đã công bố",
+            "released",
+        )
+        private val UNVERIFIED_STATES = setOf("", "unknown")
+        private val VERIFIABLE_TYPES = setOf("assignment", "assign", "quiz")
+        private val COURSES_HOSTS = setOf("courses.ut.edu.vn", "elearning.ut.edu.vn")
+        private val COURSES_WORKER_PREFIXES = listOf("assign:", "quiz:", "scorm:", "lesson:")
     }
 }
 

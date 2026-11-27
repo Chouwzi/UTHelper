@@ -489,6 +489,86 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         }
     }
 
+    private static let completedStatuses: Set<String> = [
+        "submitted",
+        "graded",
+        "finished",
+        "submitted for grading",
+        "đã nộp",
+        "đã nộp, chờ chấm",
+        "đã làm",
+        "đã hoàn thành",
+        "đã chấm",
+        "đã chấm điểm",
+        "đã công bố",
+        "released",
+    ]
+
+    private func isThnnActivity(_ activity: [String: Any]) -> Bool {
+        let explicitKey = text(activity["activity_key"]).lowercased()
+        if explicitKey.hasPrefix("thnn:") { return true }
+        let site = text(activity["site_identity"] ?? activity["site"] ?? activity["moodle_site"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let source = text(activity["source"] ?? activity["source_kind"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if site == "thnn" || source == "thnn_sync" { return true }
+        let rawUrl = text(activity["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let host = URL(string: rawUrl)?.host?.lowercased(),
+           host == "thnn.ut.edu.vn" || host.hasSuffix(".thnn.ut.edu.vn") {
+            return true
+        }
+        return false
+    }
+
+    private func isCoursesActivity(_ activity: [String: Any]) -> Bool {
+        if isThnnActivity(activity) { return false }
+        let site = text(activity["site_identity"] ?? activity["site"] ?? activity["moodle_site"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let source = text(activity["source"] ?? activity["source_kind"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if site == "courses" || ["ws_api", "ws_assign_api", "ws_quiz_calendar_api"].contains(source) {
+            return true
+        }
+        let rawUrl = text(activity["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let host = URL(string: rawUrl)?.host?.lowercased(),
+           host == "courses.ut.edu.vn" || host == "elearning.ut.edu.vn" {
+            return true
+        }
+        return false
+    }
+
+    private func normalizedSubmissionStatus(_ activity: [String: Any]) -> String {
+        if bool(activity["graded"], default: false) { return "graded" }
+        let rawTop = text(activity["submission_status"], default: "unknown")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if Self.completedStatuses.contains(rawTop) { return rawTop }
+        if let details = activity["details"] as? [String: Any] {
+            if let statusData = details["status_data"] as? [String: Any] {
+                for key in ["Chấm điểm", "Grading status", "Trạng thái chấm"] {
+                    let gVal = text(statusData[key]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if ["graded", "released", "đã chấm", "đã chấm điểm", "đã công bố"].contains(gVal) {
+                        return "graded"
+                    }
+                }
+                for key in ["Trạng thái nộp bài", "Submission status", "Trạng thái"] {
+                    let sVal = text(statusData[key]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if Self.completedStatuses.contains(sVal) { return sVal }
+                }
+            }
+            let quizAtt = text(details["quiz_attempt_status"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if Self.completedStatuses.contains(quizAtt) { return quizAtt }
+        }
+        return rawTop.isEmpty ? "unknown" : rawTop
+    }
+
     private func accepts(_ activity: [String: Any], settings: [String: Any]) -> Bool {
         let muted = Set(stringArray(settings["muted_courses"]).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -498,13 +578,20 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         if muted.contains(course) {
             return false
         }
-        let status = text(activity["submission_status"], default: "unknown").lowercased()
-        if bool(settings["ignore_submitted"], default: true),
-           ["submitted", "graded", "đã nộp", "đã chấm"].contains(status) {
-            return false
+        let eventType = text(activity["event_type"] ?? activity["type"])
+        if bool(settings["ignore_submitted"], default: true) {
+            let status = normalizedSubmissionStatus(activity)
+            if Self.completedStatuses.contains(status) {
+                return false
+            }
+            // Block unverified Courses assignments/quizzes; keep THNN "unknown" eligible.
+            if (status == "unknown" || status.isEmpty),
+               isCoursesActivity(activity),
+               ["assignment", "assign", "quiz"].contains(eventType.lowercased()) {
+                return false
+            }
         }
         let allowedTypes = Set(stringArray(settings["notify_types"]))
-        let eventType = text(activity["event_type"] ?? activity["type"])
         return allowedTypes.isEmpty || eventType.isEmpty || allowedTypes.contains(eventType)
     }
 
@@ -549,11 +636,17 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     }
 
     private func activityKey(_ activity: [String: Any]) -> String {
-        for name in ["activity_key", "id", "activity_id", "url"] {
+        let explicitKey = text(activity["activity_key"])
+        if !explicitKey.isEmpty { return explicitKey }
+        let thnn = isThnnActivity(activity)
+        for name in ["id", "activity_id", "url"] {
             let value = text(activity[name])
-            if !value.isEmpty { return value }
+            if !value.isEmpty {
+                return thnn && !value.lowercased().hasPrefix("thnn:") ? "thnn:\(value)" : value
+            }
         }
-        return "\(text(activity["course_id"]))|\(text(activity["title"]))"
+        let fallback = "\(text(activity["course_id"]))|\(text(activity["title"]))"
+        return thnn ? "thnn:\(fallback)" : fallback
     }
 
     private func parseDate(_ value: Any?) -> Date? {

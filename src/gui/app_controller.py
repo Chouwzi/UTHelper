@@ -94,10 +94,17 @@ from gui.controllers.startup_visibility import (
     should_hide_startup_window,
 )
 from gui.controllers.autostart_settings import apply_initial_autostart_default
+from core.activity_status import (
+    COMPLETED_SUBMISSION_STATUSES,
+    extract_canonical_submission_status,
+)
 from gui.controllers.refresh_coordinator import (
+    apply_cached_thnn_completions,
+    apply_pre_dispatch_status_hydration,
     build_prefetched_dataset,
     build_refresh_dataset,
     card_detail_prefetch_candidates,
+    notification_status_hydration_candidates,
     status_hydration_candidates,
 )
 from gui.controllers.window_activator import WindowActivator
@@ -5520,6 +5527,13 @@ class AppController:
                 or account_epoch != getattr(self, "_account_epoch", 0)
             ):
                 return
+            previously_completed = {
+                str(item.get("url") or "")
+                for item in self.all_data
+                if item.get("url")
+                and normalize_submission_status(item.get("submission_status"))
+                in COMPLETED_SUBMISSION_STATUSES
+            }
             pending_updates = getattr(self, "_pending_updates", None)
             data_copy = build_prefetched_dataset(
                 list(self.all_data),
@@ -5527,6 +5541,19 @@ class AppController:
                 pending_updates,
                 prefetch_start_time,
             )
+            newly_completed_urls = {
+                str(item.get("url") or "")
+                for item in data_copy
+                if item.get("url")
+                and normalize_submission_status(item.get("submission_status"))
+                in COMPLETED_SUBMISSION_STATUSES
+            } - previously_completed
+            newly_completed_ids = [
+                str(item.get("id") or "")
+                for item in data_copy
+                if str(item.get("url") or "") in newly_completed_urls
+                and item.get("id")
+            ]
             self.all_data = data_copy
         self._update_footer()
         if data_cache is not None and account_epoch == getattr(self, "_account_epoch", 0):
@@ -5535,6 +5562,10 @@ class AppController:
             )
             if not persisted:
                 logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
+        if newly_completed_urls and account_epoch == getattr(self, "_account_epoch", 0):
+            self._reconcile_activity_schedules_for_snapshot(
+                data_copy, changed_activity_ids=newly_completed_ids
+            )
         if account_epoch == getattr(self, "_account_epoch", 0):
             self._schedule_card_detail_warmup()
 
@@ -5904,7 +5935,69 @@ class AppController:
             self._clear_uth_maintenance_banner(update_page=False)
             result = list(outcome.activities or [])
 
+            course_store = getattr(self, "_course_cache_store", None)
+            if course_store is not None and callable(
+                getattr(course_store, "completed_module_cmids", None)
+            ):
+                try:
+                    thnn_done_cmids = await asyncio.to_thread(
+                        course_store.completed_module_cmids, "thnn"
+                    )
+                    if not _epoch_is_current():
+                        return
+                    if thnn_done_cmids:
+                        apply_cached_thnn_completions(result, thnn_done_cmids)
+                except Exception:
+                    logger.debug(
+                        "Non-critical THNN cached completion lookup skipped",
+                        exc_info=True,
+                    )
+
             cache = self.orchestrator.get_cached_details_snapshot()
+            prefetch_statuses_fn = getattr(
+                self.orchestrator, "prefetch_activity_statuses", None
+            )
+            if not is_demo_account(settings.UTH_USERNAME) and callable(
+                prefetch_statuses_fn
+            ):
+                with self._data_lock:
+                    pending_snap = dict(self._pending_updates)
+                pre_candidates = notification_status_hydration_candidates(
+                    result,
+                    cache,
+                    pending_snap,
+                    fetch_start_time,
+                )
+                if pre_candidates:
+                    worker_cap = 2 if platform_utils.IS_MOBILE else 4
+                    workers = max(1, min(settings.PREFETCH_WORKERS, worker_cap))
+                    cancel_ev = getattr(self, "_prefetch_cancel_event", None)
+                    is_cancelled = (
+                        cancel_ev.is_set
+                        if cancel_ev is not None
+                        else (lambda: False)
+                    )
+                    hydrated_map = await asyncio.to_thread(
+                        prefetch_statuses_fn,
+                        pre_candidates,
+                        workers,
+                        is_cancelled,
+                    )
+                    if not _epoch_is_current():
+                        return
+                    if not is_cancelled() and isinstance(hydrated_map, dict):
+                        apply_pre_dispatch_status_hydration(
+                            result, pre_candidates, hydrated_map
+                        )
+                        if callable(
+                            getattr(
+                                self.orchestrator,
+                                "get_cached_details_snapshot",
+                                None,
+                            )
+                        ):
+                            cache = self.orchestrator.get_cached_details_snapshot()
+
             with self._data_lock:
                 if not _epoch_is_current():
                     return
@@ -6376,16 +6469,92 @@ class AppController:
         url = activity.get("url")
         if not isinstance(url, str) or not url:
             return
+        start_account_epoch = getattr(self, "_account_epoch", 0)
         try:
             # The following detail load must ask Moodle for the latest attempt
             # state; a player close does not prove that an attempt was submitted.
             self.orchestrator.invalidate_detail_cache(url)
+            detail_refreshed = False
             if (
                 getattr(self, "detail_view", None) is not None
                 and self.detail_view.visible
                 and self.detail_view._current_url == url
             ):
                 await self._show_detail_async(dict(activity))
+                detail_refreshed = True
+
+            from urllib.parse import urlsplit as _urlsplit
+
+            is_thnn = (
+                activity.get("site_identity") == "thnn"
+                or activity.get("source") == "thnn_sync"
+                or (_urlsplit(url).hostname or "").casefold()
+                == "thnn.ut.edu.vn"
+            )
+            if is_thnn:
+                act_svc = getattr(self, "_course_activity_service", None)
+                fetch_quiz_fn = getattr(act_svc, "fetch_quiz_activity", None)
+                if callable(fetch_quiz_fn):
+                    from core.courses.models import CourseModuleItem
+
+                    raw_cmid = activity.get("cmid")
+                    cmid_val = 0
+                    if raw_cmid is not None and not isinstance(raw_cmid, bool):
+                        try:
+                            cmid_val = int(raw_cmid)
+                        except (TypeError, ValueError):
+                            cmid_val = 0
+                    if cmid_val <= 0 and "id=" in url:
+                        try:
+                            cmid_val = int(url.split("id=")[-1].split("&")[0])
+                        except (ValueError, IndexError):
+                            cmid_val = 0
+                    mod_stub = CourseModuleItem(
+                        cmid=max(0, cmid_val),
+                        instance_id=int(activity.get("quiz_id") or 0),
+                        modname="quiz",
+                        name=str(activity.get("title") or "Bài kiểm tra"),
+                        section_id=0,
+                        url=url,
+                        web_url=url,
+                    )
+                    summary = await asyncio.to_thread(
+                        fetch_quiz_fn,
+                        "thnn",
+                        mod_stub,
+                        course_id=int(activity.get("course_id") or 0),
+                    )
+                    if any(
+                        normalize_submission_status(att.state)
+                        in COMPLETED_SUBMISSION_STATUSES
+                        for att in (getattr(summary, "attempts", None) or ())
+                    ):
+                        await self._sync_resolved_activity_status_async(
+                            url,
+                            "submitted",
+                            expected_epoch=start_account_epoch,
+                        )
+            elif not detail_refreshed and callable(
+                getattr(self.orchestrator, "fetch_full_details", None)
+            ):
+                refreshed = await asyncio.to_thread(
+                    self.orchestrator.fetch_full_details,
+                    dict(activity),
+                    True,
+                )
+                resolved_status = extract_canonical_submission_status(refreshed)
+                if resolved_status in COMPLETED_SUBMISSION_STATUSES:
+                    await self._sync_resolved_activity_status_async(
+                        url,
+                        resolved_status,
+                        details_patch=(
+                            refreshed.get("details")
+                            if isinstance(refreshed, dict)
+                            else None
+                        ),
+                        expected_epoch=start_account_epoch,
+                    )
+
             if getattr(getattr(self, "courses_view", None), "visible", False):
                 overlay = self._active_course_quiz_overlay(activity)
                 if overlay is not None:
@@ -7678,6 +7847,7 @@ class AppController:
             return
         new_status = normalize_submission_status(new_status)
         updated = False
+        changed_ids: list[str] = []
         import time
         with self._data_lock:
             # Ghi nhận thay đổi thủ công của người dùng kèm timestamp
@@ -7697,6 +7867,8 @@ class AppController:
                         new_item["details"] = details
                         
                         new_data.append(new_item)
+                        if item.get("id"):
+                            changed_ids.append(str(item["id"]))
                         updated = True
                     else:
                         new_data.append(item)
@@ -7733,18 +7905,159 @@ class AppController:
 
             # A successful/manual submission must cancel every remaining local
             # deadline reminder immediately instead of waiting for the next sync.
-            if not is_demo_account(settings.UTH_USERNAME):
-                mobile_bridge = getattr(self, "_android_background", None)
-                if mobile_bridge is not None and mobile_bridge.available:
-                    self._safe_run_task(
-                        mobile_bridge.import_activities,
-                        data_copy,
-                        authoritative=True,
+            self._reconcile_activity_schedules_for_snapshot(
+                data_copy, changed_activity_ids=changed_ids
+            )
+
+    def _reconcile_activity_schedules_for_snapshot(
+        self,
+        data_copy: list[dict],
+        *,
+        changed_activity_ids: list[str] | None = None,
+    ) -> None:
+        """Immediately update native and local notification schedules for a new snapshot."""
+        if is_demo_account(settings.UTH_USERNAME):
+            return
+        run_task = getattr(self, "_safe_run_task", None)
+        if not callable(run_task):
+            return
+
+        mobile_bridge = getattr(self, "_android_background", None)
+        has_mobile_bridge = bool(
+            mobile_bridge is not None and getattr(mobile_bridge, "available", False)
+        )
+        if has_mobile_bridge:
+            run_task(
+                mobile_bridge.import_activities,
+                data_copy,
+                authoritative=True,
+            )
+
+        notifier = getattr(self, "notifier", None)
+        if notifier is None:
+            return
+        if not has_mobile_bridge:
+            reconcile_fn = getattr(notifier, "reconcile_schedules", None)
+            if callable(reconcile_fn):
+                run_task(reconcile_fn, data_copy)
+            return
+
+        # When both mobile_bridge and notifier exist: reconcile non-MobileNotifier
+        # schedulers (e.g. desktop/test schedulers), or cancel specific fallback
+        # MobileNotifier alarms without double-scheduling unsubmitted items.
+        registered = getattr(notifier, "notifiers", None)
+        has_mobile_channel = isinstance(registered, list) and any(
+            type(channel).__name__ == "MobileNotifier" for channel in registered
+        )
+        if not has_mobile_channel:
+            reconcile_fn = getattr(notifier, "reconcile_schedules", None)
+            if callable(reconcile_fn):
+                run_task(reconcile_fn, data_copy)
+        elif changed_activity_ids and callable(
+            getattr(notifier, "cancel_activity", None)
+        ):
+            for act_id in changed_activity_ids:
+                if act_id:
+                    run_task(notifier.cancel_activity, str(act_id))
+
+    async def _sync_resolved_activity_status_async(
+        self,
+        url: str,
+        new_status: str,
+        *,
+        details_patch: dict | None = None,
+        expected_epoch: int | None = None,
+    ) -> bool:
+        """Apply freshly discovered completed status to all_data, DataCache, and schedules."""
+        canonical = normalize_submission_status(new_status)
+        if canonical not in COMPLETED_SUBMISSION_STATUSES:
+            return False
+        if (
+            expected_epoch is not None
+            and expected_epoch != getattr(self, "_account_epoch", 0)
+        ):
+            return False
+        data_lock = getattr(self, "_data_lock", None)
+        current_items = getattr(self, "all_data", None)
+        if data_lock is None or not isinstance(current_items, list):
+            return False
+
+        import time as _time
+
+        updated = False
+        changed_ids: list[str] = []
+        with data_lock:
+            if (
+                expected_epoch is not None
+                and expected_epoch != getattr(self, "_account_epoch", 0)
+            ):
+                return False
+            pending = getattr(self, "_pending_updates", None)
+            if isinstance(pending, dict):
+                pending[url] = (_time.time(), canonical)
+
+            new_data = []
+            for item in self.all_data:
+                if item.get("url") == url:
+                    cur_norm = normalize_submission_status(
+                        item.get("submission_status")
                     )
-                elif getattr(self, "notifier", None) is not None:
-                    self._safe_run_task(
-                        self.notifier.reconcile_schedules, data_copy
-                    )
+                    if cur_norm != canonical:
+                        new_item = dict(item)
+                        new_item["submission_status"] = canonical
+                        merged_details = dict(new_item.get("details") or {})
+                        if isinstance(details_patch, dict):
+                            for k, v in details_patch.items():
+                                if k != "description_html":
+                                    merged_details[k] = v
+                        status_data = dict(merged_details.get("status_data") or {})
+                        status_data["Trạng thái nộp bài"] = canonical
+                        merged_details["status_data"] = status_data
+                        if new_item.get("type") == "quiz":
+                            merged_details["quiz_attempt_status"] = canonical
+                        new_item["details"] = merged_details
+                        new_data.append(new_item)
+                        if item.get("id"):
+                            changed_ids.append(str(item["id"]))
+                        updated = True
+                    else:
+                        new_data.append(item)
+                else:
+                    new_data.append(item)
+            if updated:
+                self.all_data = new_data
+            data_copy = list(self.all_data)
+
+        if not updated:
+            return False
+
+        update_footer = getattr(self, "_update_footer", None)
+        if callable(update_footer):
+            update_footer()
+
+        data_cache = getattr(self, "_data_cache", None)
+        if data_cache is not None and (
+            expected_epoch is None
+            or expected_epoch == getattr(self, "_account_epoch", 0)
+        ):
+            try:
+                await asyncio.to_thread(
+                    data_cache.save_local_activities, data_copy
+                )
+            except Exception:
+                logger.debug(
+                    "Ignored local activity persist error after status sync",
+                    exc_info=True,
+                )
+
+        if (
+            expected_epoch is None
+            or expected_epoch == getattr(self, "_account_epoch", 0)
+        ):
+            self._reconcile_activity_schedules_for_snapshot(
+                data_copy, changed_activity_ids=changed_ids
+            )
+        return True
 
     def _show_detail(self, data: dict):
         self._dismiss_desktop_filter_menu()
@@ -7753,6 +8066,7 @@ class AppController:
     async def _show_detail_async(self, data: dict):
         request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
         self._detail_request_epoch = request_epoch
+        start_account_epoch = getattr(self, "_account_epoch", 0)
 
         def request_is_current() -> bool:
             return request_epoch == getattr(self, "_detail_request_epoch", 0)
@@ -7768,6 +8082,16 @@ class AppController:
         self.view_manager.show_detail_loading(data)
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
+            if isinstance(full_data, dict):
+                resolved_status = extract_canonical_submission_status(full_data)
+                resolved_url = str(full_data.get("url") or data.get("url") or "")
+                if resolved_url and resolved_status in COMPLETED_SUBMISSION_STATUSES:
+                    await self._sync_resolved_activity_status_async(
+                        resolved_url,
+                        resolved_status,
+                        details_patch=full_data.get("details"),
+                        expected_epoch=start_account_epoch,
+                    )
             if not request_is_current():
                 return
             details_map = full_data.get("details") if isinstance(full_data, dict) else None

@@ -786,6 +786,7 @@ class CoursesCoordinator:
                     s, t, u, tag=f"webview:quiz:{m.cmid}"
                 ),
                 on_start_quiz=(lambda: self._dispatch_cb(self._on_start_quiz, course, mod)) if self._on_start_quiz is not None else None,
+                on_status_changed=self._on_assignment_status_changed,
                 on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             )
             self.courses_view.push_overlay(view, tag=f"activity:quiz:{mod.cmid}")
