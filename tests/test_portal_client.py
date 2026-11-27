@@ -662,7 +662,6 @@ def test_portal_client_fetch_profile_image_normalizes_avatar_sources():
     [
         "https://example.invalid/avatar.png",
         "data:image/svg+xml;base64,PHN2Zz4=",
-        "data:image/jpeg;base64,iVBORw0KGgo=",
         "not-base64!",
     ],
 )
@@ -680,6 +679,15 @@ def test_portal_client_rejects_untrusted_or_malformed_profile_images(body):
     )
     with pytest.raises(PortalProtocolError):
         client.fetch_profile_image("student", "secret")
+
+
+def test_portal_client_uses_actual_image_format_when_portal_label_is_wrong():
+    from core.portal_client import _normalize_avatar_body
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfixture").decode("ascii")
+    assert _normalize_avatar_body(f"data:image/jpeg;base64,{png}") == (
+        f"data:image/png;base64,{png}"
+    )
 
 
 def test_portal_client_rejects_oversized_profile_image():

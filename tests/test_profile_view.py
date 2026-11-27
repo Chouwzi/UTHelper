@@ -625,6 +625,8 @@ def test_profile_view_mobile_footer_and_avatar_opens_student_popup(monkeypatch):
     assert len(popup_rows) == 12  # Name + all 11 student fields.
     assert popup_rows[1].controls[1].value == "MSSV:"
     assert popup_rows[-1].controls[2].value == "sv001@example.com"
+    assert popup_rows[3].controls[0].icon == ft.Icons.ACCOUNT_BALANCE_ROUNDED
+    assert popup_rows[-1].controls[0].icon == ft.Icons.EMAIL_ROUNDED
 
     # No data on screen -> the total bar hides with it.
     view.show_error("Không tải được hồ sơ từ Portal.")

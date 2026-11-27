@@ -928,19 +928,22 @@ class ProfileView(ft.Container):
             debt, paid_amount, amount = totals.debt, totals.paid_amount, totals.pay_level
             unpaid = totals.unpaid_rows
 
-        value_size = 14 if platform_utils.UI_IS_MOBILE else 16
+        mobile = platform_utils.UI_IS_MOBILE
+        value_size = 12 if mobile else 16
         self._stat_total = ft.Text(
             format_vnd(amount), size=value_size, weight=ft.FontWeight.W_700,
-            color=C.TEXT_PRIMARY, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+            color=C.TEXT_PRIMARY, max_lines=2 if mobile else 1,
+            overflow=ft.TextOverflow.CLIP,
         )
         self._stat_paid = ft.Text(
             format_vnd(paid_amount), size=value_size, weight=ft.FontWeight.W_700,
-            color=C.SAFE, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+            color=C.SAFE, max_lines=2 if mobile else 1,
+            overflow=ft.TextOverflow.CLIP,
         )
         self._stat_debt = ft.Text(
             format_vnd(debt), size=value_size, weight=ft.FontWeight.W_700,
             color=C.CRITICAL if debt > 0 else C.TEXT_SECONDARY,
-            max_lines=1, overflow=ft.TextOverflow.ELLIPSIS,
+            max_lines=2 if mobile else 1, overflow=ft.TextOverflow.CLIP,
         )
 
         if debt > 0:
@@ -993,8 +996,8 @@ class ProfileView(ft.Container):
                     controls=[
                         ft.Container(
                             content=ft.Icon(icon, size=18, color=icon_color),
-                            width=36,
-                            height=36,
+                            width=28 if mobile else 36,
+                            height=28 if mobile else 36,
                             border_radius=18,
                             bgcolor=ft.Colors.with_opacity(0.12, icon_color),
                             alignment=ft.Alignment(0, 0),
@@ -1009,11 +1012,11 @@ class ProfileView(ft.Container):
                             expand=True,
                         ),
                     ],
-                    spacing=10,
+                    spacing=6 if mobile else 10,
                     tight=True,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                padding=ft.Padding.symmetric(horizontal=8 if mobile else 14, vertical=10),
                 border_radius=12,
                 bgcolor=ft.Colors.with_opacity(0.08, tint_color),
                 border=ft.Border.all(1, C.BORDER) if platform_utils.UI_IS_MOBILE else None,
@@ -1441,17 +1444,17 @@ class ProfileView(ft.Container):
             self._profile_sheet = None
         profile = snapshot.profile
         pairs = [
-            ("MSSV", profile.student_id),
-            ("Hệ đào tạo", profile.education_type),
-            ("Khoa", profile.faculty),
-            ("Ngành", profile.major),
-            ("Chuyên ngành", profile.specialization),
-            ("Lớp", profile.class_name),
-            ("Khóa", profile.cohort),
-            ("Ngày sinh", profile.birth_date),
-            ("Nơi sinh", profile.hometown),
-            ("Số điện thoại", profile.phone),
-            ("Email", profile.email),
+            (ft.Icons.BADGE_OUTLINED, "MSSV", profile.student_id),
+            (ft.Icons.SCHOOL_ROUNDED, "Hệ đào tạo", profile.education_type),
+            (ft.Icons.ACCOUNT_BALANCE_ROUNDED, "Khoa", profile.faculty),
+            (ft.Icons.LAYERS_ROUNDED, "Ngành", profile.major),
+            (ft.Icons.BOOKMARK_ROUNDED, "Chuyên ngành", profile.specialization),
+            (ft.Icons.GROUP_ROUNDED, "Lớp", profile.class_name),
+            (ft.Icons.CALENDAR_TODAY_ROUNDED, "Khóa", profile.cohort),
+            (ft.Icons.CAKE_ROUNDED, "Ngày sinh", profile.birth_date),
+            (ft.Icons.LOCATION_ON_ROUNDED, "Nơi sinh", profile.hometown),
+            (ft.Icons.PHONE_ROUNDED, "Số điện thoại", profile.phone),
+            (ft.Icons.EMAIL_ROUNDED, "Email", profile.email),
         ]
         controls: list[ft.Control] = [
             ft.Text(
@@ -1462,8 +1465,8 @@ class ProfileView(ft.Container):
             )
         ]
         controls.extend(
-            _info_row(ft.Icons.PERSON_ROUNDED, label, value or "—")
-            for label, value in pairs
+            _info_row(icon, label, value or "—")
+            for icon, label, value in pairs
         )
         sheet = ft.BottomSheet(
             content=ft.Container(

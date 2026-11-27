@@ -479,6 +479,8 @@ class StudentProfileService:
             ensure_current()
             avatar = self._portal_client.fetch_profile_image(username, password)
             ensure_current()
+            if not avatar and cached is not None:
+                avatar = cached.avatar
         except ProfileLoadCancelled:
             raise
         except Exception as exc:

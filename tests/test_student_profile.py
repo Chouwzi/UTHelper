@@ -310,6 +310,17 @@ def test_service_keeps_cached_avatar_when_image_endpoint_fails(tmp_path):
     assert result.snapshot.avatar == "data:image/png;base64,QUJD"
 
 
+def test_service_keeps_cached_avatar_when_image_endpoint_returns_empty(tmp_path):
+    cache = StudentProfileCache(cache_dir=tmp_path, namespace="sv001")
+    client = _FakePortalClient()
+    service = StudentProfileService(client, cache)
+    service.load("sv001", "secret", force_refresh=True)
+    client.fetch_profile_image = lambda username, password: ""
+    assert service.load("sv001", "secret", force_refresh=True).snapshot.avatar == (
+        "data:image/png;base64,QUJD"
+    )
+
+
 def test_service_serves_cache_without_network_when_not_forced(tmp_path):
     client = _FakePortalClient()
     service = StudentProfileService(

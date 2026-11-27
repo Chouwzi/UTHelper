@@ -66,8 +66,8 @@ def _normalize_avatar_body(body: Any) -> str:
         detected_mime = "image/webp"
     else:
         raise PortalProtocolError("Portal image format was not supported")
-    if declared_mime and declared_mime != detected_mime:
-        raise PortalProtocolError("Portal image MIME type did not match its data")
+    # Portal may label PNG data as JPEG (or vice versa). Use the verified
+    # signature, not the unreliable label, when constructing the image URI.
     return f"data:{detected_mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
