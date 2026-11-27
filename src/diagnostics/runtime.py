@@ -37,7 +37,7 @@ from diagnostics.models import (
     DiagnosticSource,
 )
 from diagnostics.redaction import build_report, sanitize_log_text
-from diagnostics.release_config import load_runtime_public_dsn
+from diagnostics.release_config import load_runtime_public_config
 from diagnostics.spool import (
     DiagnosticSpool,
     _delete_exact_regular,
@@ -643,6 +643,8 @@ class DiagnosticRuntime:
         execution: DiagnosticExecution = DiagnosticExecution.UNKNOWN,
     ) -> str | None:
         if not isinstance(exc, BaseException):
+            return None
+        if _is_uth_maintenance_error(exc):
             return None
         if getattr(self._local, "capturing", False):
             return None
@@ -1308,6 +1310,62 @@ class DiagnosticRuntime:
                 pass
 
 
+def _is_uth_maintenance_error(exc: BaseException) -> bool:
+    """Return True when ``exc`` represents expected UTH server maintenance."""
+    try:
+        from core.maintenance import (  # type: ignore[import-not-found]
+            UthMaintenanceError,
+        )
+    except ImportError:
+        UthMaintenanceError = None  # type: ignore[assignment]
+    if UthMaintenanceError is not None and isinstance(exc, UthMaintenanceError):
+        return True
+    for cls in type(exc).__mro__:
+        if cls.__name__ in {"UthMaintenanceError", "PortalMaintenanceError"}:
+            if getattr(exc, "notice", None) is not None:
+                return True
+    return False
+
+
+def _resolve_runtime_package_format(
+    channel_value: str,
+    configured_format: str | None,
+    *,
+    development: bool,
+    is_windows: bool,
+) -> str:
+    """Resolve the effective runtime package format, refining Windows EXE vs MSI."""
+    if development or channel_value == "source":
+        return "source"
+    if channel_value == "chplay":
+        return configured_format if configured_format in {"aab", "apk"} else "aab"
+    if channel_value == "msstore":
+        return "msix"
+    if channel_value == "apk_lts":
+        return configured_format if configured_format in {"apk", "aab"} else "apk"
+    if channel_value == "ipa_lts":
+        return (
+            configured_format
+            if configured_format in {"ipa", "ios_app"}
+            else "ipa"
+        )
+    if channel_value == "exe_lts":
+        fmt = configured_format or "exe_msi"
+        if fmt == "exe_msi" and is_windows:
+            try:
+                from platform_utils.windows_update import read_install_channel
+
+                install_channel = read_install_channel()
+            except Exception:
+                install_channel = None
+            if install_channel == "bootstrapper":
+                return "exe"
+            if install_channel == "msi":
+                return "msi"
+        return fmt if fmt in {"exe", "msi", "exe_msi"} else "exe_msi"
+    return configured_format or "source"
+
+
 def create_default_runtime(
     data_dir: Path,
     *,
@@ -1317,8 +1375,10 @@ def create_default_runtime(
     from importlib.metadata import PackageNotFoundError, version
 
     from config import settings, subscribe_settings_saved
+    from core.distribution import DistributionChannel, resolve_distribution_channel
     from core.version import APP_VERSION
     from diagnostics import device_profile
+    import platform_utils
 
     try:
         flet_version = version("flet")
@@ -1340,6 +1400,22 @@ def create_default_runtime(
         flet=package_version("flet"),
     )
 
+    public_config = load_runtime_public_config(development=development)
+    is_windows = bool(getattr(platform_utils, "IS_WINDOWS", sys.platform == "win32"))
+    if development:
+        release_channel = "development"
+        distribution_channel = DistributionChannel.SOURCE.value
+    else:
+        dist_profile = resolve_distribution_channel(is_packaged=True)
+        release_channel = public_config.build_environment
+        distribution_channel = dist_profile.channel.value
+    package_format = _resolve_runtime_package_format(
+        distribution_channel,
+        public_config.package_format,
+        development=development,
+        is_windows=is_windows,
+    )
+
     def consent_provider() -> CrashConsent:
         try:
             return CrashConsent(settings.CRASH_REPORTING_CONSENT)
@@ -1352,8 +1428,10 @@ def create_default_runtime(
         return DiagnosticContext(
             source_root=Path(__file__).resolve().parents[1],
             app_version=APP_VERSION,
-            release_channel="stable",
-            install_type="source" if development else "packaged",
+            release_channel=release_channel,
+            install_type=distribution_channel,
+            distribution_channel=distribution_channel,
+            package_format=package_format,
             os_family=family,
             os_version=platform.release() or "unknown",
             os_build=device_profile.os_build(),
@@ -1394,7 +1472,7 @@ def create_default_runtime(
     consent_gate = DiagnosticConsentGate()
     delivery = DiagnosticDeliveryWorker(
         spool,
-        dsn=load_runtime_public_dsn(development=development),
+        dsn=public_config.dsn,
         consent_gate=consent_gate,
     )
     runtime = DiagnosticRuntime(
