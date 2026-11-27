@@ -1016,6 +1016,7 @@ class ProfileView(ft.Container):
                 padding=ft.Padding.symmetric(horizontal=14, vertical=10),
                 border_radius=12,
                 bgcolor=ft.Colors.with_opacity(0.08, tint_color),
+                border=ft.Border.all(1, C.BORDER) if platform_utils.UI_IS_MOBILE else None,
                 expand=True,
                 height=tile_height,
                 alignment=ft.Alignment(0, 0),
@@ -1030,6 +1031,7 @@ class ProfileView(ft.Container):
             padding=ft.Padding.symmetric(horizontal=10),
             border_radius=12,
             bgcolor=ft.Colors.with_opacity(0.08, status_color),
+            border=ft.Border.all(1, C.BORDER) if platform_utils.UI_IS_MOBILE else None,
             expand=True,
             height=tile_height,
             alignment=ft.Alignment(0, 0),
@@ -1185,22 +1187,22 @@ class ProfileView(ft.Container):
     def _tab_button(
         self, label: str, key: str, icon, *, expand: bool = False
     ) -> ft.Container:
-        # Active tab mirrors the light-blue badge ("Đại học - chính quy"):
-        # tinted background + accent text, on every platform.
         active = self._active_tab == key
+        solid = active and platform_utils.UI_IS_MOBILE
+        foreground = C.ON_ACCENT if solid else C.ACCENT if active else C.TEXT_SECONDARY
         return ft.Container(
             content=ft.Row(
                 controls=[
                     ft.Icon(
                         icon,
                         size=15,
-                        color=C.ACCENT if active else C.TEXT_SECONDARY,
+                        color=foreground,
                     ),
                     ft.Text(
                         label,
                         size=13,
                         weight=ft.FontWeight.W_700,
-                        color=C.ACCENT if active else C.TEXT_SECONDARY,
+                        color=foreground,
                     ),
                 ],
                 spacing=6,
@@ -1210,7 +1212,7 @@ class ProfileView(ft.Container):
             ),
             padding=ft.Padding.symmetric(horizontal=16, vertical=9),
             border_radius=10,
-            bgcolor=ft.Colors.with_opacity(0.12, C.ACCENT)
+            bgcolor=C.ACCENT if solid else ft.Colors.with_opacity(0.12, C.ACCENT)
             if active
             else C.SURFACE,
             border=None if active else ft.Border.all(1, C.BORDER),
@@ -1384,7 +1386,19 @@ class ProfileView(ft.Container):
                         tight=True,
                         expand=True,
                     ),
-                    self._status_chip(row.status),
+                    ft.Column(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                                size=20,
+                                color=C.TEXT_SECONDARY,
+                            ),
+                            self._status_chip(row.status),
+                        ],
+                        spacing=4,
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.END,
+                    ),
                 ],
                 spacing=8,
                 tight=True,

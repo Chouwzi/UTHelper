@@ -709,7 +709,7 @@ def test_profile_view_mobile_fee_card_shows_mockup_lines(monkeypatch):
     assert price.value == format_vnd(4500000)
     # Unpaid fee: red price, "Còn nợ" pill at the right edge.
     assert price.color == C.CRITICAL
-    pill = cards[0].content.controls[1]
+    pill = cards[0].content.controls[1].controls[1]
     assert pill.content.controls[1].value == "Còn nợ"
 
 
