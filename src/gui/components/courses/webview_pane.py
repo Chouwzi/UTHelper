@@ -454,6 +454,7 @@ class CoursesWebViewPane(ft.Container):
         embedded_webview_factory: Optional[Callable[[str], Optional[ft.Control]]] = None,
         pane_width: Optional[float] = None,
         account_namespace: Optional[str] = None,
+        occlusion_layer: str = "courses_pane",
     ) -> None:
         super().__init__(expand=True, bgcolor=C.BG)
         self._page = page
@@ -500,6 +501,9 @@ class CoursesWebViewPane(ft.Container):
         self._on_toggle_expand = on_toggle_expand
         self._embedded_factory = embedded_webview_factory
         self._account_namespace = account_namespace
+        self._occlusion_layer: str = (
+            str(occlusion_layer or "courses_pane").strip() or "courses_pane"
+        )
 
         if pane_width is not None:
             resolved_width = float(pane_width)
@@ -964,6 +968,7 @@ class CoursesWebViewPane(ft.Container):
             page=self._page,
             bgcolor=C.BG,
             account_namespace=self._account_namespace,
+            occlusion_layer=self._occlusion_layer,
             cookie_provider=cookie_provider,
             init_script_provider=init_script_provider,
             on_ready=self._on_host_ready,

@@ -373,6 +373,72 @@ def _read_raw_with_optional_gzip(response, max_bytes: int) -> bytes:
     return bytes(out[:max_bytes])
 
 
+def _read_html_response_bytes(response, max_bytes: int = 2 * 1024 * 1024) -> bytes:
+    """Read HTML response bytes up to ``max_bytes``, gunzipping when gzip-encoded."""
+    info = (
+        response.info()
+        if hasattr(response, "info")
+        else getattr(response, "headers", None)
+    )
+    encoding = (
+        str(info.get("Content-Encoding") or "").strip().lower()
+        if info is not None and hasattr(info, "get")
+        else ""
+    )
+    if encoding != "gzip":
+        try:
+            body = response.read(max_bytes + 1)
+        except TypeError:
+            body = response.read()
+        if len(body) > max_bytes:
+            raise ValueError("Moodle web response was too large")
+        return body
+
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = bytearray()
+    compressed_limit = max_bytes + 65536
+    compressed_read = 0
+    chunk_size = 65536
+    while True:
+        remaining_comp = compressed_limit - compressed_read
+        if remaining_comp <= 0:
+            extra = response.read(1)
+            if extra:
+                raise ValueError("Moodle web response was too large")
+            break
+        try:
+            chunk = response.read(min(chunk_size, remaining_comp))
+        except TypeError:
+            chunk = response.read()
+        if not chunk:
+            break
+        compressed_read += len(chunk)
+        allowed = (max_bytes + 1) - len(out)
+        try:
+            piece = decompressor.decompress(chunk, allowed)
+        except zlib.error:
+            if not out:
+                if len(chunk) > max_bytes:
+                    raise ValueError("Moodle web response was too large")
+                return chunk
+            break
+        if piece:
+            out.extend(piece)
+        if len(out) > max_bytes or (decompressor.unconsumed_tail and len(out) >= max_bytes):
+            raise ValueError("Moodle web response was too large")
+        if decompressor.eof:
+            break
+    try:
+        tail = decompressor.flush((max_bytes + 1) - len(out))
+        if tail:
+            out.extend(tail)
+    except zlib.error:
+        pass
+    if len(out) > max_bytes:
+        raise ValueError("Moodle web response was too large")
+    return bytes(out)
+
+
 @dataclass(frozen=True)
 class DraftFileRecord:
     """The exact identity Moodle assigned to an uploaded draft file."""
@@ -871,7 +937,11 @@ class MoodleClient:
             url,
             data=encoded,
             method="POST" if data is not None else "GET",
-            headers={"User-Agent": _DEFAULT_UA, "Accept": "text/html"},
+            headers={
+                "User-Agent": _DEFAULT_UA,
+                "Accept": "text/html",
+                "Accept-Encoding": "gzip",
+            },
         )
         with opener.open(request, timeout=timeout) as response:
             final_url = response.geturl()
@@ -879,9 +949,7 @@ class MoodleClient:
             final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
             if final_origin != origin:
                 raise ValueError("Moodle web response changed origin")
-            body = response.read(2 * 1024 * 1024 + 1)
-        if len(body) > 2 * 1024 * 1024:
-            raise ValueError("Moodle web response was too large")
+            body = _read_html_response_bytes(response, max_bytes=2 * 1024 * 1024)
         return final_url, body.decode("utf-8", errors="replace")
 
     def get_sesskey(self) -> str:
@@ -929,14 +997,21 @@ class MoodleClient:
             sesskey = self._sesskey
             has_cookie = self._has_moodle_session_cookie()
             auth_at = float(getattr(self, "_session_authenticated_at", 0.0) or 0.0)
+            owner = str(getattr(self, "_session_owner", "") or "").strip().casefold()
             gen = int(getattr(self, "_session_generation", 0))
 
+        if (
+            bool(entry_user)
+            and has_cookie
+            and auth_at > 0.0
+            and (time.monotonic() - auth_at) < max_idle_seconds
+            and (not owner or owner == entry_user)
+        ):
+            return True
         if not sesskey or not has_cookie:
             return bool(
                 self.login_session(force=True) if sesskey else self.login_session()
             )
-        if auth_at > 0.0 and (time.monotonic() - auth_at) < max_idle_seconds:
-            return True
 
         budget = min(self._LIVE_SESSION_PROBE_TIMEOUT, max(0.1, float(probe_timeout)))
         probe_start = time.perf_counter()
@@ -1079,12 +1154,21 @@ class MoodleClient:
             )
             had_sesskey = bool(self._sesskey)
             has_cookie = self._has_moodle_session_cookie()
+            auth_at = float(getattr(self, "_session_authenticated_at", 0.0) or 0.0)
+            owner = str(getattr(self, "_session_owner", "") or "").strip().casefold()
+            cookie_fresh = bool(
+                entry_user
+                and has_cookie
+                and auth_at > 0.0
+                and (time.monotonic() - auth_at) < 900.0
+                and (not owner or owner == entry_user)
+            )
             prev_shared_err = self._last_login_error
             if force_relogin:
                 action = "force"
             elif ensure_login and verify_live:
-                action = "verify_live"
-            elif ensure_login and (not had_sesskey or not has_cookie):
+                action = "none" if cookie_fresh else "verify_live"
+            elif ensure_login and not cookie_fresh and (not had_sesskey or not has_cookie):
                 action = "login"
 
         if action != "none":
@@ -1102,7 +1186,15 @@ class MoodleClient:
                 return []
         elif action == "verify_live":
             try:
-                auth_ok = bool(self.ensure_live_session())
+                if (
+                    not had_sesskey
+                    and not has_cookie
+                    and getattr(self.login_session, "__func__", None)
+                    is MoodleClient.login_session
+                ):
+                    auth_ok = bool(self.login_session(require_sesskey=False))
+                else:
+                    auth_ok = bool(self.ensure_live_session())
             except Exception as exc:
                 logger.warning(
                     "Session liveness check before cookie export failed (%s)",
@@ -1111,11 +1203,18 @@ class MoodleClient:
                 auth_ok = False
         elif action == "login":
             try:
-                auth_ok = bool(
-                    self.login_session(force=True)
-                    if had_sesskey
-                    else self.login_session()
-                )
+                if (
+                    not had_sesskey
+                    and getattr(self.login_session, "__func__", None)
+                    is MoodleClient.login_session
+                ):
+                    auth_ok = bool(self.login_session(require_sesskey=False))
+                else:
+                    auth_ok = bool(
+                        self.login_session(force=True)
+                        if had_sesskey
+                        else self.login_session()
+                    )
             except Exception as exc:
                 logger.warning(
                     "Session login before cookie export failed (%s)",
@@ -1835,6 +1934,13 @@ class MoodleClient:
                             logger.error(
                                 f"AJAX API error: {resp.get('exception')} - {resp.get('message')}"
                             )
+                    elif isinstance(resp, dict):
+                        with self._get_lock("_session_lock", reentrant=True):
+                            if (
+                                int(getattr(self, "_session_generation", 0)) == gen
+                                and self._sesskey
+                            ):
+                                self._session_authenticated_at = time.monotonic()
                     return resp
                 return None
         except Exception as e:
