@@ -175,6 +175,48 @@ def _set_webview_occlusion(
         logger.debug("WebView occlusion update failed", exc_info=True)
 
 
+def _clear_modal_and_filter_webview_occlusion() -> None:
+    """Release active modal_dialog and desktop_filter occlusions while preserving detail_view/quiz_player."""
+    _set_webview_occlusion("desktop_filter", False)
+    tokens: list[str] = []
+    remaining_count = 0
+    try:
+        import gui.components.courses.embedded_webview_host as _wv_host
+
+        lock = getattr(_wv_host, "_OCCLUSION_LOCK", None)
+        active_tokens = getattr(_wv_host, "_ACTIVE_OCCLUSION_TOKENS", None)
+        active_reasons = getattr(_wv_host, "_ACTIVE_OCCLUSION_REASONS", None)
+        if lock is not None:
+            with lock:
+                if isinstance(active_tokens, set):
+                    tokens = [
+                        tok
+                        for reason, tok in list(active_tokens)
+                        if reason == "modal_dialog" and tok
+                    ]
+                if isinstance(active_reasons, dict):
+                    remaining_count = int(active_reasons.get("modal_dialog", 0) or 0)
+    except Exception:
+        pass
+    for tok in tokens:
+        _call_modal_occlusion("modal_dialog", False, token=tok)
+    for _ in range(max(1, remaining_count)):
+        _call_modal_occlusion("modal_dialog", False)
+
+
+class _ControllerWindowActivator(WindowActivator):
+    """WindowActivator subclass notifying AppController once the window restores."""
+
+    def __init__(self, page: ft.Page, on_shown=None) -> None:
+        super().__init__(page)
+        self._on_shown = on_shown
+
+    async def show(self) -> None:
+        await super().show()
+        if callable(self._on_shown):
+            self._on_shown()
+
+
 def _build_account_data_cache(username: str | None):
     """Build an isolated DataCache; logged-out and demo states never migrate legacy cache."""
     from core.data_cache import DataCache
@@ -544,6 +586,125 @@ class AppController:
             )
         except Exception:
             logger.debug("Diagnostic breadcrumb failed", exc_info=True)
+
+    def _install_page_dialog_occlusion_bridge(self) -> None:
+        """Wrap page.show_dialog / page.pop_dialog so modal dialogs occlude native WebViews."""
+        page = getattr(self, "page", None)
+        if page is None or getattr(page, "_uth_dialog_occlusion_wrapped", False):
+            return
+        orig_show = getattr(page, "show_dialog", None)
+        orig_pop = getattr(page, "pop_dialog", None)
+        if not callable(orig_show):
+            return
+        tracked_tokens = getattr(self, "_tracked_modal_dialog_tokens", None)
+        if not isinstance(tracked_tokens, set):
+            tracked_tokens = set()
+            self._tracked_modal_dialog_tokens = tracked_tokens
+
+        def _release_dialog_token(dlg_obj, fallback_tok: str | None = None) -> None:
+            tok = getattr(dlg_obj, "_uth_modal_occlusion_token", None) or fallback_tok
+            if not tok:
+                return
+            tracked_tokens.discard(tok)
+            _call_modal_occlusion("modal_dialog", False, token=tok)
+
+        def _wrapped_show_dialog(dialog):
+            if dialog is None or isinstance(dialog, ft.SnackBar):
+                return orig_show(dialog)
+            tok = getattr(dialog, "_uth_modal_occlusion_token", None)
+            if not tok:
+                tok = _new_modal_occlusion_token()
+                try:
+                    dialog._uth_modal_occlusion_token = tok
+                except Exception:
+                    pass
+            pre_acquired = bool(getattr(dialog, "_uth_modal_occlusion_pre_acquired", False))
+            if pre_acquired:
+                try:
+                    dialog._uth_modal_occlusion_pre_acquired = False
+                except Exception:
+                    pass
+            tracked_tokens.add(tok)
+            if not getattr(dialog, "_uth_modal_dismiss_wrapped", False):
+                prev_dismiss = getattr(dialog, "on_dismiss", None)
+                if inspect.iscoroutinefunction(prev_dismiss):
+
+                    async def _on_dismiss_async(
+                        event=None, _d=dialog, _t=tok, _p=prev_dismiss
+                    ):
+                        try:
+                            await _p(event)
+                        finally:
+                            _release_dialog_token(_d, _t)
+
+                    on_dismiss_wrapper = _on_dismiss_async
+                else:
+
+                    def _on_dismiss_sync(
+                        event=None, _d=dialog, _t=tok, _p=prev_dismiss
+                    ):
+                        res = None
+                        try:
+                            if callable(_p):
+                                res = _p(event)
+                                if inspect.isawaitable(res):
+
+                                    async def _await_and_release(awaitable):
+                                        try:
+                                            return await awaitable
+                                        finally:
+                                            _release_dialog_token(_d, _t)
+
+                                    return _await_and_release(res)
+                            return res
+                        finally:
+                            if not inspect.isawaitable(res):
+                                _release_dialog_token(_d, _t)
+
+                    on_dismiss_wrapper = _on_dismiss_sync
+                try:
+                    dialog.on_dismiss = on_dismiss_wrapper
+                    dialog._uth_modal_dismiss_wrapped = True
+                except Exception:
+                    pass
+            if not pre_acquired:
+                _call_modal_occlusion("modal_dialog", True, token=tok)
+            try:
+                return orig_show(dialog)
+            except Exception:
+                _release_dialog_token(dialog, tok)
+                raise
+
+        def _wrapped_pop_dialog():
+            top_open = None
+            dialogs_ctrl = getattr(page, "_dialogs", None)
+            controls = getattr(dialogs_ctrl, "controls", None)
+            if controls:
+                top_open = next(
+                    (d for d in reversed(controls) if getattr(d, "open", False)),
+                    None,
+                )
+            popped = orig_pop() if callable(orig_pop) else None
+            target_dlg = popped if popped is not None else top_open
+            if target_dlg is not None and not isinstance(target_dlg, ft.SnackBar):
+                _release_dialog_token(target_dlg)
+            return popped
+
+        try:
+            page.show_dialog = _wrapped_show_dialog
+            if callable(orig_pop):
+                page.pop_dialog = _wrapped_pop_dialog
+            page._uth_dialog_occlusion_wrapped = True
+        except Exception:
+            logger.debug("Page dialog occlusion bridge skipped", exc_info=True)
+
+    def _release_tracked_modal_dialog_tokens(self) -> None:
+        tracked = getattr(self, "_tracked_modal_dialog_tokens", None)
+        if not isinstance(tracked, set) or not tracked:
+            return
+        for tok in list(tracked):
+            _call_modal_occlusion("modal_dialog", False, token=tok)
+        tracked.clear()
 
     def _attach_modal_occlusion_release(
         self, *, occlusion_token: str | None = None
@@ -1655,7 +1816,10 @@ class AppController:
         return "", ""
 
     def _init_window(self):
-        self.window_activator = WindowActivator(self.page)
+        self.window_activator = _ControllerWindowActivator(
+            self.page, on_shown=getattr(self, "_on_window_restored", None)
+        )
+        self._install_page_dialog_occlusion_bridge()
         # Resolve the presentation profile without mutating native capabilities.
         detect_platform(self.page)
         # Read the immutable runtime capabilities after resolving the UI profile.
@@ -1769,6 +1933,37 @@ class AppController:
             or callable(getattr(tray, "notify", None))
         )
 
+    def _suspend_app_webview_for_window_hide(self) -> None:
+        pane = getattr(self, "_app_webview_pane", None)
+        host = getattr(self, "_app_webview_host", None)
+        if pane is None or host is None or not getattr(host, "visible", False):
+            return
+        self._app_webview_suspended_for_window = True
+        suspend_fn = getattr(pane, "suspend", None)
+        if callable(suspend_fn):
+            try:
+                suspend_fn()
+            except Exception:
+                logger.debug("App WebView suspend skipped", exc_info=True)
+
+    def _on_window_restored(self) -> None:
+        if self._is_window_hidden_or_minimized():
+            return
+        pane = getattr(self, "_app_webview_pane", None)
+        host = getattr(self, "_app_webview_host", None)
+        if pane is None or host is None or not getattr(host, "visible", False):
+            self._app_webview_suspended_for_window = False
+            return
+        if getattr(self, "_app_webview_suspended_for_window", False):
+            self._app_webview_suspended_for_window = False
+            resume_fn = getattr(pane, "resume", None)
+            if callable(resume_fn):
+                try:
+                    resume_fn()
+                except Exception:
+                    logger.debug("App WebView resume skipped", exc_info=True)
+        self._sync_app_webview_bounds()
+
     async def _handle_window_close_request(self) -> None:
         """Hide to system tray when enabled and ready; otherwise exit safely."""
         if settings.MINIMIZE_TO_TRAY and self._is_tray_available():
@@ -1778,6 +1973,7 @@ class AppController:
                     dismiss_filter()
                 except Exception:
                     pass
+            self._suspend_app_webview_for_window_hide()
             self.page.window.visible = False
             self.page.update()
             # H-01: Show tray balloon the first time so user knows app is still running
@@ -1809,13 +2005,43 @@ class AppController:
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
         if platform_utils.IS_MOBILE:
             return
-        if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
+        ev_type = getattr(e, "type", None)
+        ev_data = str(getattr(e, "data", "") or "").lower()
+        if ev_type == ft.WindowEventType.CLOSE or ev_data == "close":
             await self._handle_window_close_request()
-
-    def _toggle_maximize_window(self, _event=None) -> None:
-        """Phóng to / khôi phục cửa sổ từ thanh tiêu đề tuỳ chỉnh."""
-        self.page.window.maximized = not self.page.window.maximized
-        self.page.update()
+            return
+        win_ev_cls = getattr(ft, "WindowEventType", None)
+        hide_types = {
+            t
+            for t in (
+                getattr(win_ev_cls, "MINIMIZE", None),
+                getattr(win_ev_cls, "HIDE", None),
+            )
+            if t is not None
+        }
+        restore_types = {
+            t
+            for t in (
+                getattr(win_ev_cls, "RESTORE", None),
+                getattr(win_ev_cls, "SHOW", None),
+                getattr(win_ev_cls, "FOCUS", None),
+                getattr(win_ev_cls, "RESIZE", None),
+                getattr(win_ev_cls, "MAXIMIZE", None),
+                getattr(win_ev_cls, "UNMAXIMIZE", None),
+            )
+            if t is not None
+        }
+        if ev_type in hide_types or ev_data in {"minimize", "hide"}:
+            self._suspend_app_webview_for_window_hide()
+        elif ev_type in restore_types or ev_data in {
+            "restore",
+            "show",
+            "focus",
+            "resize",
+            "maximize",
+            "unmaximize",
+        }:
+            self._on_window_restored()
 
     # ------------------------------------------------------------------
     # Responsive desktop layout
@@ -1862,6 +2088,8 @@ class AppController:
     async def _rail_navigate(self, target: str) -> None:
         """Chuyển mục từ thanh điều hướng: đóng view đang mở rồi mở view đích."""
         self._dismiss_desktop_filter_menu()
+        close_wv = getattr(self, "_close_app_webview", None)
+        closed_wv = bool(close_wv(update_page=False)) if callable(close_wv) else False
         if getattr(getattr(self, "detail_view", None), "visible", False):
             await self._close_detail()
         if getattr(getattr(self, "course_grades_view", None), "visible", False):
@@ -1870,10 +2098,26 @@ class AppController:
         if target == current:
             # Bấm lại đúng mục đang mở: giữ nguyên, không quay về Tổng quan.
             self._sync_rail_active()
+            if closed_wv:
+                page = getattr(self, "page", None)
+                upd = getattr(page, "update", None)
+                if callable(upd):
+                    try:
+                        upd()
+                    except Exception:
+                        pass
             return
         if current == "settings":
             if self.settings_view.has_changes():
                 self._sync_rail_active()
+                if closed_wv:
+                    page = getattr(self, "page", None)
+                    upd = getattr(page, "update", None)
+                    if callable(upd):
+                        try:
+                            upd()
+                        except Exception:
+                            pass
                 request_close = getattr(self.settings_view, "request_close", None)
                 if callable(request_close):
                     await request_close(
@@ -1907,10 +2151,12 @@ class AppController:
         if window is None:
             return
         window.maximized = not bool(getattr(window, "maximized", False))
+        self._sync_app_webview_bounds()
         self.page.update()
 
     def _minimize_window(self, _event=None) -> None:
         """Minimize from the custom desktop header without hiding to tray."""
+        self._suspend_app_webview_for_window_hide()
         self.page.window.minimized = True
         self.page.update()
 
@@ -1950,10 +2196,15 @@ class AppController:
         key = str(getattr(e, "key", "") or "")
         courses_view = getattr(self, "courses_view", None)
         detail_open = bool(getattr(getattr(self, "detail_view", None), "visible", False))
+        app_wv_open = bool(
+            getattr(getattr(self, "_app_webview_host", None), "visible", False)
+            or getattr(self, "_app_webview_pane", None) is not None
+        )
         if (
             courses_view is not None
             and getattr(courses_view, "visible", False)
             and not detail_open
+            and not app_wv_open
         ):
             overlays = getattr(courses_view, "_overlays", None)
             if overlays:
@@ -1967,6 +2218,7 @@ class AppController:
             courses_view is not None
             and getattr(courses_view, "visible", False)
             and not detail_open
+            and not app_wv_open
         ):
             ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
             if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not getattr(e, "alt", False)):
@@ -2020,10 +2272,15 @@ class AppController:
             return True
         app_wv_host = getattr(self, "_app_webview_host", None)
         app_wv_pane = getattr(self, "_app_webview_pane", None)
-        if app_wv_host is not None and getattr(app_wv_host, "visible", False):
+        if (
+            app_wv_host is not None and getattr(app_wv_host, "visible", False)
+        ) or app_wv_pane is not None:
             if app_wv_pane is not None and app_wv_pane.handle_back():
                 return True
             self._close_app_webview()
+            return True
+        if getattr(self, "_active_desktop_filter_menu", None) is not None:
+            self._dismiss_desktop_filter_menu()
             return True
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
@@ -3140,6 +3397,17 @@ class AppController:
         host = getattr(self, "_app_webview_host", None)
         if pane is None or host is None or not getattr(host, "visible", False):
             return
+        if (
+            getattr(self, "_app_webview_suspended_for_window", False)
+            and not self._is_window_hidden_or_minimized()
+        ):
+            self._app_webview_suspended_for_window = False
+            resume_fn = getattr(pane, "resume", None)
+            if callable(resume_fn):
+                try:
+                    resume_fn()
+                except Exception:
+                    logger.debug("App WebView resume on resize skipped", exc_info=True)
         sync_fn = getattr(pane, "sync_bounds", None)
         if callable(sync_fn):
             left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds(
@@ -3168,6 +3436,7 @@ class AppController:
         pane = getattr(self, "_app_webview_pane", None)
         was_visible = bool(host is not None and getattr(host, "visible", False))
         self._app_webview_pane = None
+        self._app_webview_suspended_for_window = False
         if pane is not None:
             try:
                 if clear_browser_storage:
@@ -3188,6 +3457,84 @@ class AppController:
             except Exception:
                 pass
         return was_visible or pane is not None
+
+    def _dismiss_overlays_before_app_webview(self) -> None:
+        """Close active desktop filter menus, schedule surfaces, and modal dialogs before mounting _app_webview_pane."""
+        dismiss_filter = getattr(self, "_dismiss_desktop_filter_menu", None)
+        if callable(dismiss_filter):
+            try:
+                dismiss_filter()
+            except Exception:
+                pass
+        schedule_comp = getattr(self, "_today_schedule_component", None)
+        if schedule_comp is not None and getattr(schedule_comp, "surface_open", False):
+            close_surface = getattr(schedule_comp, "close_surface", None)
+            if callable(close_surface):
+                try:
+                    close_surface()
+                except Exception:
+                    pass
+        page = getattr(self, "page", None)
+        pop_dialog = getattr(page, "pop_dialog", None)
+        dialogs_ctrl = getattr(page, "_dialogs", None)
+        controls = getattr(dialogs_ctrl, "controls", None)
+        if callable(pop_dialog):
+            if controls is not None:
+                open_modals = [
+                    d
+                    for d in controls
+                    if getattr(d, "open", False) and not isinstance(d, ft.SnackBar)
+                ]
+                pop_budget = max(1, len(open_modals))
+                for _ in range(min(8, pop_budget)):
+                    try:
+                        popped = pop_dialog()
+                    except Exception:
+                        break
+                    if not any(
+                        getattr(d, "open", False) and not isinstance(d, ft.SnackBar)
+                        for d in controls
+                    ):
+                        break
+                    if popped is None:
+                        break
+                for d in controls:
+                    if getattr(d, "open", False) and not isinstance(d, ft.SnackBar):
+                        try:
+                            d.open = False
+                        except Exception:
+                            pass
+            else:
+                try:
+                    pop_dialog()
+                except Exception:
+                    pass
+        overlay = getattr(page, "overlay", None)
+        if overlay:
+            for item in overlay:
+                if (
+                    not isinstance(item, ft.SnackBar)
+                    and getattr(item, "open", False)
+                    and hasattr(item, "on_dismiss")
+                ):
+                    try:
+                        item.open = False
+                    except Exception:
+                        pass
+        legacy_dlg = getattr(page, "dialog", None)
+        if (
+            legacy_dlg is not None
+            and not isinstance(legacy_dlg, ft.SnackBar)
+            and getattr(legacy_dlg, "open", False)
+        ):
+            try:
+                legacy_dlg.open = False
+            except Exception:
+                pass
+        release_tracked = getattr(self, "_release_tracked_modal_dialog_tokens", None)
+        if callable(release_tracked):
+            release_tracked()
+        _clear_modal_and_filter_webview_occlusion()
 
     def _build_webview_auth_service(
         self,
@@ -3283,12 +3630,7 @@ class AppController:
         )
         if supports_embedded:
             self._close_app_webview(update_page=False)
-            pop_dialog = getattr(self.page, "pop_dialog", None)
-            if callable(pop_dialog):
-                try:
-                    pop_dialog()
-                except Exception:
-                    pass
+            self._dismiss_overlays_before_app_webview()
 
             source = "thnn" if site_kind == "thnn" else "courses"
             preview_server = None
@@ -3335,17 +3677,21 @@ class AppController:
             }
             try:
                 pane_params = inspect.signature(CoursesWebViewPane).parameters
-                if "account_epoch_getter" in pane_params or any(
+                has_var_kw = any(
                     p.kind == inspect.Parameter.VAR_KEYWORD
                     for p in pane_params.values()
-                ):
+                )
+                if "account_epoch_getter" in pane_params or has_var_kw:
                     pane_kwargs["account_epoch_getter"] = lambda: getattr(
                         self, "_account_epoch", 0
                     )
+                if "occlusion_layer" in pane_params or has_var_kw:
+                    pane_kwargs["occlusion_layer"] = "app_overlay"
             except (TypeError, ValueError):
                 pass
             pane = CoursesWebViewPane(**pane_kwargs)
             self._app_webview_pane = pane
+            self._app_webview_suspended_for_window = False
             host.content = pane
             host.visible = True
             pane.sync_bounds(
@@ -3515,6 +3861,7 @@ class AppController:
         popup_top = max(0.0, anchor_bottom - header_height)
 
         self._active_desktop_filter_menu = menu
+        _set_webview_occlusion("desktop_filter", True)
         menu._set_expanded(True)
         self._desktop_filter_popup_host.content = menu.popup_panel
         self._desktop_filter_popup_host.left = popup_left
@@ -3560,6 +3907,7 @@ class AppController:
         active = getattr(self, "_active_desktop_filter_menu", None)
         if menu is not None and active is not menu:
             return
+        _set_webview_occlusion("desktop_filter", False)
         if active is not None:
             active._set_expanded(False)
         self._active_desktop_filter_menu = None
@@ -6352,6 +6700,8 @@ class AppController:
                 "modal_dialog", False, token=modal_token
             ),
         )
+        dialog._uth_modal_occlusion_token = modal_token
+        dialog._uth_modal_occlusion_pre_acquired = True
         _call_modal_occlusion("modal_dialog", True, token=modal_token)
         self.page.show_dialog(dialog)
 
@@ -6733,6 +7083,13 @@ class AppController:
             self._run_shutdown_step(
                 "close_app_webview", lambda: close_wv(update_page=False)
             )
+        release_tracked = getattr(self, "_release_tracked_modal_dialog_tokens", None)
+        if callable(release_tracked):
+            self._run_shutdown_step("release_modal_dialog_tokens", release_tracked)
+        self._run_shutdown_step(
+            "clear_desktop_filter_occlusion",
+            lambda: _set_webview_occlusion("desktop_filter", False),
+        )
 
     def _shutdown_for_exit(self) -> None:
         lock = getattr(self, "_exit_cleanup_lock", None)
@@ -6817,6 +7174,13 @@ class AppController:
             self._run_shutdown_step(
                 "close_app_webview", lambda: close_wv(update_page=False)
             )
+        release_tracked = getattr(self, "_release_tracked_modal_dialog_tokens", None)
+        if callable(release_tracked):
+            self._run_shutdown_step("release_modal_dialog_tokens", release_tracked)
+        self._run_shutdown_step(
+            "clear_desktop_filter_occlusion",
+            lambda: _set_webview_occlusion("desktop_filter", False),
+        )
 
         courses_coord = getattr(self, "_courses_coordinator", None)
         if courses_coord is not None:

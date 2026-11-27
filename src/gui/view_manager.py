@@ -225,6 +225,7 @@ class ViewManager:
 
     async def close_calendar(self):
         """Ẩn màn hình Lịch bằng hiệu ứng và hiển thị lại màn hình Dashboard."""
+        self._dismiss_menu_if_open()
         self.calendar_view.hide()
         self._hide_courses_view()
         if self.tab_switcher is not None:
@@ -370,6 +371,7 @@ class ViewManager:
         target = self._grade_courses_target()
         if target is None:
             return
+        self._dismiss_menu_if_open()
         if hasattr(target, "hide"):
             target.hide()
         if self.course_grades_view is not None:
@@ -455,6 +457,7 @@ class ViewManager:
 
     async def close_grades(self):
         """Đóng màn hình điểm số và quay lại màn hình chính."""
+        self._dismiss_menu_if_open()
         self.grade_overview_view.hide()
         self._hide_courses_view()
         if self.tab_switcher is not None:
@@ -531,6 +534,7 @@ class ViewManager:
 
     async def close_detail(self, detail_from_calendar: bool):
         """Đóng màn hình chi tiết và quay lại nơi xuất phát (Lịch, Môn học, hoặc Dashboard)."""
+        self._dismiss_menu_if_open()
         try:
             from gui.components.courses.embedded_webview_host import (
                 set_global_webview_occlusion,
@@ -567,6 +571,7 @@ class ViewManager:
 
     async def close_settings(self):
         """Đóng màn hình cấu hình với hiệu ứng và hiển thị lại màn hình Dashboard chính."""
+        self._dismiss_menu_if_open()
         self.cancel_pending_settings_navigation()
         self._hide_courses_view()
         if self.tab_switcher is not None:
