@@ -593,9 +593,7 @@ class ProfileView(ft.Container):
         if self._student_card is not None and self._student_card_key == card_key:
             return self._student_card
 
-        # Mockup proportion: the photo circle covers ~57% of the 188px banner
-        # (148px made it nearly touch the banner edges).
-        avatar_size = 52 if mobile else 112
+        avatar_size = 52 if mobile else 84
         if avatar_src.startswith(("data:image/", "http://", "https://")):
             if self._avatar_image is None or self._avatar_src != avatar_src:
                 display_src = self._stable_avatar_source(avatar_src) if mobile else avatar_src
@@ -795,7 +793,7 @@ class ProfileView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         # Keep the identity and campus image in a compact desktop header.
-        banner_height = 150
+        banner_height = 120
         campus_width = round(banner_height * 845 / 415)
         campus_height = banner_height
         banner = ft.Container(
@@ -880,20 +878,20 @@ class ProfileView(ft.Container):
             controls=[
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in left_items],
-                    spacing=14,
+                    spacing=9,
                     tight=True,
                     expand=True,
                 ),
                 ft.Container(
                     width=2,
-                    height=150,
+                    height=125,
                     # Soft slate hairline like the mockup, not a dark bar.
                     bgcolor=ft.Colors.with_opacity(0.65, C.BORDER_STRONG),
                     margin=ft.Margin.symmetric(horizontal=22),
                 ),
                 ft.Column(
                     controls=[_info_row(*item, desktop=True) for item in right_items],
-                    spacing=14,
+                    spacing=9,
                     tight=True,
                     expand=True,
                 ),
@@ -914,7 +912,7 @@ class ProfileView(ft.Container):
                     ),
                     ft.Container(
                         content=self._info_column,
-                        padding=ft.Padding.only(left=36, right=36, top=20, bottom=24),
+                        padding=ft.Padding.only(left=36, right=36, top=14, bottom=16),
                     ),
                 ],
                 spacing=0,

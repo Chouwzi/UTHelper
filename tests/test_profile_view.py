@@ -510,7 +510,7 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     assert name_block.controls[1] is view._sid_text
     assert name_block.controls[2].content.controls[1].value
     assert campus_image.semantics_label == "Khuôn viên UTH"
-    assert view._avatar.width == 112
+    assert view._avatar.width == 84
     assert view._avatar.key == "profile-student-avatar"
     assert view._name_text.size == 21
     assert view._sid_text.size == 13
@@ -529,7 +529,7 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     divider = info_grid.controls[1]
     assert isinstance(divider, ft.Container)
     assert divider.width == 2
-    assert divider.height == 150
+    assert divider.height == 125
     assert divider.bgcolor == ft.Colors.with_opacity(0.65, C.BORDER_STRONG)
     assert len(info_grid.controls[0].controls) == 4
     assert len(info_grid.controls[2].controls) == 5
