@@ -181,6 +181,8 @@ class ScheduleWeekView(ft.Container):
         self._prefetch_task = None
         self._ensure_weeks_task: Any = None
         self._ensure_weeks_seq = 0
+        self._ensure_weeks_targets: tuple[date, ...] = ()
+        self._ensure_weeks_debouncing = False
         self._auth_failed = False
         self._maintenance_active = False
         self._maintenance_weeks: set[date] = set()
@@ -397,6 +399,8 @@ class ScheduleWeekView(ft.Container):
                     pass
         self._prefetching = False
         self._prefetch_generation = None
+        self._ensure_weeks_targets = ()
+        self._ensure_weeks_debouncing = False
         self._weeks.clear()
         self._live_at.clear()
         self._errors.clear()
@@ -460,47 +464,82 @@ class ScheduleWeekView(ft.Container):
             m = _monday(item)
             if m not in normalized:
                 normalized.append(m)
+        target_tuple = tuple(normalized)
 
         self._hydrate()
+
+        prev_task = self._ensure_weeks_task
+        prev_running = prev_task is not None and not getattr(
+            prev_task, "done", lambda: True
+        )()
+
+        if (
+            self._fetch_week is None
+            or self._auth_failed
+            or self._maintenance_active
+        ):
+            if prev_running:
+                self._ensure_weeks_seq += 1
+                self._ensure_weeks_task = None
+                self._ensure_weeks_targets = ()
+                self._ensure_weeks_debouncing = False
+                try:
+                    prev_task.cancel()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            return
+
+        if start_prefetch:
+            self._start_prefetch()
+
+        if (
+            prev_running
+            and self._ensure_weeks_targets == target_tuple
+            and (not self._ensure_weeks_debouncing or debounce_ms > 0)
+        ):
+            return
+
+        cancelled_previous = False
+        if prev_running:
+            cancelled_previous = True
+            self._ensure_weeks_task = None
+            try:
+                prev_task.cancel()  # type: ignore[union-attr]
+            except Exception:
+                pass
+
+        unfresh = [m for m in target_tuple if not self._is_fresh(m)]
+        if not unfresh:
+            self._ensure_weeks_targets = ()
+            self._ensure_weeks_debouncing = False
+            return
 
         self._ensure_weeks_seq += 1
         seq = self._ensure_weeks_seq
         generation = self._generation
-        prev_task = self._ensure_weeks_task
-        self._ensure_weeks_task = None
-        if prev_task is not None and not getattr(prev_task, "done", lambda: True)():
-            try:
-                prev_task.cancel()
-            except Exception:
-                pass
-
-        if self._fetch_week is None or self._auth_failed or self._maintenance_active:
-            return
-        if start_prefetch:
-            self._start_prefetch()
-
-        pending = [
-            m
-            for m in normalized
-            if m not in self._loading and not self._is_fresh(m)
-        ]
-        if not pending:
-            return
+        self._ensure_weeks_targets = target_tuple
+        self._ensure_weeks_debouncing = debounce_ms > 0
 
         premarked: set[date] = set()
         if debounce_ms <= 0:
-            first_monday = pending[0]
-            self._loading.add(first_monday)
-            self._errors.pop(first_monday, None)
-            premarked.add(first_monday)
+            first_unloaded = next(
+                (m for m in unfresh if m not in self._loading), None
+            )
+            if first_unloaded is not None:
+                self._loading.add(first_unloaded)
+                self._errors.pop(first_unloaded, None)
+                premarked.add(first_unloaded)
 
         async def _runner() -> None:
             try:
                 if debounce_ms > 0:
                     await asyncio.sleep(debounce_ms / 1000.0)
+                elif cancelled_previous:
+                    await asyncio.sleep(0)
                 if seq != self._ensure_weeks_seq or generation != self._generation:
                     return
-                for m in pending:
+                self._ensure_weeks_debouncing = False
+                for m in target_tuple:
                     if (
                         seq != self._ensure_weeks_seq
                         or generation != self._generation
@@ -524,6 +563,8 @@ class ScheduleWeekView(ft.Container):
                     self._loading.discard(leftover)
                 if self._ensure_weeks_seq == seq:
                     self._ensure_weeks_task = None
+                    self._ensure_weeks_targets = ()
+                    self._ensure_weeks_debouncing = False
 
         try:
             self._ensure_weeks_task = self._page_ref.run_task(_runner)
@@ -531,6 +572,8 @@ class ScheduleWeekView(ft.Container):
             for leftover in list(premarked):
                 self._loading.discard(leftover)
             self._ensure_weeks_task = None
+            self._ensure_weeks_targets = ()
+            self._ensure_weeks_debouncing = False
             logger.debug("Could not schedule ensure_weeks task", exc_info=True)
 
     def update_theme(self) -> None:
@@ -693,6 +736,10 @@ class ScheduleWeekView(ft.Container):
     # --------------------------------------------------------------- loading
     def _ensure_loaded(self, monday: date, *, force: bool = False) -> None:
         if monday in self._loading:
+            if force:
+                self._forced.add(monday)
+                self._notify_weeks_changed()
+                self._render()
             return
         if not force and not self._needs_fetch(monday):
             return
@@ -749,7 +796,12 @@ class ScheduleWeekView(ft.Container):
                 if monday in self._loading or not self._needs_fetch(monday):
                     continue
                 self._loading.add(monday)
-                await self._load_async(monday)
+                try:
+                    await self._load_async(monday)
+                except asyncio.CancelledError:
+                    if generation == self._generation:
+                        self._loading.discard(monday)
+                    raise
                 if (
                     generation != self._generation
                     or self._auth_failed
@@ -777,6 +829,14 @@ class ScheduleWeekView(ft.Container):
         data: dict[date, tuple[ClassSession, ...]] | None = None
         try:
             data = await asyncio.to_thread(self._fetch_week, monday)  # type: ignore[arg-type]
+        except asyncio.CancelledError:
+            if generation == self._generation:
+                self._loading.discard(monday)
+                self._forced.discard(monday)
+                self._notify_weeks_changed()
+                if monday == _monday(self._selected):
+                    self._render()
+            raise
         except Exception as exc:
             if self._is_maintenance_exception(exc):
                 maintenance_exc = exc
@@ -813,7 +873,14 @@ class ScheduleWeekView(ft.Container):
             self._weeks[monday] = data
             self._live_at[monday] = fetched_at
             self._errors.pop(monday, None)
-            await asyncio.to_thread(self._save_cache, monday, data, fetched_at)
+            try:
+                await asyncio.to_thread(self._save_cache, monday, data, fetched_at)
+            except asyncio.CancelledError:
+                if generation == self._generation:
+                    self._notify_weeks_changed()
+                    if monday == _monday(self._selected):
+                        self._render()
+                raise
         elif monday not in self._weeks or forced:
             # Cached data stays on screen; only surface the error when there
             # is nothing to show or the person asked for a reload.

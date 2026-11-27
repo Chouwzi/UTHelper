@@ -1555,14 +1555,19 @@ class CalendarView(ft.Container):
             self._render_period_pages()
             self._render_week()
 
-    def _render_week(self, *, update_page: bool = True):
+    def _render_week(
+        self, *, update_page: bool = True, ensure_schedule: bool = True
+    ):
         """Render the 7-day week strip for self._week_start."""
         was_rendering = self._rendering_calendar
         self._rendering_calendar = True
         try:
-            self._schedule_view.hydrate_and_ensure_weeks(
-                [self._week_start], debounce_ms=0
-            )
+            if ensure_schedule:
+                self._schedule_view.hydrate_and_ensure_weeks(
+                    [self._week_start], debounce_ms=0
+                )
+            else:
+                self._schedule_view._hydrate()
             today = date.today()
             week_num = self._week_start.isocalendar()[1]
             month_name = _MONTHS_VI[self._week_start.month]
@@ -1781,9 +1786,9 @@ class CalendarView(ft.Container):
         if self._view_mode == "schedule":
             return
         if self._view_mode == "week":
-            self._render_week(update_page=self.visible)
+            self._render_week(update_page=self.visible, ensure_schedule=False)
         elif self._view_mode == "month":
-            self._render_month(update_page=self.visible)
+            self._render_month(update_page=self.visible, ensure_schedule=False)
 
     def show(self, activities: Optional[List[Dict[str, Any]]] = None):
         if activities is not None:
@@ -1829,15 +1834,20 @@ class CalendarView(ft.Container):
             key = dt.strftime("%Y-%m-%d")
             self._deadline_map.setdefault(key, []).append(act)
 
-    def _render_month(self, *, update_page: bool = True):
+    def _render_month(
+        self, *, update_page: bool = True, ensure_schedule: bool = True
+    ):
         """Render the grid for self._year / self._month."""
         was_rendering = self._rendering_calendar
         self._rendering_calendar = True
         try:
-            self._schedule_view.hydrate_and_ensure_weeks(
-                _mondays_overlapping_month(self._year, self._month),
-                debounce_ms=250,
-            )
+            if ensure_schedule:
+                self._schedule_view.hydrate_and_ensure_weeks(
+                    _mondays_overlapping_month(self._year, self._month),
+                    debounce_ms=250,
+                )
+            else:
+                self._schedule_view._hydrate()
             self._month_label.value = f"{_MONTHS_VI[self._month]} {self._year}"
 
             today = date.today()
@@ -2761,9 +2771,13 @@ class CalendarView(ft.Container):
 
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":
-            self._render_month()
+            self._render_month(
+                update_page=False, ensure_schedule=self.visible
+            )
         elif self._view_mode == "week":
-            self._render_week()
+            self._render_week(
+                update_page=False, ensure_schedule=self.visible
+            )
         self._render_period_pages()
 
         # Re-render selected day details list (re-creates mini-cards with correct theme)

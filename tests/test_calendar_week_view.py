@@ -1148,5 +1148,131 @@ def test_reset_schedule_clears_class_indicators_and_timeline_rows_across_account
         assert (bar.bgcolor, bar.opacity) == (C.BORDER, 0.25)
 
 
+def test_day_tap_and_overlapping_month_swipe_never_cancel_or_wedge_inflight_week_load():
+    import threading
+    import time as _time
+
+    week_start = date(2026, 11, 23)
+    boundary_monday = date(2026, 11, 30)  # Overlaps both Nov 2026 and Dec 2026
+
+    async def scenario():
+        tasks: list[asyncio.Task] = []
+        fetch_counts: dict[date, int] = {}
+        entered_boundary = threading.Event()
+        release_boundary = threading.Event()
+
+        class _AsyncPage:
+            width = 1120
+            height = 760
+            window = SimpleNamespace(width=1120)
+
+            def run_task(self, coro_fn, *args, **kwargs):
+                t = asyncio.create_task(coro_fn(*args, **kwargs))
+                tasks.append(t)
+                return t
+
+            def update(self, *_controls):
+                pass
+
+        def _fetch_week(monday_date: date):
+            fetch_counts[monday_date] = fetch_counts.get(monday_date, 0) + 1
+            if monday_date == boundary_monday and fetch_counts[monday_date] == 1:
+                entered_boundary.set()
+                release_boundary.wait(timeout=1.0)
+            else:
+                _time.sleep(0.05)
+            return {
+                monday_date: (
+                    _class_session(
+                        monday_date, subject=f"Ca học {monday_date.isoformat()}"
+                    ),
+                )
+            }
+
+        cal = CalendarView(_AsyncPage(), fetch_schedule_week=_fetch_week)
+        cal.visible = True
+
+        # --- Reproducer A: Day taps during in-flight week load ---
+        cal._year, cal._month, cal._selected_day = (
+            week_start.year,
+            week_start.month,
+            week_start.day,
+        )
+        cal._selected_date = week_start
+        cal._week_start = week_start
+        cal._toggle_view_mode("week")
+
+        await asyncio.sleep(0.01)
+        assert week_start in cal._schedule_view._loading
+
+        # Tap T3 and T5 while week_start fetch is still in flight
+        cal._on_week_cell_click(1)
+        cal._on_absolute_date_click(week_start + timedelta(days=4))
+
+        await asyncio.sleep(0.10)
+        assert cal._schedule_view._loading == set()
+        assert len(cal._schedule_view.sessions_for_day(week_start)) == 1
+
+        # Manual reload_week must NOT be blocked by a wedged _loading entry
+        cal._schedule_view.reload_week(week_start)
+        await asyncio.sleep(0.10)
+        assert cal._schedule_view._loading == set()
+        assert fetch_counts[week_start] >= 2
+
+        # --- Reproducer B: Month 1 -> Month 2 swipe while shared boundary Monday is mid-fetch ---
+        cal._schedule_view.hydrate_and_ensure_weeks(
+            [boundary_monday], debounce_ms=250
+        )
+        # Wait past 250ms debounce until boundary_monday is mid-fetch in worker thread
+        for _ in range(40):
+            if entered_boundary.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert entered_boundary.is_set()
+        assert boundary_monday in cal._schedule_view._loading
+
+        # Swipe to December 2026 (which also includes boundary_monday 2026-11-30!)
+        dec_monday_2 = date(2026, 12, 7)
+        cal._schedule_view.hydrate_and_ensure_weeks(
+            [boundary_monday, dec_monday_2], debounce_ms=250
+        )
+        release_boundary.set()
+
+        await asyncio.sleep(0.42)
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        assert cal._schedule_view._loading == set()
+        assert len(cal._schedule_view.sessions_for_day(boundary_monday)) == 1
+        assert len(cal._schedule_view.sessions_for_day(dec_monday_2)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_hidden_calendar_update_theme_and_reset_do_not_trigger_network_schedule_fetches():
+    scheduled_tasks = []
+    fetch_calls = []
+
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        update=lambda *_a: None,
+        run_task=lambda *_a, **_k: scheduled_tasks.append(_a),
+    )
+    cal = CalendarView(
+        page,
+        fetch_schedule_week=lambda m: fetch_calls.append(m) or {},
+    )
+    assert cal.visible is False
+    scheduled_tasks.clear()
+
+    cal.update_theme()
+    cal.reset_schedule()
+
+    assert scheduled_tasks == []
+    assert fetch_calls == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
