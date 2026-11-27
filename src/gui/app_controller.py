@@ -25,9 +25,10 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from core.data_orchestrator import DataOrchestrator
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
+from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
-from core.portal_client import PortalClient
+from core.portal_client import PortalClient, PortalMaintenanceError
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
@@ -215,6 +216,79 @@ class _ControllerWindowActivator(WindowActivator):
         await super().show()
         if callable(self._on_shown):
             self._on_shown()
+
+
+class _LoginDialogClientProxy:
+    """Forwards `MoodleClient.login` and notifies `AppController` on UTH maintenance."""
+
+    def __init__(self, client, on_maintenance) -> None:
+        self._client = client
+        self._on_maintenance = on_maintenance
+
+    def login(self, *args, **kwargs):
+        ok = self._client.login(*args, **kwargs)
+        if not ok:
+            notice = getattr(self._client, "last_maintenance_notice", None)
+            if notice is not None and callable(self._on_maintenance):
+                self._on_maintenance(notice)
+        return ok
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+
+class _LoginDialogOrchestratorProxy:
+    """Thin proxy around `DataOrchestrator` for `show_login_dialog` maintenance hooks."""
+
+    def __init__(self, orchestrator, on_maintenance) -> None:
+        self._orchestrator = orchestrator
+        self.client = _LoginDialogClientProxy(orchestrator.client, on_maintenance)
+
+    @property
+    def is_logged_in(self) -> bool:
+        return bool(getattr(self._orchestrator, "is_logged_in", False))
+
+    @is_logged_in.setter
+    def is_logged_in(self, value: bool) -> None:
+        self._orchestrator.is_logged_in = bool(value)
+
+    def __getattr__(self, name: str):
+        return getattr(self._orchestrator, name)
+
+
+class _MaintenanceAwareSubmissionWorkflow(SubmissionWorkflow):
+    """Surfaces active UTH maintenance immediately when a user triggers submission mutations."""
+
+    def __init__(self, *args, on_maintenance=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_maintenance = on_maintenance
+
+    def _notify_if_maintenance(self, exc: BaseException | None = None) -> None:
+        notice = getattr(exc, "notice", None) if exc is not None else None
+        if notice is None:
+            notice = getattr(self.client, "last_maintenance_notice", None)
+        if notice is not None and callable(self._on_maintenance):
+            self._on_maintenance(notice)
+
+    def _mutate_files(self, *args, **kwargs):
+        try:
+            res = super()._mutate_files(*args, **kwargs)
+        except UthMaintenanceError as exc:
+            self._notify_if_maintenance(exc)
+            raise
+        if not getattr(res, "ok", True):
+            self._notify_if_maintenance()
+        return res
+
+    def finalize_submission(self, *args, **kwargs):
+        try:
+            res = super().finalize_submission(*args, **kwargs)
+        except UthMaintenanceError as exc:
+            self._notify_if_maintenance(exc)
+            raise
+        if not getattr(res, "ok", True):
+            self._notify_if_maintenance()
+        return res
 
 
 def _build_account_data_cache(username: str | None):
@@ -436,6 +510,11 @@ class AppController:
         self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
         self._portal_week_lock = threading.Lock()
         self._week_schedule_cache = WeekScheduleCache(namespace=schedule_namespace)
+        self._seen_maintenance_keys: set[str] = set()
+        self._active_maintenance_notice: MaintenanceNotice | None = None
+        self._maintenance_dialog: ft.AlertDialog | None = None
+        self._manual_sync_requested: bool = False
+        self._manual_today_schedule_requested: bool = False
         self._today_schedule_coordinator = TodayScheduleCoordinator(
             fetch_day=self._portal_client.fetch_day,
             cache=TodayScheduleCache(namespace=schedule_namespace),
@@ -444,6 +523,10 @@ class AppController:
                 settings.UTH_PASSWORD,
             ),
             state_sink=self._on_today_schedule_state,
+            on_maintenance=lambda notice: self._handle_uth_maintenance(
+                notice,
+                user_initiated=self._consume_manual_today_schedule_flag(),
+            ),
         )
         self._today_schedule_state = self._today_schedule_coordinator.cached_state()
         self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
@@ -975,7 +1058,13 @@ class AppController:
             await self._complete_login_success()
 
         try:
-            await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+            login_orch = _LoginDialogOrchestratorProxy(
+                self.orchestrator,
+                lambda notice: self._notify_maintenance_from_worker(
+                    notice, user_initiated=True
+                ),
+            )
+            await show_login_dialog(self.page, login_orch, _on_login_success)
         except Exception:
             _call_modal_occlusion("modal_dialog", False, token=modal_token)
             raise
@@ -1003,9 +1092,15 @@ class AppController:
                     await result
 
         try:
+            login_orch = _LoginDialogOrchestratorProxy(
+                self.orchestrator,
+                lambda notice: self._notify_maintenance_from_worker(
+                    notice, user_initiated=True
+                ),
+            )
             await show_login_dialog(
                 self.page,
-                self.orchestrator,
+                login_orch,
                 _on_login_success,
                 allow_cancel=True,
             )
@@ -1234,6 +1329,11 @@ class AppController:
 
         # 5. Clear Moodle caches, sessions, grade monitors, notification state & WebViews.
         if reset_moodle_and_caches:
+            self._clear_uth_maintenance_banner(update_page=False)
+            if mark_logged_out and isinstance(
+                getattr(self, "_seen_maintenance_keys", None), set
+            ):
+                self._seen_maintenance_keys.clear()
             orchestrator = getattr(self, "orchestrator", None)
             if orchestrator is not None:
                 try:
@@ -1986,10 +2086,13 @@ class AppController:
             or not callable(call_ws_api)
         ):
             return None
-        return SubmissionWorkflow(
+        return _MaintenanceAwareSubmissionWorkflow(
             client,
             MoodleService(call_ws_api),
             site_origin=site,
+            on_maintenance=lambda notice: self._notify_maintenance_from_worker(
+                notice, user_initiated=True
+            ),
         )
 
     def _native_background_credentials(self) -> tuple[str, str]:
@@ -2692,7 +2795,375 @@ class AppController:
         self._dismiss_desktop_filter_menu()
         self._safe_run_task(handler)
 
+    def _init_maintenance_banner(self) -> None:
+        if not isinstance(getattr(self, "_seen_maintenance_keys", None), set):
+            self._seen_maintenance_keys = set()
+        if not hasattr(self, "_active_maintenance_notice"):
+            self._active_maintenance_notice = None
+        if not hasattr(self, "_maintenance_dialog"):
+            self._maintenance_dialog = None
+        self._maintenance_icon = ft.Icon(
+            ft.Icons.BUILD_CIRCLE_OUTLINED,
+            size=18,
+            color=C.WARNING,
+        )
+        self._maintenance_text = ft.Text(
+            "Hệ thống UTH đang bảo trì · Đang xem dữ liệu đã lưu",
+            size=12,
+            color=C.TEXT_PRIMARY,
+            weight=ft.FontWeight.W_500,
+            expand=True,
+        )
+        self._maintenance_detail_btn = ft.TextButton(
+            "Chi tiết",
+            style=ft.ButtonStyle(
+                color=C.TEXT_PRIMARY,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=self._on_maintenance_detail_click,
+        )
+        self._maintenance_retry_btn = ft.TextButton(
+            "Thử lại",
+            style=ft.ButtonStyle(
+                color=C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=self._on_maintenance_retry_click,
+        )
+        self._maintenance_banner = ft.Container(
+            content=ft.Row(
+                [
+                    self._maintenance_icon,
+                    self._maintenance_text,
+                    self._maintenance_detail_btn,
+                    self._maintenance_retry_btn,
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.10, C.WARNING),
+            border=ft.Border.all(1, C.WARNING),
+            border_radius=10,
+            padding=ft.Padding(left=12, right=8, top=8, bottom=8),
+            margin=ft.Margin(left=14, right=14, top=0, bottom=8),
+            visible=False,
+        )
+
+    def _consume_manual_today_schedule_flag(self) -> bool:
+        flagged = bool(getattr(self, "_manual_today_schedule_requested", False))
+        self._manual_today_schedule_requested = False
+        return flagged
+
+    def _on_maintenance_detail_click(self, _event=None) -> None:
+        notice = self._resolve_active_maintenance_notice()
+        if notice is not None:
+            self._show_maintenance_dialog(notice, force=True)
+
+    def _on_maintenance_retry_click(self, _event=None) -> None:
+        today_coord = getattr(self, "_today_schedule_coordinator", None)
+        if today_coord is not None and getattr(
+            getattr(today_coord, "state", None), "error_code", ""
+        ) == "maintenance":
+            self._safe_run_task(today_coord.refresh, "retry")
+        self._safe_run_task(self._load_data_async, "manual")
+
+    def _resolve_active_maintenance_notice(
+        self, site_kind: str = "uth"
+    ) -> MaintenanceNotice | None:
+        orch = getattr(self, "orchestrator", None)
+        kind = str(site_kind or "uth").strip().lower()
+        candidates = []
+        if kind == "courses":
+            candidates.append(getattr(orch, "client", None))
+        elif kind == "thnn":
+            candidates.append(getattr(orch, "thnn_client", None))
+        elif kind == "portal":
+            candidates.extend(
+                (
+                    getattr(self, "_portal_client", None),
+                    getattr(self, "_portal_week_client", None),
+                    getattr(self, "_academic_grade_service", None),
+                )
+            )
+        else:
+            candidates.extend(
+                (
+                    getattr(orch, "client", None),
+                    getattr(orch, "thnn_client", None),
+                    getattr(self, "_portal_client", None),
+                    getattr(self, "_portal_week_client", None),
+                    getattr(self, "_academic_grade_service", None),
+                )
+            )
+        for obj in candidates:
+            notice = getattr(obj, "last_maintenance_notice", None)
+            if notice is not None:
+                return notice
+        return getattr(self, "_active_maintenance_notice", None)
+
+    def _notify_maintenance_from_worker(
+        self, notice: MaintenanceNotice, *, user_initiated: bool = False
+    ) -> None:
+        async def _deliver() -> None:
+            self._handle_uth_maintenance(notice, user_initiated=user_initiated)
+
+        safe_run = getattr(self, "_safe_run_task", None)
+        if callable(safe_run):
+            scheduled = safe_run(_deliver)
+            if scheduled is not None:
+                return
+        self._handle_uth_maintenance(notice, user_initiated=user_initiated)
+
+    def _handle_uth_maintenance(
+        self,
+        notice: MaintenanceNotice | None,
+        user_initiated: bool = False,
+        *,
+        force: bool | None = None,
+    ) -> None:
+        if notice is None:
+            return
+        effective_force = bool(user_initiated or force)
+        self._active_maintenance_notice = notice
+        banner = getattr(self, "_maintenance_banner", None)
+        text_ctrl = getattr(self, "_maintenance_text", None)
+        if text_ctrl is not None:
+            fmt = getattr(notice, "format_banner_text", None)
+            text_ctrl.value = (
+                fmt()
+                if callable(fmt)
+                else "Hệ thống UTH đang bảo trì · Đang xem dữ liệu đã lưu"
+            )
+        if banner is not None:
+            banner.visible = True
+        self._show_maintenance_dialog(notice, force=effective_force)
+        page = getattr(self, "page", None)
+        upd = getattr(page, "update", None)
+        if callable(upd):
+            try:
+                upd()
+            except Exception:
+                logger.debug("Maintenance banner page update skipped", exc_info=True)
+
+    def _clear_uth_maintenance_banner(self, *, update_page: bool = True) -> None:
+        self._active_maintenance_notice = None
+        orch = getattr(self, "orchestrator", None)
+        for client_obj in (
+            getattr(orch, "client", None),
+            getattr(orch, "thnn_client", None),
+            getattr(self, "_portal_client", None),
+            getattr(self, "_portal_week_client", None),
+            getattr(self, "_academic_grade_service", None),
+        ):
+            if (
+                client_obj is not None
+                and getattr(client_obj, "last_maintenance_notice", None) is not None
+            ):
+                try:
+                    client_obj.last_maintenance_notice = None
+                except Exception:
+                    pass
+        banner = getattr(self, "_maintenance_banner", None)
+        was_visible = bool(banner is not None and getattr(banner, "visible", False))
+        if banner is not None:
+            banner.visible = False
+        if was_visible and update_page:
+            page = getattr(self, "page", None)
+            upd = getattr(page, "update", None)
+            if callable(upd):
+                try:
+                    upd()
+                except Exception:
+                    pass
+
+    def _show_maintenance_dialog(
+        self, notice: MaintenanceNotice, *, force: bool = False
+    ) -> None:
+        page = getattr(self, "page", None)
+        if page is None:
+            return
+        seen = getattr(self, "_seen_maintenance_keys", None)
+        if not isinstance(seen, set):
+            seen = set()
+            self._seen_maintenance_keys = seen
+        dedupe_key = str(getattr(notice, "dedupe_key", "") or "uth-maintenance")
+        if not force and dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+
+        existing = getattr(self, "_maintenance_dialog", None)
+        if existing is not None and bool(getattr(existing, "open", False)):
+            return
+
+        install_bridge = getattr(self, "_install_page_dialog_occlusion_bridge", None)
+        if callable(install_bridge):
+            install_bridge()
+
+        window_text = str(getattr(notice, "window_text", "") or "").strip()
+        reopen_text = str(getattr(notice, "reopen_text", "") or "").strip()
+
+        info_rows: list[ft.Control] = []
+        if window_text:
+            info_rows.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.SCHEDULE_ROUNDED, size=16, color=C.WARNING),
+                        ft.Text(
+                            f"Thời gian tạm ngưng: {window_text}",
+                            size=13,
+                            color=C.TEXT_PRIMARY,
+                            weight=ft.FontWeight.W_600,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        if reopen_text:
+            info_rows.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.RESTORE_ROUNDED, size=16, color=C.ACCENT),
+                        ft.Text(
+                            f"Dự kiến mở lại: {reopen_text}",
+                            size=13,
+                            color=C.TEXT_PRIMARY,
+                            weight=ft.FontWeight.W_600,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+
+        reassurance_box = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.VERIFIED_USER_OUTLINED, size=16, color=C.SAFE),
+                    ft.Text(
+                        "Tài khoản và phiên đăng nhập của bạn hoàn toàn an toàn. "
+                        "Bạn vẫn có thể xem bình thường toàn bộ bài tập, lịch học, "
+                        "bảng điểm và tài liệu đã lưu trên máy.",
+                        size=12,
+                        color=C.TEXT_SECONDARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25, C.SAFE)),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        )
+
+        body_controls: list[ft.Control] = [
+            ft.Text(
+                "Hệ thống máy chủ UTH hiện đang tạm ngưng hoạt động để bảo trì định kỳ.",
+                size=13,
+                color=C.TEXT_SECONDARY,
+            ),
+            *info_rows,
+            reassurance_box,
+        ]
+
+        def _close_dialog(_event=None) -> None:
+            pop_fn = getattr(page, "pop_dialog", None)
+            if callable(pop_fn):
+                try:
+                    pop_fn()
+                except Exception:
+                    dialog.open = False
+            else:
+                dialog.open = False
+            upd = getattr(page, "update", None)
+            if callable(upd):
+                try:
+                    upd()
+                except Exception:
+                    pass
+
+        def _retry_from_dialog(event=None) -> None:
+            _close_dialog(event)
+            self._on_maintenance_retry_click(event)
+
+        page_w = getattr(page, "width", None)
+        dlg_width = (
+            min(400, int(page_w) - 32)
+            if isinstance(page_w, (int, float)) and page_w > 240
+            else 400
+        )
+
+        dialog = ft.AlertDialog(
+            modal=False,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            bgcolor=C.BG,
+            title=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.BUILD_CIRCLE_OUTLINED, size=22, color=C.WARNING
+                    ),
+                    ft.Text(
+                        "Hệ thống UTH đang bảo trì",
+                        size=17,
+                        weight=ft.FontWeight.W_700,
+                        color=C.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            content=ft.Container(
+                width=dlg_width,
+                content=ft.Column(body_controls, tight=True, spacing=10),
+            ),
+            actions=[
+                ft.TextButton(
+                    "Thử kiểm tra lại",
+                    on_click=_retry_from_dialog,
+                    style=ft.ButtonStyle(
+                        color=C.TEXT_SECONDARY,
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+                ft.TextButton(
+                    "Đã hiểu",
+                    on_click=_close_dialog,
+                    style=ft.ButtonStyle(
+                        color=C.ACCENT,
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._maintenance_dialog = dialog
+        show_fn = getattr(page, "show_dialog", None)
+        if callable(show_fn):
+            show_fn(dialog)
+        else:
+            overlay = getattr(page, "overlay", None)
+            if isinstance(overlay, list):
+                overlay.append(dialog)
+                dialog.open = True
+            else:
+                page.dialog = dialog
+                dialog.open = True
+        upd = getattr(page, "update", None)
+        if callable(upd):
+            try:
+                upd()
+            except Exception:
+                pass
+
     def _init_banner_and_states(self):
+        self._init_maintenance_banner()
         self._update_text = ft.Text(
             "Có phiên bản mới!",
             size=12,
@@ -2892,6 +3363,7 @@ class AppController:
         self._dashboard_main = ft.Column(
             controls=[
                 header,
+                self._maintenance_banner,
                 self._update_banner,
                 self._filter_container,
                 self._content_area,
@@ -2962,6 +3434,12 @@ class AppController:
             on_open_url=self._open_url_in_app,
             on_open_external=self._open_url_external,
         )
+        schedule_view = getattr(self.calendar_view, "_schedule_view", None)
+        if schedule_view is not None:
+            try:
+                schedule_view.on_maintenance = self._handle_uth_maintenance
+            except Exception:
+                logger.debug("ScheduleWeekView maintenance hook skipped", exc_info=True)
         supports_self_update = self._get_distribution_profile().supports_github_self_update
         self.settings_view = SettingsView(
             self.page,
@@ -3031,7 +3509,11 @@ class AppController:
             u_pass = settings.UTH_PASSWORD
             if not u_name or not u_pass:
                 return ("", [])
-            return self._portal_client.fetch_current_semester_courses(u_name, u_pass)
+            try:
+                return self._portal_client.fetch_current_semester_courses(u_name, u_pass)
+            except PortalMaintenanceError as exc:
+                self._notify_maintenance_from_worker(exc.notice, user_initiated=False)
+                return ("", [])
 
         self._course_catalog_service = CourseCatalogService(
             cache_store=self._course_cache_store,
@@ -3352,6 +3834,11 @@ class AppController:
         self._filter_container.padding = ft.Padding.only(
             left=base_pad + gutter, right=base_pad + gutter, top=2, bottom=10
         )
+        maint_banner = getattr(self, "_maintenance_banner", None)
+        if maint_banner is not None:
+            maint_banner.margin = ft.Margin(
+                left=base_pad + gutter, right=base_pad + gutter, top=0, bottom=8
+            )
         update_banner = getattr(self, "_update_banner", None)
         if update_banner is not None:
             update_banner.margin = ft.Margin(
@@ -3813,6 +4300,11 @@ class AppController:
             return
 
         site_kind = _classify_uth_url(validated)
+        if site_kind in {"courses", "thnn", "portal"}:
+            active_maint = self._resolve_active_maintenance_notice(site_kind)
+            if active_maint is not None:
+                self._handle_uth_maintenance(active_maint, user_initiated=True)
+                return
         committed_user, committed_pass = self._committed_webview_credentials()
         has_creds = bool(
             not is_demo_account(committed_user)
@@ -4457,6 +4949,7 @@ class AppController:
     def _request_today_schedule(self) -> None:
         coordinator = self._today_schedule_coordinator
         if coordinator.state.status is ScheduleLoadStatus.ERROR:
+            self._manual_today_schedule_requested = True
             self._safe_run_task(coordinator.refresh, "retry")
         else:
             self._safe_run_task(coordinator.ensure_today)
@@ -5243,6 +5736,8 @@ class AppController:
 
     async def _load_data_async(self, trigger: str = "manual"):
         """Refresh entry point; concurrent callers share one fetch."""
+        if trigger == "manual":
+            self._manual_sync_requested = True
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is None:
             return await self._perform_data_sync(trigger)
@@ -5375,6 +5870,8 @@ class AppController:
             orch_ref = getattr(self, "orchestrator", None)
             if orch_ref is not None and hasattr(orch_ref, "is_logged_in"):
                 orch_ref.is_logged_in = True
+            self._manual_sync_requested = False
+            self._clear_uth_maintenance_banner(update_page=False)
             result = list(outcome.activities or [])
 
             cache = self.orchestrator.get_cached_details_snapshot()
@@ -5537,9 +6034,67 @@ class AppController:
             )
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
+        except UthMaintenanceError as maint_exc:
+            if not _epoch_is_current():
+                return
+            user_initiated = (trigger == "manual") or bool(
+                getattr(self, "_manual_sync_requested", False)
+            )
+            self._manual_sync_requested = False
+            self._diag_breadcrumb("refresh", "offline", "moodle")
+            logger.info(
+                "[Load] UTH maintenance detected (%s); preserving cached activities.",
+                maint_exc.notice.window_text or "maintenance",
+            )
+            if not self.all_data and data_cache is not None:
+                cached_data, _ = await asyncio.to_thread(data_cache.load)
+                if not _epoch_is_current():
+                    return
+                if cached_data:
+                    from core.time_utils import parse_datetime as _parse_dt
+
+                    for item in cached_data:
+                        dl = item.get("deadline", "")
+                        if dl and "_deadline_dt" not in item:
+                            item["_deadline_dt"] = _parse_dt(dl)
+                        if "_title_lower" not in item:
+                            item["_title_lower"] = str(item.get("title", "")).lower()
+                        if "_course_lower" not in item:
+                            item["_course_lower"] = str(item.get("course", "")).lower()
+                    with self._data_lock:
+                        if not _epoch_is_current():
+                            return
+                        self.all_data = cached_data
+            self._clear_skeletons()
+            if self.all_data:
+                self._set_sync_status(
+                    "error",
+                    "Hệ thống đang bảo trì · đang xem dữ liệu đã lưu",
+                )
+                self.error_state.visible = False
+                self._update_footer(update_page=False)
+            else:
+                if hasattr(self, "_error_title"):
+                    self._error_title.value = "Hệ thống UTH đang bảo trì"
+                reopen_hint = (
+                    f" · Mở lại dự kiến: {maint_exc.notice.reopen_text}"
+                    if maint_exc.notice.reopen_text
+                    else ""
+                )
+                self.error_text.value = (
+                    f"Khung giờ bảo trì: {maint_exc.notice.window_text or '01h00 - 04h00'}"
+                    f"{reopen_hint}"
+                )
+                self.empty_state.visible = False
+                self.error_state.visible = True
+                self._set_sync_status("error", "Hệ thống UTH đang bảo trì")
+            self._handle_uth_maintenance(
+                maint_exc.notice, user_initiated=user_initiated
+            )
         except Exception as exc:
             if not _epoch_is_current():
                 return
+            self._manual_sync_requested = False
             orch_ref = getattr(self, "orchestrator", None)
             if (
                 not is_demo_account(settings.UTH_USERNAME)
@@ -5573,6 +6128,8 @@ class AppController:
                 self.error_state.visible = False
                 self._update_footer()
             else:
+                if hasattr(self, "_error_title"):
+                    self._error_title.value = "Không thể tải dữ liệu"
                 self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
                 self.error_state.visible = True
                 self._set_sync_status("error", "Lỗi kết nối server")
@@ -5698,6 +6255,10 @@ class AppController:
     def _start_course_quiz(self, course: "CourseSummary", mod: "CourseModuleItem") -> None:
         if is_demo_account(settings.UTH_USERNAME):
             self._show_demo_lms_guard_snackbar()
+            return
+        active_maint = self._resolve_active_maintenance_notice(course.source)
+        if active_maint is not None:
+            self._handle_uth_maintenance(active_maint, user_initiated=True)
             return
         player_view = getattr(self, "quiz_player_view", None)
         activity = self._build_course_quiz_activity(course, mod)
@@ -5975,6 +6536,11 @@ class AppController:
                         self.view_manager.show_credit_progress(progress)
                 except Exception as exc:
                     logger.warning("Credit progress load failed: %s", exc)
+                svc_maint = getattr(service, "last_maintenance_notice", None)
+                if svc_maint is not None:
+                    self._handle_uth_maintenance(
+                        svc_maint, user_initiated=force_refresh
+                    )
             else:
                 # Fallback to Moodle grades if Portal returned no semesters
                 userid = await asyncio.to_thread(
@@ -5998,6 +6564,20 @@ class AppController:
                         self.view_manager.show_grades_data(courses_grades or [], grade_items or {})
                 else:
                     self.view_manager.show_academic_radar_data([], [])
+        except UthMaintenanceError as maint_exc:
+            if not _is_current():
+                return
+            reopen_part = (
+                f"\nDự kiến mở lại: {maint_exc.notice.reopen_text}."
+                if maint_exc.notice.reopen_text
+                else ""
+            )
+            self.view_manager.show_grades_error(
+                f"Hệ thống UTH đang bảo trì ({maint_exc.notice.window_text or '01h00 - 04h00'}).{reopen_part}"
+            )
+            self._handle_uth_maintenance(
+                maint_exc.notice, user_initiated=force_refresh
+            )
         except Exception as e:
             if not _is_current():
                 return
@@ -6040,6 +6620,18 @@ class AppController:
             self.view_manager.show_course_grades_data(courses)
             if changes and not is_demo_account(settings.UTH_USERNAME):
                 await self._notify_grade_changes(changes)
+        except UthMaintenanceError as maint_exc:
+            if not _is_current():
+                return
+            if cached:
+                self.view_manager.show_course_grades_stale_notice(
+                    "Hệ thống UTH đang bảo trì · đang hiển thị dữ liệu đã lưu."
+                )
+            else:
+                self.view_manager.show_course_grades_error()
+            self._handle_uth_maintenance(
+                maint_exc.notice, user_initiated=force_refresh
+            )
         except Exception as e:
             if not _is_current():
                 return
@@ -6269,6 +6861,32 @@ class AppController:
         sync_status = getattr(self, "_sync_status", None)
         if sync_status is not None:
             sync_status.refresh_theme()
+
+        # Maintenance banner uses semantic WARNING tint & border across light/dark themes.
+        maint_banner = getattr(self, "_maintenance_banner", None)
+        if maint_banner is not None:
+            maint_banner.bgcolor = ft.Colors.with_opacity(0.10, _C.WARNING)
+            maint_banner.border = ft.Border.all(1, _C.WARNING)
+        maint_icon = getattr(self, "_maintenance_icon", None)
+        if maint_icon is not None:
+            maint_icon.color = _C.WARNING
+        maint_text = getattr(self, "_maintenance_text", None)
+        if maint_text is not None:
+            maint_text.color = _C.TEXT_PRIMARY
+        maint_detail_btn = getattr(self, "_maintenance_detail_btn", None)
+        if maint_detail_btn is not None:
+            maint_detail_btn.style = ft.ButtonStyle(
+                color=_C.TEXT_PRIMARY,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
+        maint_retry_btn = getattr(self, "_maintenance_retry_btn", None)
+        if maint_retry_btn is not None:
+            maint_retry_btn.style = ft.ButtonStyle(
+                color=_C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
 
         # Update banner is a semantic elevated surface, not a fixed brown card.
         update_banner = getattr(self, "_update_banner", None)

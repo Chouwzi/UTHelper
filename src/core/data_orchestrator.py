@@ -13,6 +13,7 @@ from core.activity_status import (
 )
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.grade_monitor import GradeMonitor
+from core.maintenance import UthMaintenanceError
 from core.moodle_service import MoodleService
 from config import settings
 from models import Assignment
@@ -404,6 +405,10 @@ class DataOrchestrator:
         self.is_logged_in = self.client.login()
         if self.is_logged_in:
             logger.info("Đăng nhập WS token thành công.")
+            return True
+        maint_notice = getattr(self.client, "last_maintenance_notice", None)
+        if maint_notice is not None:
+            raise UthMaintenanceError(maint_notice)
         return self.is_logged_in
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
@@ -427,6 +432,10 @@ class DataOrchestrator:
         with self._course_grades_lock:
             start_gen = self._course_grades_generation
         courses = fetch_current_courses_with_grades(self)
+        if not courses:
+            maint_notice = getattr(self.client, "last_maintenance_notice", None)
+            if maint_notice is not None:
+                raise UthMaintenanceError(maint_notice)
         with self._course_grades_lock:
             if self._course_grades_generation != start_gen:
                 return [], []
@@ -503,12 +512,14 @@ class DataOrchestrator:
 
 
     def _thnn_login_was_deferred(self) -> bool:
+        if getattr(self.thnn_client, "last_maintenance_notice", None) is not None:
+            return True
         login_err = str(
             getattr(self.thnn_client, "last_login_error", "")
             or getattr(self.thnn_client, "_last_login_error", "")
             or ""
         )
-        return login_err == "quiz_session_active"
+        return login_err in {"quiz_session_active", "maintenance"}
 
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
         self._sync_account_scope()
@@ -733,6 +744,9 @@ class DataOrchestrator:
             # Tối ưu PERF: Bước 1 - Lấy userid (cần thiết cho danh sách môn học)
             userid = self._get_userid()
             if userid is None:
+                maint_notice = getattr(self.client, "last_maintenance_notice", None)
+                if maint_notice is not None:
+                    raise UthMaintenanceError(maint_notice)
                 logger.warning("Không xác định được Moodle user id; snapshot không đầy đủ.")
                 return None
             
@@ -784,6 +798,9 @@ class DataOrchestrator:
             )
 
             if not isinstance(calendar_result, dict) or not isinstance(courses_result, list):
+                maint_notice = getattr(self.client, "last_maintenance_notice", None)
+                if maint_notice is not None:
+                    raise UthMaintenanceError(maint_notice)
                 logger.warning("Moodle trả snapshot calendar/course không đầy đủ.")
                 return None
             
@@ -872,7 +889,12 @@ class DataOrchestrator:
                         continue
                     if not quiz_item.get("catalog_only"):
                         results.append(quiz_item)
+            except UthMaintenanceError:
+                raise
             except Exception as e:
+                maint_notice = getattr(self.client, "last_maintenance_notice", None)
+                if maint_notice is not None:
+                    raise UthMaintenanceError(maint_notice) from e
                 logger.warning("Merge activities failed; snapshot is partial: %s", e)
                 return None
             
@@ -884,7 +906,12 @@ class DataOrchestrator:
             self.is_logged_in = True  # Token Web Service hoạt động = đã xác thực thành công
             self._last_fetch_ts = int(datetime.now().timestamp())  # Cơ chế Smart poll: Đánh dấu thời gian lần tải cuối
             return results
+        except UthMaintenanceError:
+            raise
         except Exception as e:
+            maint_notice = getattr(self.client, "last_maintenance_notice", None)
+            if maint_notice is not None:
+                raise UthMaintenanceError(maint_notice) from e
             logger.warning("WS API fetch thất bại: %s", e)
             return None
 
@@ -1017,6 +1044,8 @@ class DataOrchestrator:
             import asyncio
             result = await asyncio.to_thread(self._fetch_via_ws_api)
             return result
+        except UthMaintenanceError:
+            raise
         except Exception as e:
             logger.warning("WS API async fetch thất bại: %s", e)
             return None
@@ -1184,6 +1213,8 @@ class DataOrchestrator:
         self._sync_account_scope()
         try:
             ws_result = await self._fetch_via_ws_api_async()
+        except UthMaintenanceError:
+            raise
         except Exception as exc:
             return FetchOutcome.failed(str(exc))
         if ws_result is None:
