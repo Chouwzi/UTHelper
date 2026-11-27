@@ -437,15 +437,15 @@ class Settings(BaseModel):
     # Hiển thị
     ALWAYS_ON_TOP: bool = Field(default=False, description="Luôn hiển thị cửa sổ trên cùng")
 
-    # Tùy chỉnh màu sắc
-    COLOR_CRITICAL: str = Field(default="#EF4444", description="Màu cảnh báo quá hạn/cấp bách")
-    COLOR_WARNING: str = Field(default="#F59E0B", description="Màu cảnh báo sắp tới")
-    COLOR_SAFE: str = Field(default="#10B981", description="Màu an toàn")
+    # Tùy chỉnh màu sắc (mặc định theo preset sáng steel_light)
+    COLOR_CRITICAL: str = Field(default="#DC2626", description="Màu cảnh báo quá hạn/cấp bách")
+    COLOR_WARNING: str = Field(default="#9A6700", description="Màu cảnh báo sắp tới")
+    COLOR_SAFE: str = Field(default="#147D3F", description="Màu an toàn")
     COLOR_QUIZ: str = Field(default="#7C3AED", description="Màu tag Quiz")
     COLOR_ASSIGNMENT: str = Field(default="#2563EB", description="Màu tag Bài tập")
-    COLOR_ATTENDANCE: str = Field(default="#D97706", description="Màu tag Điểm danh")
-    COLOR_OPEN: str = Field(default="#0891B2", description="Màu tag Sắp mở")
-    COLOR_OTHER: str = Field(default="#6B7280", description="Màu tag Sự kiện khác")
+    COLOR_ATTENDANCE: str = Field(default="#8A6100", description="Màu tag Điểm danh")
+    COLOR_OPEN: str = Field(default="#087F73", description="Màu tag Sắp mở")
+    COLOR_OTHER: str = Field(default="#57534E", description="Màu tag Sự kiện khác")
 
 
     # Debug
@@ -534,6 +534,34 @@ def migrate_settings_data(raw: dict) -> dict:
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_ENABLED", False)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1])
+    if data.get("THEME", "steel_light") == "steel_light":
+        legacy_dark_defaults = {
+            "COLOR_CRITICAL": "#EF4444",
+            "COLOR_WARNING": "#F59E0B",
+            "COLOR_SAFE": "#10B981",
+            "COLOR_QUIZ": "#7C3AED",
+            "COLOR_ASSIGNMENT": "#2563EB",
+            "COLOR_ATTENDANCE": "#D97706",
+            "COLOR_OPEN": "#0891B2",
+            "COLOR_OTHER": "#6B7280",
+        }
+        light_defaults = {
+            "COLOR_CRITICAL": "#DC2626",
+            "COLOR_WARNING": "#9A6700",
+            "COLOR_SAFE": "#147D3F",
+            "COLOR_QUIZ": "#7C3AED",
+            "COLOR_ASSIGNMENT": "#2563EB",
+            "COLOR_ATTENDANCE": "#8A6100",
+            "COLOR_OPEN": "#087F73",
+            "COLOR_OTHER": "#57534E",
+        }
+        present_color_keys = [k for k in legacy_dark_defaults if k in data]
+        if present_color_keys and all(
+            str(data.get(k, "")).strip().upper() == legacy_dark_defaults[k]
+            for k in present_color_keys
+        ):
+            for k in present_color_keys:
+                data[k] = light_defaults[k]
     data["SETTINGS_SCHEMA_VERSION"] = 5
     return data
 

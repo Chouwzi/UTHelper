@@ -291,11 +291,11 @@ def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_h
     assert "Tác giả chính" in founder_texts
     assert "Nguyễn Trần Đình Chương" in founder_texts
     assert "@Chouwzi" in founder_texts
-    assert any(
-        "Khởi xướng dự án - Kiến trúc hệ thống và phát triển chính" in text
-        for text in founder_texts
-    )
-    assert any("03/2026" in text for text in founder_texts)
+    for text in founder_texts:
+        assert len(text) <= 40, f"Verbose founder description found: {text!r}"
+        assert "Khởi xướng" not in text
+        assert "Xây dựng và phát triển" not in text
+        assert "03/2026" not in text
 
     contributor_texts = _collect_text_values(view._credits_contributors_card)
     assert "Đóng góp cộng đồng" in contributor_texts
@@ -303,6 +303,11 @@ def test_credits_entry_pill_opens_credits_detail_with_founder_and_contributors_h
     assert "@nguyen2006-dev" in contributor_texts
     assert any("@ThienNguyen0210" in text and "ThienNguyen-Dev" in text for text in contributor_texts)
     assert "Nguyễn Trần Đình Chương" not in contributor_texts
+    for text in contributor_texts:
+        assert len(text) <= 40, f"Verbose contributor description found: {text!r}"
+        assert "thử nghiệm" not in text.lower()
+        assert "Đóng góp nhánh" not in text
+        assert "Đóng góp cấu hình" not in text
 
     # Strict copywriting hygiene: 0 ampersands (&) and 0 em/en dashes across all Credits labels.
     all_credits_texts = [
