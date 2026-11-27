@@ -157,7 +157,7 @@ jobs:
           export GRADLE_OPTS="-Dorg.gradle.internal.http.retry.max.attempts=6 -Dorg.gradle.internal.http.retry.initial.backoff=3000 ${GRADLE_OPTS:-}"
 
           mkdir -p "$HOME/.gradle/init.d"
-          cat > "$HOME/.gradle/init.d/maven-central-mirror.gradle" <<'GRADLE'
+          cat > "$HOME/.gradle/init.d/maven-central-mirror.init.gradle" <<'GRADLE'
           def mirrorUrl = uri("https://maven-central.storage-download.googleapis.com/maven2/")
           def rewriteMavenCentral = { RepositoryHandler repos ->
               repos.withType(MavenArtifactRepository).configureEach { repo ->
@@ -166,6 +166,12 @@ jobs:
                       repo.setUrl(mirrorUrl)
                   }
               }
+          }
+
+          // Plugin resolution in settings starts before settingsEvaluated.
+          // Register the mirror first so Gradle can use it for those requests.
+          gradle.beforeSettings { settings ->
+              settings.pluginManagement.repositories.maven { url = mirrorUrl }
           }
 
           settingsEvaluated { settings ->
