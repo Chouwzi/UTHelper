@@ -1,24 +1,43 @@
+[CmdletBinding(DefaultParameterSetName = "ExplicitPaths")]
 param(
-    [Parameter(Mandatory = $true)][string]$ExePath,
-    [Parameter(Mandatory = $true)][string]$StartupAliasPath,
-    [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-    [ValidateRange(1, 60)][int]$ProcessExitTimeoutSeconds = 5,
-    [ValidateRange(2, 60)][int]$WindowTimeoutSeconds = 10
+    [Parameter(Mandatory = $true, ParameterSetName = "BundleDir")][string]$BundleDir,
+    [Parameter(Mandatory = $true, ParameterSetName = "ExplicitPaths")][string]$ExePath,
+    [Parameter(Mandatory = $true, ParameterSetName = "ExplicitPaths")][string]$StartupAliasPath,
+    [Parameter(Mandatory = $true, ParameterSetName = "ExplicitPaths")][string]$WorkingDirectory,
+    [ValidateRange(1, 60)][int]$ProcessExitTimeoutSeconds = 8,
+    [ValidateRange(2, 60)][int]$WindowTimeoutSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
-$resolvedExe = (Resolve-Path -LiteralPath $ExePath).Path
-$resolvedAlias = (Resolve-Path -LiteralPath $StartupAliasPath).Path
-$resolvedWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
-
-if (-not (Test-Path -LiteralPath $resolvedExe -PathType Leaf)) {
-    throw "UTHelper executable was not found: $resolvedExe"
+if ($PSCmdlet.ParameterSetName -eq "BundleDir") {
+    if (-not (Test-Path -LiteralPath $BundleDir -PathType Container)) {
+        throw "Bundle directory was not found: $BundleDir"
+    }
+    $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $BundleDir).Path
+    $candidateExe = Join-Path $resolvedWorkingDirectory "UTHelper.exe"
+    $candidateAlias = Join-Path $resolvedWorkingDirectory "UTHelperAutostart.exe"
+    if (-not (Test-Path -LiteralPath $candidateExe -PathType Leaf)) {
+        throw "UTHelper executable was not found: $candidateExe"
+    }
+    if (-not (Test-Path -LiteralPath $candidateAlias -PathType Leaf)) {
+        throw "UTHelper startup alias was not found: $candidateAlias"
+    }
+    $resolvedExe = (Resolve-Path -LiteralPath $candidateExe).Path
+    $resolvedAlias = (Resolve-Path -LiteralPath $candidateAlias).Path
 }
-if (-not (Test-Path -LiteralPath $resolvedAlias -PathType Leaf)) {
-    throw "UTHelper startup alias was not found: $resolvedAlias"
-}
-if (-not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) {
-    throw "Working directory was not found: $resolvedWorkingDirectory"
+else {
+    if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+        throw "UTHelper executable was not found: $ExePath"
+    }
+    if (-not (Test-Path -LiteralPath $StartupAliasPath -PathType Leaf)) {
+        throw "UTHelper startup alias was not found: $StartupAliasPath"
+    }
+    if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
+        throw "Working directory was not found: $WorkingDirectory"
+    }
+    $resolvedExe = (Resolve-Path -LiteralPath $ExePath).Path
+    $resolvedAlias = (Resolve-Path -LiteralPath $StartupAliasPath).Path
+    $resolvedWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
 }
 
 $processNames = @(
@@ -35,17 +54,34 @@ if (-not ("UTHelperWindowProbe" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class UTHelperWindowProbe
 {
     private const int SW_HIDE = 0;
+    private const string FlutterWindowClass = "FLUTTER_RUNNER_WIN32_WINDOW";
     private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 
     [DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hwnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hwnd);
@@ -56,6 +92,23 @@ public static class UTHelperWindowProbe
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hwnd, int command);
 
+    private static bool IsFlutterRunnerWindow(IntPtr hwnd)
+    {
+        StringBuilder sb = new StringBuilder(128);
+        int len = GetClassNameW(hwnd, sb, sb.Capacity);
+        return len > 0 && sb.ToString() == FlutterWindowClass;
+    }
+
+    private static bool HasNonZeroBounds(IntPtr hwnd)
+    {
+        RECT rect;
+        if (!GetWindowRect(hwnd, out rect))
+        {
+            return false;
+        }
+        return (rect.Right - rect.Left) > 0 && (rect.Bottom - rect.Top) > 0;
+    }
+
     public static bool HasWindow(uint targetProcessId)
     {
         bool found = false;
@@ -63,7 +116,7 @@ public static class UTHelperWindowProbe
         {
             uint owner;
             GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == targetProcessId)
+            if (owner == targetProcessId && IsFlutterRunnerWindow(hwnd))
             {
                 found = true;
             }
@@ -79,7 +132,7 @@ public static class UTHelperWindowProbe
         {
             uint owner;
             GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == targetProcessId && IsWindowVisible(hwnd) && !IsIconic(hwnd))
+            if (owner == targetProcessId && IsFlutterRunnerWindow(hwnd) && HasNonZeroBounds(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd))
             {
                 found = true;
             }
@@ -96,10 +149,10 @@ public static class UTHelperWindowProbe
         {
             uint owner;
             GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == targetProcessId)
+            if (owner == targetProcessId && IsFlutterRunnerWindow(hwnd))
             {
                 hasWindow = true;
-                if (IsWindowVisible(hwnd))
+                if (IsWindowVisible(hwnd) && HasNonZeroBounds(hwnd))
                 {
                     visible = true;
                 }
@@ -116,7 +169,7 @@ public static class UTHelperWindowProbe
         {
             uint owner;
             GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == targetProcessId)
+            if (owner == targetProcessId && IsFlutterRunnerWindow(hwnd))
             {
                 found = true;
                 ShowWindow(hwnd, SW_HIDE);
@@ -139,6 +192,7 @@ $originalAppData = $env:APPDATA
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalFletData = $env:FLET_APP_STORAGE_DATA
 $originalFletTemp = $env:FLET_APP_STORAGE_TEMP
+$originalKeyring = $env:PYTHON_KEYRING_BACKEND
 
 function Wait-Until {
     param(
@@ -179,8 +233,12 @@ function Assert-ExitedSuccessfully {
     if (-not $Process.WaitForExit($ProcessExitTimeoutSeconds * 1000)) {
         throw "$Description PID $($Process.Id) did not exit within $ProcessExitTimeoutSeconds seconds"
     }
-    if ($Process.ExitCode -ne 0) {
-        throw "$Description PID $($Process.Id) exited with code $($Process.ExitCode)"
+    $Process.WaitForExit()
+    $Process.Refresh()
+    $exitCode = $Process.ExitCode
+    if ($null -eq $exitCode -or $exitCode -ne 0) {
+        $hexCode = if ($null -ne $exitCode) { "0x{0:X8}" -f ([uint32]$exitCode) } else { "null" }
+        throw "$Description PID $($Process.Id) exited with code $exitCode ($hexCode)"
     }
 }
 
@@ -199,8 +257,12 @@ function Assert-AllExitedSuccessfully {
         if (-not $process.WaitForExit($remaining)) {
             throw "$Description PID $($process.Id) missed the shared $ProcessExitTimeoutSeconds second deadline"
         }
-        if ($process.ExitCode -ne 0) {
-            throw "$Description PID $($process.Id) exited with code $($process.ExitCode)"
+        $process.WaitForExit()
+        $process.Refresh()
+        $exitCode = $process.ExitCode
+        if ($null -eq $exitCode -or $exitCode -ne 0) {
+            $hexCode = if ($null -ne $exitCode) { "0x{0:X8}" -f ([uint32]$exitCode) } else { "null" }
+            throw "$Description PID $($process.Id) exited with code $exitCode ($hexCode)"
         }
     }
 }
@@ -238,7 +300,8 @@ function Hide-OwnedPrimary {
 
 New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
 $settingsJson = @{
-    START_WITH_WINDOWS = $true
+    START_WITH_WINDOWS = $false
+    AUTOSTART_DEFAULT_APPLIED = $true
     START_MINIMIZED = $true
     MINIMIZE_TO_TRAY = $true
     CHECK_INTERVAL_MINUTES = 0
@@ -256,6 +319,7 @@ try {
     $env:LOCALAPPDATA = $profileRoot
     $env:FLET_APP_STORAGE_DATA = $null
     $env:FLET_APP_STORAGE_TEMP = $null
+    $env:PYTHON_KEYRING_BACKEND = "keyring.backends.null.Keyring"
 
     # 1. Establish an actual Python/UI primary, not merely a runner whose
     # initial native window happens to be hidden before the mutex exists.
@@ -270,7 +334,7 @@ try {
                 (Test-Path -LiteralPath $appLog -PathType Leaf) -and
                 ((Get-Content -LiteralPath $appLog -Raw) -match "App started successfully")
         }
-    Write-Host "[PASS] startup alias primary is ready and hidden (PID $($primary.Id))"
+    Write-Host "[PASS 1/5] startup alias primary is ready and hidden (PID $($primary.Id))"
 
     # 2. A manual second launch exits and reveals/restores the same primary.
     $manualSecondary = Start-OwnedProcess -FilePath $resolvedExe
@@ -283,14 +347,14 @@ try {
         -TimeoutSeconds $WindowTimeoutSeconds `
         -Description "Manual activation reveal" `
         -Predicate { [UTHelperWindowProbe]::IsVisibleAndRestored([uint32]$primary.Id) }
-    Write-Host "[PASS] manual launch revealed original primary PID $($primary.Id)"
+    Write-Host "[PASS 2/5] manual launch revealed original primary PID $($primary.Id)"
 
     # 3. The startup alias remains silent while a hidden primary exists.
     Hide-OwnedPrimary -Process $primary
     $silentSecondary = Start-OwnedProcess -FilePath $resolvedAlias
     Assert-ExitedSuccessfully -Process $silentSecondary -Description "Autostart secondary"
     Assert-HiddenForObservationWindow -Process $primary -Seconds 2
-    Write-Host "[PASS] autostart secondary stayed silent"
+    Write-Host "[PASS 3/5] autostart secondary stayed silent"
 
     # 4. Concurrent manual launches coalesce into one reveal of the primary.
     Hide-OwnedPrimary -Process $primary
@@ -313,13 +377,14 @@ try {
     if ($unexpectedSurvivors.Count -ne 0) {
         throw "A manual secondary remained alive after concurrent handoff"
     }
-    Write-Host "[PASS] four manual launches revealed only original primary PID $($primary.Id)"
+    Write-Host "[PASS 4/5] four manual launches revealed only original primary PID $($primary.Id)"
 
     # 5. After the owned primary exits, a manual launch becomes a new visible primary.
     Stop-Process -Id $primary.Id -Force
     if (-not $primary.WaitForExit($ProcessExitTimeoutSeconds * 1000)) {
         throw "Owned primary PID $($primary.Id) did not terminate within $ProcessExitTimeoutSeconds seconds"
     }
+    $primary.WaitForExit()
     $replacement = Start-OwnedProcess -FilePath $resolvedExe
     if ($replacement.Id -eq $primary.Id) {
         throw "Replacement unexpectedly reused the recorded primary PID"
@@ -332,12 +397,13 @@ try {
             -not $replacement.HasExited -and
                 [UTHelperWindowProbe]::IsVisibleAndRestored([uint32]$replacement.Id)
         }
-    Write-Host "[PASS] manual launch became visible replacement primary PID $($replacement.Id)"
+    Write-Host "[PASS 5/5] manual launch became visible replacement primary PID $($replacement.Id)"
 
     Stop-Process -Id $replacement.Id -Force
     if (-not $replacement.WaitForExit($ProcessExitTimeoutSeconds * 1000)) {
         throw "Replacement primary PID $($replacement.Id) did not terminate within $ProcessExitTimeoutSeconds seconds"
     }
+    $replacement.WaitForExit()
 
     $packagedLogs = @(
         Join-Path $settingsDirectory "debug_app.log"
@@ -381,6 +447,7 @@ finally {
     $env:LOCALAPPDATA = $originalLocalAppData
     $env:FLET_APP_STORAGE_DATA = $originalFletData
     $env:FLET_APP_STORAGE_TEMP = $originalFletTemp
+    $env:PYTHON_KEYRING_BACKEND = $originalKeyring
 
     $resolvedProfile = [IO.Path]::GetFullPath($profileRoot)
     $tempPrefix = $tempRoot.TrimEnd('\') + '\'

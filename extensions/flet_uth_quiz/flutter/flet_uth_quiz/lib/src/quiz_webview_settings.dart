@@ -14,6 +14,7 @@ InAppWebViewSettings createQuizWebViewSettings({bool allowPopups = true}) {
     javaScriptCanOpenWindowsAutomatically: allowPopups,
     supportMultipleWindows: allowPopups,
     useShouldOverrideUrlLoading: true,
+    useOnRenderProcessGone: true,
     regexToCancelSubFramesLoading: quizSubframeCancelRegex,
     isInspectable: false,
     allowContentAccess: false,

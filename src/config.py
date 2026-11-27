@@ -134,6 +134,7 @@ class SecretStoreBackend(Protocol):
 _secret_backend: SecretStoreBackend | None = None
 _secret_backend_factory: Callable[[], SecretStoreBackend | None] | None = None
 _pending_plaintext_migration: dict[str, str] = {}
+_loaded_had_ws_token_username: bool = True
 
 
 def register_secret_backend(backend: SecretStoreBackend | None) -> None:
@@ -197,6 +198,16 @@ def hydrate_secrets(
             if not overwrite_non_empty and (getattr(settings, attr, "") or not new_val):
                 continue
             setattr(settings, attr, new_val)
+        if (
+            not _loaded_had_ws_token_username
+            and not str(getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "") or "").strip()
+            and str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
+            and str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        ):
+            from core.demo_sandbox import is_demo_account as _is_demo_account
+
+            if not _is_demo_account(settings.UTH_USERNAME):
+                settings.MOODLE_WS_TOKEN_USERNAME = settings.UTH_USERNAME.strip()
 
 
 def pop_pending_plaintext_migration() -> dict[str, str]:
@@ -362,6 +373,7 @@ class Settings(BaseModel):
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)
+    MOODLE_WS_TOKEN_USERNAME: str = Field(default="", description="Username (MSSV) that owns the cached Web Services token")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
@@ -537,14 +549,17 @@ def get_sync_interval_minutes(value=None) -> int:
 
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:
+    global _loaded_had_ws_token_username
     _logger = logging.getLogger(__name__)
     s = Settings()
     json_secrets: dict[str, str] = {}
+    had_ws_token_username = True
 
     from core.safe_file_io import SafeFileIO
     data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
     
     if data:
+        had_ws_token_username = "MOODLE_WS_TOKEN_USERNAME" in data
         try:
             # Trích xuất secrets trước khi xác thực Pydantic
             for key in _SECRET_FIELDS:
@@ -554,6 +569,9 @@ def load_settings() -> Settings:
             s = Settings(**migrate_settings_data(data))
         except Exception as e:
             _logger.warning(f"Failed to parse settings values: {e}")
+
+    with _settings_save_lock:
+        _loaded_had_ws_token_username = had_ws_token_username
 
     # Khôi phục secrets từ secure storage (keyring → tier 2 JSON fallback)
     for attr, key_suffix in _SECRET_FIELDS.items():
@@ -585,9 +603,23 @@ def load_settings() -> Settings:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
+    if (
+        not had_ws_token_username
+        and not s.MOODLE_WS_TOKEN_USERNAME.strip()
+        and s.MOODLE_WS_TOKEN.strip()
+        and s.UTH_USERNAME.strip()
+    ):
+        from core.demo_sandbox import is_demo_account as _is_demo_account
+
+        if not _is_demo_account(s.UTH_USERNAME):
+            s.MOODLE_WS_TOKEN_USERNAME = s.UTH_USERNAME.strip()
+
     return s
 
 settings = load_settings()
+if os.environ.get("UTH_TEST_MODE") == "1":
+    # Prevent host developer AppData MSSV from leaking into unit tests that mock UTH_USERNAME + MOODLE_WS_TOKEN
+    settings.MOODLE_WS_TOKEN_USERNAME = ""
 
 def save_settings() -> bool:
     """Persist settings transactionally across secure storage and JSON storage.
@@ -670,5 +702,56 @@ def save_settings() -> bool:
     if json_ok:
         _notify_settings_saved()
     return json_ok
+
+
+def clear_persisted_secrets() -> bool:
+    """Erase all persisted secrets from secure storage and in-memory settings."""
+    _logger = logging.getLogger(__name__)
+    ok = True
+    with _settings_io_lock:
+        backend = _resolve_secret_backend()
+        with _settings_save_lock:
+            if backend is None:
+                backend = _secret_backend
+            prev_username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+            _pending_plaintext_migration.clear()
+            for attr in _SECRET_FIELDS:
+                setattr(settings, attr, "")
+            settings.MOODLE_WS_TOKEN_USERNAME = ""
+            settings.UTH_CREDENTIALS_ORIGIN = ""
+
+        empty_secrets = {key_suffix: "" for key_suffix in _SECRET_FIELDS.values()}
+        if backend is not None:
+            try:
+                if not bool(backend.write_all(empty_secrets)):
+                    ok = False
+            except Exception as exc:
+                _logger.warning(
+                    "Native secret backend clear failed: %s",
+                    type(exc).__name__,
+                )
+                for key_suffix in _SECRET_FIELDS.values():
+                    try:
+                        if not bool(backend.write_secret(key_suffix, "")):
+                            ok = False
+                    except Exception:
+                        ok = False
+        if _HAS_KEYRING:
+            for key_suffix in _SECRET_FIELDS.values():
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, key_suffix)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception as exc:
+                    _logger.warning("Keyring delete failed for %s: %s", key_suffix, exc)
+                    ok = False
+            if prev_username:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, prev_username)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception:
+                    pass
+    return ok
 
 

@@ -326,6 +326,27 @@ def _is_viewer_locked_url(url: str) -> bool:
         return False
 
 
+def _expects_viewer_ready_message(url: str) -> bool:
+    """Return True only for loopback ``/viewer/`` and ``/pdf-viewer/`` hosts that emit a ready postMessage."""
+    if _extract_loopback_port(url) is None:
+        return False
+    try:
+        path = urlsplit(url).path
+        return path.startswith("/viewer/") or path.startswith("/pdf-viewer/")
+    except ValueError:
+        return False
+
+
+def _is_raw_loopback_item_url(url: str) -> bool:
+    """Return True when ``url`` is a raw loopback ``/<16-hex>`` item stream (e.g. native PDF)."""
+    if _extract_loopback_port(url) is None:
+        return False
+    try:
+        return bool(_LOOPBACK_ITEM_PATH_RE.fullmatch(urlsplit(url).path))
+    except ValueError:
+        return False
+
+
 def _is_windows_webview2_platform(page: Optional[ft.Page]) -> bool:
     """Return True on Windows when a non-web target Page can host WebView2."""
     if sys.platform != "win32" or page is None or bool(getattr(page, "web", False)):
@@ -1393,8 +1414,11 @@ class WindowsWebView2Dock:
                         self._clear_active_init_script(core)
                 self._update_history_state(core)
                 if getattr(args, "is_success", True):
-                    if self._is_viewer_locked():
+                    active_url = self._committed_url or self._url
+                    if _expects_viewer_ready_message(active_url):
                         self._paint_deadline = time.monotonic() + 12.0
+                    elif self._html is None and _is_raw_loopback_item_url(active_url):
+                        self._mark_paint_ready()
                     else:
                         self._paint_deadline = time.monotonic() + 0.25
                         try:

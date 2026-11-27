@@ -7,15 +7,18 @@ import hashlib
 import importlib.util
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
 
+_NUMERIC_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _QUIZ_PACKAGE = "flet_uth_quiz"
 _QUIZ_CLIENT_STAMP = ".flet-quiz-client.sha256"
 _QUIZ_EXTENSION_MARKER = "flet_uth_quiz.Extension()"
@@ -383,6 +386,42 @@ def _clear_stale_windows_cmake_nuget_cache(project_root: Path) -> bool:
     return True
 
 
+def _sync_runtime_version_asset(project_root: Path) -> None:
+    """Keep local and bundled ``release-version`` assets aligned with ``pyproject.toml``."""
+    pyproject = project_root / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        version = data["project"]["version"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        return
+    if not isinstance(version, str) or not _NUMERIC_VERSION.fullmatch(version):
+        return
+    expected = f"{version}\n".encode("ascii")
+
+    targets = [project_root / "src" / "assets" / "release-version"]
+    bundled_assets = project_root / "build" / "windows" / "app" / "assets"
+    if bundled_assets.is_dir():
+        targets.append(bundled_assets / "release-version")
+
+    for target in targets:
+        try:
+            if target.is_file() and target.read_bytes() == expected:
+                continue
+        except OSError:
+            pass
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.parent / f".{target.name}.{secrets.token_hex(6)}.tmp"
+            try:
+                with temporary.open("xb") as stream:
+                    stream.write(expected)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def ensure_windows_quiz_client(project_root: Path) -> Path:
     """Build the custom Flet client when its extension source has changed.
 
@@ -392,6 +431,7 @@ def ensure_windows_quiz_client(project_root: Path) -> Path:
     """
     project_root = project_root.resolve()
     fingerprint = _client_fingerprint(project_root)
+    _sync_runtime_version_asset(project_root)
     executable, generated_extensions, stamp = _custom_client_artifacts(project_root)
     if _is_current_custom_client(project_root, fingerprint):
         return executable
@@ -489,4 +529,5 @@ def ensure_windows_quiz_client(project_root: Path) -> Path:
             "Flet built the Windows client, but its quiz extension could not be verified."
         ) from exc
 
+    _sync_runtime_version_asset(project_root)
     return executable

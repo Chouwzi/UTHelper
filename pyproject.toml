@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.5.1"
+version = "2.6.0"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -92,6 +92,9 @@ dependencies = [
 
 [tool.flet.windows.dev_packages]
 flet-uth-quiz = "extensions/flet_uth_quiz"
+
+[tool.flet.windows.app]
+hide_window_on_start = true
 
 [tool.flet.windows.cleanup]
 # PyWin32 compiled help is not used at runtime; retain every runtime module.
