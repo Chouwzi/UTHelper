@@ -108,6 +108,14 @@ async def apply_initial_autostart_default(
     """
     if getattr(settings_value, "AUTOSTART_DEFAULT_APPLIED", False):
         if not getattr(settings_value, "START_WITH_WINDOWS", False):
+            if _is_packaged_windows_run_key_service(service):
+                current = await service.get_status()
+                if (
+                    current.enabled
+                    or current.technical_detail
+                    == "Run value does not match the canonical command"
+                ):
+                    await service.set_enabled(False)
             return None
         if not _is_packaged_windows_run_key_service(service):
             return None

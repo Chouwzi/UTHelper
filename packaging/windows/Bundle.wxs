@@ -3,16 +3,24 @@
   <Bundle Name="UTHelper" Manufacturer="UTHelper" Version="$(Version)"
           IconSourceFile="$(BundleIconPath)"
           UpgradeCode="EECFB4A5-4CCD-4D94-A0DD-D8D346F626E0">
+    <Variable Name="InstallDesktopShortcut" Type="numeric" Value="1" Persisted="yes" bal:Overridable="yes" />
+    <Variable Name="InstallStartMenuShortcut" Type="numeric" Value="1" Persisted="yes" bal:Overridable="yes" />
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
           Theme="hyperlinkLicense"
           LicenseUrl=""
           LogoFile="$(BundleLogoPath)"
+          ThemeFile="$(BundleThemePath)"
+          LocalizationFile="$(BundleLocalizationPath)"
+          SuppressOptionsUI="yes"
           LaunchTarget="[ProgramFiles64Folder]UTHelper\UTHelper.exe"
           LaunchWorkingFolder="[ProgramFiles64Folder]UTHelper" />
     </BootstrapperApplication>
     <Chain>
-      <MsiPackage SourceFile="$(MsiPath)" Compressed="yes" Visible="no" />
+      <MsiPackage SourceFile="$(MsiPath)" Compressed="yes" Visible="no">
+        <MsiProperty Name="INSTALLDESKTOPSHORTCUT" Value="[InstallDesktopShortcut]" />
+        <MsiProperty Name="INSTALLSTARTMENUSHORTCUT" Value="[InstallStartMenuShortcut]" />
+      </MsiPackage>
     </Chain>
   </Bundle>
 </Wix>
