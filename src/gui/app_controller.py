@@ -1314,7 +1314,27 @@ class AppController:
 
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
-        from platform_utils.autostart import create_autostart_service
+        from dataclasses import replace as _dc_replace
+        from pathlib import PureWindowsPath
+        from platform_utils.autostart import (
+            create_autostart_service,
+            get_current_process_executable,
+            has_package_identity,
+        )
+
+        if os.environ.get("UTH_TEST_MODE") == "1":
+            return
+        try:
+            if not has_package_identity():
+                exe = get_current_process_executable()
+                if PureWindowsPath(str(exe)).stem.casefold() in {"python", "pythonw"}:
+                    return
+        except Exception:
+            logger.debug(
+                "Skipping initial Windows autostart probe; executable unavailable",
+                exc_info=True,
+            )
+            return
 
         try:
             result = await apply_initial_autostart_default(
@@ -1327,6 +1347,17 @@ class AppController:
             return
         if result is not None and not result.success:
             logger.warning("Windows did not accept the autostart default: %s", result.message)
+        elif result is not None and result.confirmed:
+            sv = getattr(self, "settings_view", None)
+            baseline = getattr(sv, "_baseline_snapshot", None)
+            if sv is not None and baseline is not None:
+                try:
+                    sv._baseline_snapshot = _dc_replace(
+                        baseline, start_with_windows=result.enabled
+                    )
+                    sv._apply_autostart_ui(result)
+                except Exception:
+                    logger.debug("Settings autostart UI sync skipped", exc_info=True)
 
     def _safe_run_task(self, handler, *args, **kwargs):
         if not hasattr(self.page, "session") or self.page.session is None:
@@ -1676,6 +1707,11 @@ class AppController:
                 self.page, on_show=self.window_activator.request_show
             )
             tray_ready = self.tray.setup()
+            if not tray_ready and is_autostart_launch():
+                for _ in range(2):
+                    tray_ready = self.tray.setup()
+                    if tray_ready:
+                        break
             self.notifier = notification_manager_cls(self.tray)
         else:
             self.tray = None
@@ -1721,28 +1757,60 @@ class AppController:
         if self.force_visible and not _is_mobile:
             self.window_activator.request_show()
 
+    def _is_tray_available(self) -> bool:
+        tray = getattr(self, "tray", None)
+        if tray is None:
+            return False
+        ready = getattr(tray, "is_ready", None)
+        if isinstance(ready, bool):
+            return ready
+        return bool(
+            getattr(tray, "_icon", None) is not None
+            or callable(getattr(tray, "notify", None))
+        )
+
+    async def _handle_window_close_request(self) -> None:
+        """Hide to system tray when enabled and ready; otherwise exit safely."""
+        if settings.MINIMIZE_TO_TRAY and self._is_tray_available():
+            dismiss_filter = getattr(self, "_dismiss_desktop_filter_menu", None)
+            if callable(dismiss_filter):
+                try:
+                    dismiss_filter()
+                except Exception:
+                    pass
+            self.page.window.visible = False
+            self.page.update()
+            # H-01: Show tray balloon the first time so user knows app is still running
+            if not getattr(self, "_tray_balloon_shown", False):
+                self._tray_balloon_shown = True
+                try:
+                    from gui.tray import TrayApp
+
+                    notify_fn = getattr(self.tray, "notify", None)
+                    icon_obj = getattr(self.tray, "_icon", None)
+                    if isinstance(self.tray, TrayApp) or (
+                        icon_obj is None and callable(notify_fn)
+                    ):
+                        notify_fn(
+                            "UTHelper",
+                            "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
+                        )
+                    elif icon_obj is not None:
+                        icon_obj.notify(
+                            "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
+                            "UTHelper",
+                        )
+                except Exception:
+                    logger.debug("Ignored exception", exc_info=True)
+            return
+        await self._request_window_exit()
+
     async def _on_window_event(self, e):
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
         if platform_utils.IS_MOBILE:
             return
         if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
-            if settings.MINIMIZE_TO_TRAY:
-                self.page.window.visible = False
-                self.page.update()
-                # H-01: Show tray balloon the first time so user knows app is still running
-                if not self._tray_balloon_shown:
-                    self._tray_balloon_shown = True
-                    try:
-                        if self.tray:
-                            self.tray._icon.notify(
-                                "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
-                                "UTHelper",
-                            )
-                    except Exception:
-                        import logging as _fb_log
-                        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            else:
-                await self._request_window_exit()
+            await self._handle_window_close_request()
 
     def _toggle_maximize_window(self, _event=None) -> None:
         """Phóng to / khôi phục cửa sổ từ thanh tiêu đề tuỳ chỉnh."""
@@ -1874,8 +1942,8 @@ class AppController:
         await self._destroy_window()
 
     async def _exit_from_window_header(self, _event=None) -> None:
-        """The custom close button follows the same safe exit path."""
-        await self._request_window_exit()
+        """The custom close button respects minimize-to-tray just like OS close."""
+        await self._handle_window_close_request()
 
     async def _on_keyboard_event(self, e):
         """Handle Escape back navigation and Ctrl+K / search focus shortcuts."""

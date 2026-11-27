@@ -2707,6 +2707,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `uv run ruff check src tests`: **All checks passed!**.
   - `pytest tests -q --tb=short`: **3443 passed, 26 skipped, 0 failed** (verified in live Flet Web Desktop + Mobile browser renders).
 
+## Hotfix 2.6.2 (PDF Knockout Transparency, Mobile PPTX Wingdings & Scroll Speed) & Hotfix 2.6.3 (Windows Tray Close, Default Shortcuts, Legacy Cleanup & Autostart Hardening) (2026-11-27)
+
+- **Branch & Scope**:
+  - `hotfix/2.6.2` -> `main` (`PR #144`) & `develop` (`PR #145`).
+  - `hotfix/2.6.3` — `src/main.py`, `src/gui/tray.py`, `src/gui/app_controller.py`, `src/gui/controllers/autostart_settings.py`, `src/notifiers/windows.py`, `src/platform_utils/windows_update.py`, `packaging/windows/{Package.wxs,Bundle.wxs,BundleTheme.xml,BundleTheme.wxl,cleanup_legacy_installs.ps1,UTHelper.Package.wixproj,UTHelper.Bundle.wixproj}`, `pyproject.toml`, `README.md`, `docs/README.md`, `docs/releases/2.6.3.md`, `tests/{test_hotfix_windows_tray_installer_autostart,test_release_metadata,test_settings_credits_and_version}.py`.
+- **Changes**:
+  - **Close-to-Tray (`_handle_window_close_request` & `TrayApp.is_ready`)**: Routed the custom desktop window header `X` button (`_exit_from_window_header`) through `_handle_window_close_request()` alongside `_on_window_event()`, hiding to the system tray with a one-time balloon notification when `settings.MINIMIZE_TO_TRAY` is enabled and `TrayApp.is_ready` is true, and safely exiting instead of creating an invisible headless process when the tray is unavailable.
+  - **Default-Checked Desktop & Start Menu Shortcuts (`BundleTheme.xml`, `Bundle.wxs`, `Package.wxs`)**: Added pre-checked `InstallDesktopShortcut` and `InstallStartMenuShortcut` (`Value="1"`) Burn variables and checkboxes on the WiX v7 setup `Install` page, wired to secure MSI properties `INSTALLDESKTOPSHORTCUT="1"` and `INSTALLSTARTMENUSHORTCUT="1"`.
+  - **Legacy Version Removal & Single Start Menu Shortcut Hygiene (`cleanup_legacy_installs.ps1`, `WindowsNotifier`, `windows_update.py`)**: Stamped `System.AppUserModel.ID = "UTHelper.App"` directly on the MSI `StartMenuUTHelper` shortcut; replaced `WindowsNotifier._ensure_shortcut` with `reconcile_windows_start_menu_shortcuts()` (never creating bare `python.exe` shortcuts and purging duplicate per-user Start Menu / Startup / Desktop `.lnk` entries when the per-machine MSI shortcut exists); added post-commit `CleanupLegacyInstalls` (`After="InstallFinalize"`) to silently uninstall legacy Inno Setup versions (`<= v2.4.1`) and remove stale per-user shortcuts; and taught `read_install_channel()` to detect registered WiX Burn bundles (`BURN_UPGRADE_CODE`) so in-app updates use `bootstrapper` and remove superseded Burn bundles cleanly.
+  - **Windows Autostart Hardening (`src/main.py`, `app_controller.py`, `autostart_settings.py`)**: Normalized packaged Windows `cwd` to the executable directory when launched from `C:\Windows\System32` at logon, retried `TrayApp.setup()` on `autostart_launch` for slow taskbar startup, blocked source/dev Python launches from clobbering `HKCU\...\Run\UTHelper`, and cleaned up foreign/stale `Run\UTHelper` entries when `START_WITH_WINDOWS` is disabled.
+- **Verification**:
+  - Real WiX v7 builds (`UTHelper.Package.wixproj` + `UTHelper.Bundle.wixproj`): **0 warnings, 0 errors**.
+  - `uv run ruff check src tests scripts`: **All checks passed!**.
+  - Full `pytest` suite (`tests/`): **3457 passed, 26 skipped, 0 failed**.
+
+
 
 
 

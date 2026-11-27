@@ -611,8 +611,65 @@ def probe_executable_details(
     )
 
 
+def _normalize_guid_token(raw: object) -> str:
+    if isinstance(raw, (list, tuple)):
+        for entry in raw:
+            norm = _normalize_guid_token(entry)
+            if norm:
+                return norm
+        return ""
+    return str(raw or "").strip().strip("{}").upper()
+
+
+def _has_installed_burn_bundle() -> bool:
+    """Detect whether any UTHelper WiX Burn bundle is registered in Uninstall."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    expected = _normalize_guid_token(BURN_UPGRADE_CODE)
+    uninstall_subkeys = (
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    )
+    roots = (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER)
+    base_access = winreg.KEY_READ
+    view_flags = (0, getattr(winreg, "KEY_WOW64_64KEY", 0), getattr(winreg, "KEY_WOW64_32KEY", 0))
+
+    for root in roots:
+        for subkey_path in uninstall_subkeys:
+            for view_flag in dict.fromkeys(view_flags):
+                try:
+                    with winreg.OpenKey(root, subkey_path, 0, base_access | view_flag) as uninstall_key:
+                        index = 0
+                        while True:
+                            try:
+                                child_name = winreg.EnumKey(uninstall_key, index)
+                                index += 1
+                            except OSError:
+                                break
+                            try:
+                                with winreg.OpenKey(
+                                    uninstall_key, child_name, 0, base_access | view_flag
+                                ) as entry_key:
+                                    upgrade_val, _ = winreg.QueryValueEx(
+                                        entry_key, "BundleUpgradeCode"
+                                    )
+                                    if _normalize_guid_token(upgrade_val) == expected:
+                                        return True
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+    return False
+
+
 def read_install_channel() -> str | None:
-    """Read only the machine-scoped channel marker written by the MSI."""
+    """Resolve effective Windows install channel, preferring Burn when registered."""
+    if _has_installed_burn_bundle():
+        return "bootstrapper"
+
     try:
         import winreg
     except ImportError:
