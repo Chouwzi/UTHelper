@@ -776,7 +776,7 @@ class ProfileView(ft.Container):
         # A slightly taller banner makes room for the whole campus photo while
         # extending it towards the student name without distorting its ratio.
         banner_height = 235
-        campus_width = round(banner_height * 560 / 292)
+        campus_width = round(banner_height * 845 / 415)
         campus_height = banner_height
         banner = ft.Container(
             content=ft.Stack(
@@ -784,7 +784,7 @@ class ProfileView(ft.Container):
                     ft.Container(
                         content=ft.Image(
                             src=_asset_image_source(
-                                "uth_profile_banner.jpg", "image/jpeg"
+                                "uth_profile_campus.jpg", "image/jpeg"
                             ),
                             width=campus_width,
                             height=campus_height,
@@ -800,6 +800,22 @@ class ProfileView(ft.Container):
                         top=0,
                     ),
                     ft.Container(
+                        width=campus_width,
+                        right=0,
+                        top=0,
+                        bottom=0,
+                        gradient=ft.LinearGradient(
+                            begin=ft.Alignment(-1, 0),
+                            end=ft.Alignment(1, 0),
+                            colors=[
+                                C.SURFACE,
+                                ft.Colors.with_opacity(0.65, C.SURFACE),
+                                ft.Colors.with_opacity(0, C.SURFACE),
+                            ],
+                            stops=[0, 0.16, 0.48],
+                        ),
+                    ),
+                    ft.Container(
                         content=identity,
                         padding=ft.Padding.symmetric(horizontal=36, vertical=12),
                         alignment=ft.Alignment(-1, 0),
@@ -807,6 +823,22 @@ class ProfileView(ft.Container):
                         right=0,
                         top=0,
                         bottom=0,
+                    ),
+                    ft.Container(
+                        content=ft.Image(
+                            src=_asset_image_source(
+                                "uth_profile_wordmark.png", "image/png"
+                            ),
+                            fit=ft.BoxFit.CONTAIN,
+                            semantics_label="UTH",
+                        ),
+                        width=168,
+                        height=50,
+                        right=10,
+                        top=8,
+                        border_radius=25,
+                        bgcolor=C.SURFACE,
+                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                     ),
                 ],
                 height=banner_height,
