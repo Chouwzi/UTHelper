@@ -27,8 +27,9 @@ def test_project_version_is_only_authored_version(tmp_path):
 
 def test_hotfix_version_can_upgrade_the_affected_release():
     version = read_project_version(ROOT / "pyproject.toml")
-    assert version == "2.5.1"
-    assert release_build_number(version) > release_build_number("2.5.0")
+    assert version == "2.6.1"
+    assert release_build_number(version) == 2_006_001
+    assert release_build_number(version) > release_build_number("2.6.0")
 
 
 def test_runtime_version_is_generated_from_the_single_authored_version(tmp_path):

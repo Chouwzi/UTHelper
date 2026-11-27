@@ -68,7 +68,8 @@ opt-out crash diagnostics rules above, with channel-specific update behavior:
 - **Google Play Store (`chplay`, Android `.aab`)**:
   - The app sends credentials/session data and user-requested course activity
     directly over HTTPS to the configured UTH Moodle/Portal endpoints
-    (`courses.ut.edu.vn`, `thnn.ut.edu.vn`, `portal-publicapp.ut.edu.vn`). It
+    (`courses.ut.edu.vn`, `thnn.ut.edu.vn`, `portal.ut.edu.vn`,
+    `portal-publicapp.ut.edu.vn`). It
     does not operate a developer-hosted proxy. When enabled, sanitized crash
     diagnostics are sent to Sentry; optional alert integrations send their
     configured payloads to the user's chosen Gmail, Discord, or Telegram

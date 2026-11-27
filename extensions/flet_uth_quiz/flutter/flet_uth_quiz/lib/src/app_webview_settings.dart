@@ -10,6 +10,7 @@ import 'quiz_popup_policy.dart' show hasUnsafeUrlCharacters;
 const appWebViewMsgPrefix = '__UTH_MSG__:';
 const appWebViewExternalLaunchedPrefix = '__UTH_EXTERNAL_APP_LAUNCHED__:';
 const appWebViewExternalMissingPrefix = '__UTH_EXTERNAL_APP_MISSING__:';
+const appWebViewRenderProcessGonePrefix = 'render_process_gone';
 const appWebViewMaxConsoleMsgLength = 4096;
 const maxAppPopupSinks = 4;
 const kAppWebViewAuthUserScriptGroup = 'uth_app_webview_auth';
@@ -253,6 +254,7 @@ InAppWebViewSettings createAppWebViewSettings({
     javaScriptCanOpenWindowsAutomatically: !viewerLocked,
     useShouldOverrideUrlLoading: true,
     useOnDownloadStart: !viewerLocked,
+    useOnRenderProcessGone: true,
     regexToCancelSubFramesLoading: viewerLocked
         ? buildLockedViewerSubframeCancelRegex(viewerPrefix)
         : appBrowserSubframeCancelRegex,
@@ -984,6 +986,13 @@ bool shouldReportMainFrameWebError({
   }
   return true;
 }
+
+/// Formats a structured `web_error` payload when Android terminates or crashes
+/// a WebView renderer process (`WebViewClient.onRenderProcessGone`).
+String formatAppWebViewRenderProcessGoneError(bool? didCrash) =>
+    didCrash == true
+        ? '$appWebViewRenderProcessGonePrefix:crashed'
+        : '$appWebViewRenderProcessGonePrefix:terminated';
 
 /// Resolves an in-place main-frame navigation target for `onCreateWindow`,
 /// returning `null` for `viewerLocked`, cancelled URLs, `about:blank`, and `blob:`.

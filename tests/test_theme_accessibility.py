@@ -40,11 +40,77 @@ def restore_selected_theme():
     apply_theme(previous)
 
 
-def test_theme_catalog_is_complete_and_material_graphite_is_dark():
+def test_theme_catalog_is_complete_and_steel_light_is_default_light():
     assert len(THEME_ORDER) == len(set(THEME_ORDER))
     assert set(THEME_ORDER) == set(THEME_PRESETS)
-    assert THEME_ORDER[0] == "material_graphite"
+    assert THEME_ORDER[0] == "steel_light"
+    assert THEME_PRESETS["steel_light"]["mode"] == "light"
+    assert "mặc định" in THEME_PRESETS["steel_light"]["description"].lower()
+    assert "mặc định" not in THEME_PRESETS["midnight_blue"]["description"].lower()
     assert THEME_PRESETS["material_graphite"]["mode"] == "dark"
+
+
+def test_fresh_default_settings_apply_light_theme_without_dark_color_overrides(
+    monkeypatch,
+):
+    import asyncio
+    import flet as ft
+    import config as config_mod
+    from gui.components.settings_view import SettingsView
+    from gui.core.theme import load_theme_from_settings
+    from gui.view_models.settings_form import DEFAULT_THEME, SettingsFormSnapshot
+
+    assert DEFAULT_THEME == "steel_light"
+    fresh = config_mod.Settings()
+    assert fresh.THEME == "steel_light"
+    light_preset = THEME_PRESETS["steel_light"]
+    assert fresh.COLOR_CRITICAL == light_preset["critical"]
+    assert fresh.COLOR_WARNING == light_preset["warning"]
+    assert fresh.COLOR_SAFE == light_preset["safe"]
+    assert fresh.COLOR_QUIZ == light_preset["quiz"]
+    assert fresh.COLOR_ASSIGNMENT == light_preset["assignment"]
+    assert fresh.COLOR_ATTENDANCE == light_preset["attendance"]
+    assert fresh.COLOR_OPEN == light_preset["open"]
+    assert fresh.COLOR_OTHER == light_preset["other"]
+
+    monkeypatch.setattr(config_mod, "settings", fresh)
+    load_theme_from_settings()
+    assert C.BG == light_preset["bg"]
+    assert C.WARNING == light_preset["warning"]
+    assert C.SAFE == light_preset["safe"]
+
+    page = SimpleNamespace(
+        theme_mode=None,
+        theme=None,
+        dark_theme=None,
+        bgcolor=None,
+        window=SimpleNamespace(),
+        on_route_change=None,
+        update=lambda: None,
+    )
+    set_page_theme(page)
+    assert page.theme_mode == ft.ThemeMode.LIGHT
+    assert page.dark_theme is None
+    assert page.bgcolor == light_preset["bg"]
+
+    # Unknown preset falls back to light default ("steel_light")
+    apply_theme("unknown_nonexistent_theme")
+    set_page_theme(page, theme_name="unknown_nonexistent_theme")
+    assert C.BG == light_preset["bg"]
+    assert page.theme_mode == ft.ThemeMode.LIGHT
+
+    # Empty form snapshot and Settings "Khôi phục màu mặc định" both target steel_light
+    empty_snapshot = SettingsFormSnapshot.from_form_values({})
+    assert empty_snapshot.theme == "steel_light"
+    assert empty_snapshot.color_warning == light_preset["warning"]
+
+    view = SettingsView(page=page, orchestrator=None, on_close=lambda: None)
+    view.update = lambda: None
+    view._on_theme_select("midnight_blue")
+    assert view._selected_theme == "midnight_blue"
+    asyncio.run(view._handle_reset_defaults(None))
+    assert view._selected_theme == "steel_light"
+    assert page.theme_mode == ft.ThemeMode.LIGHT
 
 
 @pytest.mark.parametrize("theme_name", THEME_ORDER)

@@ -137,6 +137,7 @@ class SecretStoreBackend(Protocol):
 _secret_backend: SecretStoreBackend | None = None
 _secret_backend_factory: Callable[[], SecretStoreBackend | None] | None = None
 _pending_plaintext_migration: dict[str, str] = {}
+_loaded_had_ws_token_username: bool = True
 
 
 def register_secret_backend(backend: SecretStoreBackend | None) -> None:
@@ -200,6 +201,16 @@ def hydrate_secrets(
             if not overwrite_non_empty and (getattr(settings, attr, "") or not new_val):
                 continue
             setattr(settings, attr, new_val)
+        if (
+            not _loaded_had_ws_token_username
+            and not str(getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "") or "").strip()
+            and str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
+            and str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        ):
+            from core.demo_sandbox import is_demo_account as _is_demo_account
+
+            if not _is_demo_account(settings.UTH_USERNAME):
+                settings.MOODLE_WS_TOKEN_USERNAME = settings.UTH_USERNAME.strip()
 
 
 def pop_pending_plaintext_migration() -> dict[str, str]:
@@ -365,6 +376,7 @@ class Settings(BaseModel):
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)
+    MOODLE_WS_TOKEN_USERNAME: str = Field(default="", description="Username (MSSV) that owns the cached Web Services token")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
@@ -428,15 +440,15 @@ class Settings(BaseModel):
     # Hiển thị
     ALWAYS_ON_TOP: bool = Field(default=False, description="Luôn hiển thị cửa sổ trên cùng")
 
-    # Tùy chỉnh màu sắc
-    COLOR_CRITICAL: str = Field(default="#EF4444", description="Màu cảnh báo quá hạn/cấp bách")
-    COLOR_WARNING: str = Field(default="#F59E0B", description="Màu cảnh báo sắp tới")
-    COLOR_SAFE: str = Field(default="#10B981", description="Màu an toàn")
+    # Tùy chỉnh màu sắc (mặc định theo preset sáng steel_light)
+    COLOR_CRITICAL: str = Field(default="#DC2626", description="Màu cảnh báo quá hạn/cấp bách")
+    COLOR_WARNING: str = Field(default="#9A6700", description="Màu cảnh báo sắp tới")
+    COLOR_SAFE: str = Field(default="#147D3F", description="Màu an toàn")
     COLOR_QUIZ: str = Field(default="#7C3AED", description="Màu tag Quiz")
     COLOR_ASSIGNMENT: str = Field(default="#2563EB", description="Màu tag Bài tập")
-    COLOR_ATTENDANCE: str = Field(default="#D97706", description="Màu tag Điểm danh")
-    COLOR_OPEN: str = Field(default="#0891B2", description="Màu tag Sắp mở")
-    COLOR_OTHER: str = Field(default="#6B7280", description="Màu tag Sự kiện khác")
+    COLOR_ATTENDANCE: str = Field(default="#8A6100", description="Màu tag Điểm danh")
+    COLOR_OPEN: str = Field(default="#087F73", description="Màu tag Sắp mở")
+    COLOR_OTHER: str = Field(default="#57534E", description="Màu tag Sự kiện khác")
 
 
     # Debug
@@ -525,6 +537,34 @@ def migrate_settings_data(raw: dict) -> dict:
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_ENABLED", False)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1])
+    if data.get("THEME", "steel_light") == "steel_light":
+        legacy_dark_defaults = {
+            "COLOR_CRITICAL": "#EF4444",
+            "COLOR_WARNING": "#F59E0B",
+            "COLOR_SAFE": "#10B981",
+            "COLOR_QUIZ": "#7C3AED",
+            "COLOR_ASSIGNMENT": "#2563EB",
+            "COLOR_ATTENDANCE": "#D97706",
+            "COLOR_OPEN": "#0891B2",
+            "COLOR_OTHER": "#6B7280",
+        }
+        light_defaults = {
+            "COLOR_CRITICAL": "#DC2626",
+            "COLOR_WARNING": "#9A6700",
+            "COLOR_SAFE": "#147D3F",
+            "COLOR_QUIZ": "#7C3AED",
+            "COLOR_ASSIGNMENT": "#2563EB",
+            "COLOR_ATTENDANCE": "#8A6100",
+            "COLOR_OPEN": "#087F73",
+            "COLOR_OTHER": "#57534E",
+        }
+        present_color_keys = [k for k in legacy_dark_defaults if k in data]
+        if present_color_keys and all(
+            str(data.get(k, "")).strip().upper() == legacy_dark_defaults[k]
+            for k in present_color_keys
+        ):
+            for k in present_color_keys:
+                data[k] = light_defaults[k]
     data["SETTINGS_SCHEMA_VERSION"] = 5
     return data
 
@@ -540,14 +580,17 @@ def get_sync_interval_minutes(value=None) -> int:
 
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:
+    global _loaded_had_ws_token_username
     _logger = logging.getLogger(__name__)
     s = Settings()
     json_secrets: dict[str, str] = {}
+    had_ws_token_username = True
 
     from core.safe_file_io import SafeFileIO
     data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
     
     if data:
+        had_ws_token_username = "MOODLE_WS_TOKEN_USERNAME" in data
         try:
             # Trích xuất secrets trước khi xác thực Pydantic
             for key in _SECRET_FIELDS:
@@ -557,6 +600,9 @@ def load_settings() -> Settings:
             s = Settings(**migrate_settings_data(data))
         except Exception as e:
             _logger.warning(f"Failed to parse settings values: {e}")
+
+    with _settings_save_lock:
+        _loaded_had_ws_token_username = had_ws_token_username
 
     # Khôi phục secrets từ secure storage (keyring → tier 2 JSON fallback)
     for attr, key_suffix in _SECRET_FIELDS.items():
@@ -588,9 +634,23 @@ def load_settings() -> Settings:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
+    if (
+        not had_ws_token_username
+        and not s.MOODLE_WS_TOKEN_USERNAME.strip()
+        and s.MOODLE_WS_TOKEN.strip()
+        and s.UTH_USERNAME.strip()
+    ):
+        from core.demo_sandbox import is_demo_account as _is_demo_account
+
+        if not _is_demo_account(s.UTH_USERNAME):
+            s.MOODLE_WS_TOKEN_USERNAME = s.UTH_USERNAME.strip()
+
     return s
 
 settings = load_settings()
+if os.environ.get("UTH_TEST_MODE") == "1":
+    # Prevent host developer AppData MSSV from leaking into unit tests that mock UTH_USERNAME + MOODLE_WS_TOKEN
+    settings.MOODLE_WS_TOKEN_USERNAME = ""
 
 def save_settings() -> bool:
     """Persist settings transactionally across secure storage and JSON storage.
@@ -673,5 +733,56 @@ def save_settings() -> bool:
     if json_ok:
         _notify_settings_saved()
     return json_ok
+
+
+def clear_persisted_secrets() -> bool:
+    """Erase all persisted secrets from secure storage and in-memory settings."""
+    _logger = logging.getLogger(__name__)
+    ok = True
+    with _settings_io_lock:
+        backend = _resolve_secret_backend()
+        with _settings_save_lock:
+            if backend is None:
+                backend = _secret_backend
+            prev_username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+            _pending_plaintext_migration.clear()
+            for attr in _SECRET_FIELDS:
+                setattr(settings, attr, "")
+            settings.MOODLE_WS_TOKEN_USERNAME = ""
+            settings.UTH_CREDENTIALS_ORIGIN = ""
+
+        empty_secrets = {key_suffix: "" for key_suffix in _SECRET_FIELDS.values()}
+        if backend is not None:
+            try:
+                if not bool(backend.write_all(empty_secrets)):
+                    ok = False
+            except Exception as exc:
+                _logger.warning(
+                    "Native secret backend clear failed: %s",
+                    type(exc).__name__,
+                )
+                for key_suffix in _SECRET_FIELDS.values():
+                    try:
+                        if not bool(backend.write_secret(key_suffix, "")):
+                            ok = False
+                    except Exception:
+                        ok = False
+        if _HAS_KEYRING:
+            for key_suffix in _SECRET_FIELDS.values():
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, key_suffix)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception as exc:
+                    _logger.warning("Keyring delete failed for %s: %s", key_suffix, exc)
+                    ok = False
+            if prev_username:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, prev_username)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception:
+                    pass
+    return ok
 
 
