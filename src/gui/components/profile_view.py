@@ -774,14 +774,14 @@ class ProfileView(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         banner_height = 188
-        campus_width = round(banner_height * 1280 / 470)
+        campus_width = round(banner_height * 560 / 292)
         banner = ft.Container(
             content=ft.Stack(
                 controls=[
                     ft.Container(
                         content=ft.Image(
                             src=_asset_image_source(
-                                "uth_campus_banner.jpg", "image/jpeg"
+                                "uth_profile_banner.jpg", "image/jpeg"
                             ),
                             width=campus_width,
                             height=banner_height,
@@ -797,7 +797,7 @@ class ProfileView(ft.Container):
                         top=0,
                     ),
                     ft.Container(
-                        left=0,
+                        width=campus_width,
                         right=0,
                         top=0,
                         bottom=0,
@@ -805,14 +805,12 @@ class ProfileView(ft.Container):
                             begin=ft.Alignment(-1, 0),
                             end=ft.Alignment(1, 0),
                             colors=[
-                                ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.98, C.SURFACE),
-                                ft.Colors.with_opacity(0.25, C.SURFACE),
+                                C.SURFACE,
+                                ft.Colors.with_opacity(0.75, C.SURFACE),
+                                ft.Colors.with_opacity(0.15, C.SURFACE),
                                 ft.Colors.with_opacity(0, C.SURFACE),
                             ],
-                            # White holds until ~40% (name/badge zone) so the
-                            # building starts exactly where the mockup puts it.
-                            stops=[0, 0.48, 0.62, 0.72],
+                            stops=[0, 0.18, 0.40, 0.58],
                         ),
                     ),
                     ft.Container(
@@ -823,25 +821,6 @@ class ProfileView(ft.Container):
                         right=0,
                         top=0,
                         bottom=0,
-                    ),
-                    ft.Container(
-                        content=ft.Image(
-                            src=_asset_image_source(
-                                "uth_profile_wordmark.png", "image/png"
-                            ),
-                            width=168,
-                            height=50,
-                            fit=ft.BoxFit.CONTAIN,
-                            filter_quality=ft.FilterQuality.HIGH,
-                            semantics_label="UTH — University of Transport Ho Chi Minh City",
-                        ),
-                        width=168,
-                        height=50,
-                        right=14,
-                        top=10,
-                        bgcolor=C.SURFACE,
-                        border_radius=25,
-                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                     ),
                 ],
                 height=banner_height,

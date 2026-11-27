@@ -498,13 +498,10 @@ def test_profile_view_desktop_card_matches_wide_banner_mockup():
     campus_image = campus_layer.content
     assert campus_image.src.startswith("data:image/jpeg;base64,")
     assert campus_image.fit == ft.BoxFit.CONTAIN
-    assert abs(campus_image.width / campus_image.height - 1280 / 470) < 0.01
+    assert abs(campus_image.width / campus_image.height - 560 / 292) < 0.01
     assert campus_layer.right == 0
     assert campus_layer.top == 0
-    wordmark = stack.controls[3]
-    assert wordmark.content.src.startswith("data:image/png;base64,")
-    assert wordmark.width == 168
-    assert wordmark.height == 50
+    assert stack.controls[1].width == campus_image.width
 
     identity = stack.controls[2].content
     assert len(identity.controls) == 3
