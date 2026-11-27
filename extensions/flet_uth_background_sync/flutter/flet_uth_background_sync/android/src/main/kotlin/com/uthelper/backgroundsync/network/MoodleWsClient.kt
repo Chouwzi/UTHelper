@@ -77,11 +77,21 @@ class MoodleWsClient internal constructor(
             activities[index] = when (activity.eventType) {
                 "assignment" -> assignmentIds[cmid]?.let { assignmentId ->
                     runCatching { assignmentState(assignmentId) }.getOrNull()
-                        ?.let { state -> activity.copy(submissionState = state) }
+                        ?.let { state ->
+                            activity.copy(
+                                submissionState = state,
+                                graded = activity.graded || state == "graded",
+                            )
+                        }
                 } ?: activity
                 "quiz" -> quizIds[cmid]?.let { quizId ->
                     runCatching { quizState(quizId) }.getOrNull()
-                        ?.let { state -> activity.copy(submissionState = state) }
+                        ?.let { state ->
+                            activity.copy(
+                                submissionState = state,
+                                graded = activity.graded || state == "graded",
+                            )
+                        }
                 } ?: activity
                 else -> activity
             }
@@ -131,13 +141,7 @@ class MoodleWsClient internal constructor(
             "mod_assign_get_submission_status",
             mapOf("assignid" to assignmentId),
         )
-        val submission = response.optJSONObject("lastattempt")
-            ?.optJSONObject("submission")
-        return when (submission?.optString("status", "")?.lowercase()) {
-            "submitted" -> "submitted"
-            "graded" -> "graded"
-            else -> "not_submitted"
-        }
+        return resolveAssignmentState(response)
     }
 
     private fun quizState(quizId: Long): String {
@@ -145,13 +149,77 @@ class MoodleWsClient internal constructor(
             "mod_quiz_get_user_attempts",
             mapOf("quizid" to quizId, "status" to "all"),
         )
-        val attempts = response.optJSONArray("attempts") ?: return "not_submitted"
-        for (index in 0 until attempts.length()) {
-            val state = attempts.optJSONObject(index)?.optString("state", "")?.lowercase()
-            if (state == "finished") return "submitted"
-        }
-        return "not_submitted"
+        return resolveQuizState(response)
     }
+
+    internal fun resolveAssignmentState(response: JSONObject): String {
+        if (response.has("exception")) return "unknown"
+        val lastAttempt = response.optJSONObject("lastattempt")
+        val gradingStatus = lastAttempt
+            ?.optString("gradingstatus", "")
+            ?.trim()
+            ?.lowercase()
+            .orEmpty()
+        if (gradingStatus in GRADED_STATUSES) return "graded"
+
+        val gradeObj = response.optJSONObject("feedback")?.optJSONObject("grade")
+        if (hasValidFeedbackGrade(gradeObj)) return "graded"
+
+        if (lastAttempt == null || lastAttempt.length() == 0) return "unknown"
+
+        val rawStatuses = mutableListOf<String>()
+        val normalizedStatuses = mutableListOf<String>()
+        for (subKey in listOf("submission", "teamsubmission")) {
+            val sub = lastAttempt.optJSONObject(subKey) ?: continue
+            val raw = sub.optString("status", "").trim()
+            if (raw.isNotEmpty()) {
+                rawStatuses.add(raw)
+                normalizedStatuses.add(normalizeAssignSubStatus(raw))
+            }
+        }
+        return when {
+            "graded" in normalizedStatuses -> "graded"
+            "submitted" in normalizedStatuses -> "submitted"
+            "draft" in normalizedStatuses -> "draft"
+            "not_submitted" in normalizedStatuses -> "not_submitted"
+            rawStatuses.isNotEmpty() -> normalizedStatuses.firstOrNull { it != "unknown" } ?: "unknown"
+            else -> "not_submitted"
+        }
+    }
+
+    internal fun resolveQuizState(response: JSONObject): String {
+        if (response.has("exception")) return "unknown"
+        val attempts = response.optJSONArray("attempts") ?: return "unknown"
+        var hasInProgress = false
+        var hasAnyAttempt = false
+        for (index in 0 until attempts.length()) {
+            val att = attempts.optJSONObject(index) ?: continue
+            hasAnyAttempt = true
+            when (att.optString("state", "").trim().lowercase()) {
+                "finished" -> return "submitted"
+                "inprogress" -> hasInProgress = true
+            }
+        }
+        if (hasInProgress) return "in_progress"
+        return if (hasAnyAttempt) "attempted" else "not_submitted"
+    }
+
+    private fun hasValidFeedbackGrade(gradeObj: JSONObject?): Boolean {
+        if (gradeObj == null || !gradeObj.has("grade") || gradeObj.isNull("grade")) return false
+        val raw = gradeObj.opt("grade")?.toString()?.trim().orEmpty()
+        if (raw.isEmpty() || raw == "-") return false
+        val numeric = raw.toDoubleOrNull()
+        return if (numeric != null) numeric >= 0.0 else true
+    }
+
+    private fun normalizeAssignSubStatus(raw: String): String =
+        when (raw.trim().lowercase()) {
+            "submitted", "submitted for grading", "finished", "đã nộp", "đã hoàn thành" -> "submitted"
+            "graded", "released", "đã chấm", "đã chấm điểm", "đã công bố" -> "graded"
+            "draft", "bản nháp" -> "draft"
+            "new", "reopened", "not_submitted", "not submitted", "chưa nộp" -> "not_submitted"
+            else -> "unknown"
+        }
 
     internal fun parseEvent(event: JSONObject, generation: Long): ActivityEntity? {
         val deadline = event.optLong("timesort", event.optLong("timestart", 0))
@@ -253,5 +321,12 @@ class MoodleWsClient internal constructor(
     companion object {
         private const val PAGE_SIZE = 100
         private const val MAX_PAGES = 10
+        private val GRADED_STATUSES = setOf(
+            "graded",
+            "released",
+            "đã chấm",
+            "đã chấm điểm",
+            "đã công bố",
+        )
     }
 }

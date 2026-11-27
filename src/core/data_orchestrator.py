@@ -8,8 +8,11 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlsplit
 from core.client import MoodleClient
 from core.activity_status import (
+    COMPLETED_SUBMISSION_STATUSES,
+    extract_canonical_submission_status,
     normalize_submission_status,
     prefer_known_submission_status,
+    resolve_moodle_assign_submission_status,
 )
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.grade_monitor import GradeMonitor
@@ -1252,15 +1255,28 @@ class DataOrchestrator:
         )
         if cached_status_data or current_status_data:
             details["status_data"] = {
-                **cached_status_data,
                 **current_status_data,
+                **cached_status_data,
             }
 
-        status = prefer_known_submission_status(
-            activity_data.get("submission_status"),
-            cached.get("submission_status"),
-        )
+        incoming_status = extract_canonical_submission_status(activity_data)
+        cached_status = extract_canonical_submission_status(cached)
+        if "graded" in {incoming_status, cached_status}:
+            status = "graded"
+        elif "submitted" in {incoming_status, cached_status}:
+            status = "submitted"
+        else:
+            status = prefer_known_submission_status(
+                cached_status,
+                incoming_status,
+            )
         result["submission_status"] = status
+        if status in COMPLETED_SUBMISSION_STATUSES and isinstance(
+            details.get("status_data"), dict
+        ):
+            cur_sub_label = details["status_data"].get("Trạng thái nộp bài")
+            if normalize_submission_status(cur_sub_label) == "not_submitted":
+                details["status_data"]["Trạng thái nộp bài"] = status
         if result.get("type") == "quiz" and status != "unknown":
             details["quiz_attempt_status"] = status
         result["details"] = details
@@ -1446,18 +1462,47 @@ class DataOrchestrator:
         # Cập nhật submission_status ở top level nếu có
         status_data = ws_details.get('status_data', {})
         quiz_attempt_status = ws_details.get('quiz_attempt_status')
+        ws_canonical = ws_details.get('submission_status')
         if activity_type == 'quiz' and quiz_attempt_status:
             result['submission_status'] = normalize_submission_status(quiz_attempt_status)
-        elif 'Trạng thái nộp bài' in status_data:
-            result['submission_status'] = normalize_submission_status(
-                status_data['Trạng thái nộp bài']
+        elif ws_canonical and normalize_submission_status(ws_canonical) != 'unknown':
+            result['submission_status'] = normalize_submission_status(ws_canonical)
+        else:
+            extracted_ws_status = extract_canonical_submission_status(
+                {"details": ws_details}
             )
-        elif 'Trạng thái' in status_data:
-            result['submission_status'] = normalize_submission_status(
-                status_data['Trạng thái']
-            )
-        
+            if extracted_ws_status != 'unknown':
+                result['submission_status'] = extracted_ws_status
+            elif 'Trạng thái nộp bài' in status_data:
+                result['submission_status'] = normalize_submission_status(
+                    status_data['Trạng thái nộp bài']
+                )
+            elif 'Trạng thái' in status_data:
+                result['submission_status'] = normalize_submission_status(
+                    status_data['Trạng thái']
+                )
+
         return result
+
+    @staticmethod
+    def _extract_cmid_from_activity(activity_data: Dict[str, Any]) -> Optional[int]:
+        raw_cmid = activity_data.get("cmid")
+        if raw_cmid is not None and not isinstance(raw_cmid, bool):
+            try:
+                parsed = int(raw_cmid)
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+        url = str(activity_data.get("url") or "")
+        if "id=" in url:
+            try:
+                parsed = int(url.split("id=")[-1].split("&")[0])
+                if parsed > 0:
+                    return parsed
+            except (ValueError, IndexError):
+                pass
+        return None
 
     def _fetch_one_activity_status(
         self, activity_data: Dict[str, Any]
@@ -1469,17 +1514,41 @@ class DataOrchestrator:
         if activity_type in {"assignment", "assign"}:
             assignment_id = activity_data.get("assignment_id")
             if not assignment_id:
+                cmid = self._extract_cmid_from_activity(activity_data)
+                course_id = activity_data.get("course_id")
+                resolver = getattr(
+                    self.moodle_service, "resolve_cmid_to_assign_id", None
+                )
+                if cmid and course_id and callable(resolver):
+                    try:
+                        assignment_id = resolver(int(cmid), int(course_id))
+                    except (TypeError, ValueError):
+                        assignment_id = None
+            if not assignment_id:
                 return None
             response = self.moodle_service.get_submission_status(int(assignment_id))
             if response is None:
                 return None
-            last_attempt = response.get("lastattempt", {})
-            submission = last_attempt.get("submission", {})
-            status = normalize_submission_status(submission.get("status"))
-            if status == "unknown":
-                status = normalize_submission_status(last_attempt.get("gradingstatus"))
+            status = resolve_moodle_assign_submission_status(response)
         elif activity_type == "quiz":
             quiz_id = activity_data.get("quiz_id")
+            if not quiz_id:
+                cmid = self._extract_cmid_from_activity(activity_data)
+                course_id = activity_data.get("course_id")
+                get_quizzes = getattr(
+                    self.moodle_service, "get_quizzes_by_courses", None
+                )
+                if cmid and course_id and callable(get_quizzes):
+                    try:
+                        quizzes = get_quizzes([int(course_id)]) or []
+                        for q in quizzes:
+                            if isinstance(q, dict) and int(
+                                q.get("coursemodule") or 0
+                            ) == int(cmid):
+                                quiz_id = q.get("id")
+                                break
+                    except (TypeError, ValueError):
+                        quiz_id = None
             if not quiz_id:
                 return None
             attempts = self.moodle_service.get_quiz_attempts(int(quiz_id))
@@ -1490,7 +1559,9 @@ class DataOrchestrator:
                 for attempt in attempts
                 if isinstance(attempt, dict)
             }
-            if "submitted" in states:
+            if "graded" in states:
+                status = "graded"
+            elif "submitted" in states:
                 status = "submitted"
             elif "in_progress" in states:
                 status = "in_progress"
