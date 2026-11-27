@@ -244,10 +244,14 @@ class _WebView2EnvironmentCache:
     """STA-confined cache of ``CoreWebView2Environment`` instances keyed by user_data_dir."""
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._base_gen: int = 0
+        self._generations: dict[str, int] = {}
         self._environments: dict[str, Any] = {}
-        self._inflight_ops: dict[str, Any] = {}
+        self._opened_profiles: dict[str, set[str]] = {}
+        self._inflight_ops: dict[tuple[str, int], Any] = {}
         self._pending: dict[
-            str, list[tuple[Callable[[Any], None], Callable[[str], None]]]
+            tuple[str, int], list[tuple[Callable[[Any], None], Callable[[str], None]]]
         ] = {}
 
     @staticmethod
@@ -260,33 +264,48 @@ class _WebView2EnvironmentCache:
         user_data_dir: str,
         on_ready: Callable[[Any], None],
         on_error: Callable[[str], None],
+        *,
+        profile_name: str = "",
     ) -> None:
         key = self._norm_key(user_data_dir)
-        cached = self._environments.get(key)
+        prof = str(profile_name or "").strip()
+        with self._lock:
+            gen = self._generations.get(key, self._base_gen)
+            self._generations[key] = gen
+            if prof:
+                self._opened_profiles.setdefault(key, set()).add(prof)
+            cached = self._environments.get(key)
+            if cached is not None:
+                pass
+            else:
+                slot = (key, gen)
+                waiters = self._pending.get(slot)
+                if waiters is not None:
+                    waiters.append((on_ready, on_error))
+                    return
+                self._pending[slot] = [(on_ready, on_error)]
         if cached is not None:
             on_ready(cached)
             return
-        waiters = self._pending.get(key)
-        if waiters is not None:
-            waiters.append((on_ready, on_error))
-            return
-        self._pending[key] = [(on_ready, on_error)]
         try:
             env_op = wv2_mod.CoreWebView2Environment.create_with_options_async(
                 "", user_data_dir, None
             )
-            self._inflight_ops[key] = env_op
+            with self._lock:
+                self._inflight_ops[slot] = env_op
         except Exception as exc:
-            self._inflight_ops.pop(key, None)
-            pending_list = self._pending.pop(key, [])
+            with self._lock:
+                self._inflight_ops.pop(slot, None)
+                pending_list = self._pending.pop(slot, [])
             err_msg = str(exc)
             for _ok_cb, err_cb in pending_list:
                 err_cb(err_msg)
             return
 
         def _on_completed(op: Any, _status: Any) -> None:
-            self._inflight_ops.pop(key, None)
-            pending_list = self._pending.pop(key, [])
+            with self._lock:
+                self._inflight_ops.pop(slot, None)
+                pending_list = self._pending.pop(slot, [])
             try:
                 env = op.get_results()
             except Exception as exc:
@@ -294,23 +313,94 @@ class _WebView2EnvironmentCache:
                 for _ok_cb, err_cb in pending_list:
                     err_cb(err_msg)
                 return
-            self._environments[key] = env
+            with self._lock:
+                if self._generations.get(key, self._base_gen) == gen:
+                    self._environments[key] = env
             for ok_cb, _err_cb in pending_list:
                 ok_cb(env)
 
         env_op.completed = _on_completed
 
+    def has_only_kept_profile(
+        self,
+        keep_profile_name: Optional[str],
+        profile_root: Optional[Path] = None,
+    ) -> bool:
+        kept = str(keep_profile_name or "").strip()
+        if not kept:
+            return False
+        with self._lock:
+            if profile_root is not None:
+                key = self._norm_key(profile_root)
+                has_any = (key in self._environments) or any(
+                    k == key for k, _ in self._pending
+                )
+                if not has_any:
+                    return True
+                return self._opened_profiles.get(key, set()) <= {kept}
+            if not self._environments and not self._pending:
+                return True
+            return all(
+                prof_set <= {kept} for prof_set in self._opened_profiles.values()
+            )
+
     def clear(self, profile_root: Optional[Path] = None) -> None:
-        if profile_root is None:
-            self._environments.clear()
-            self._inflight_ops.clear()
-            self._pending.clear()
-        else:
-            key = self._norm_key(profile_root)
-            self._environments.pop(key, None)
-            self._inflight_ops.pop(key, None)
-            self._pending.pop(key, None)
+        with self._lock:
+            if profile_root is None:
+                self._base_gen += 1
+                for k in list(self._generations):
+                    self._generations[k] = self._base_gen
+                self._environments.clear()
+                self._opened_profiles.clear()
+            else:
+                key = self._norm_key(profile_root)
+                self._generations[key] = (
+                    self._generations.get(key, self._base_gen) + 1
+                )
+                self._environments.pop(key, None)
+                self._opened_profiles.pop(key, None)
         gc.collect()
+
+
+def _compute_dock_parent_sync_state(
+    dock: "WindowsWebView2Dock",
+    win32gui_mod: Any,
+    gw_hwndprev_cmd: int,
+) -> Optional[tuple[int, int, int, int, bool, bool, bool, bool, bool]]:
+    if not dock._parent_hwnd or not win32gui_mod.IsWindow(dock._parent_hwnd):
+        return None
+    cur_rect = win32gui_mod.GetWindowRect(dock._parent_hwnd)
+    is_min = bool(win32gui_mod.IsIconic(dock._parent_hwnd))
+    is_vis = bool(win32gui_mod.IsWindowVisible(dock._parent_hwnd))
+    parent_inactive = is_min or not is_vis
+    eff_vis = dock._effective_visible()
+    parent_topmost = False
+    if sys.platform == "win32" and hasattr(ctypes, "windll"):
+        try:
+            parent_topmost = bool(
+                int(ctypes.windll.user32.GetWindowLongW(int(dock._parent_hwnd), -20))
+                & 0x00000008
+            )
+        except Exception:
+            parent_topmost = False
+    if not eff_vis or parent_inactive:
+        z_aligned = True
+    else:
+        z_aligned = (
+            int(win32gui_mod.GetWindow(int(dock._parent_hwnd), gw_hwndprev_cmd) or 0)
+            == int(dock._hwnd)
+        )
+    return (
+        cur_rect[0],
+        cur_rect[1],
+        cur_rect[2],
+        cur_rect[3],
+        is_min,
+        is_vis,
+        eff_vis,
+        parent_topmost,
+        z_aligned,
+    )
 
 
 class _SharedWebView2STA:
@@ -366,6 +456,13 @@ class _SharedWebView2STA:
         dock._shared_sta_managed = True
         self._sta_queue.put(("attach", dock))
         self._wake_sta()
+
+    def has_only_kept_profile(
+        self,
+        keep_profile_name: Optional[str],
+        profile_root: Optional[Path] = None,
+    ) -> bool:
+        return self._env_cache.has_only_kept_profile(keep_profile_name, profile_root)
 
     def release_environments(self, profile_root: Optional[Path] = None) -> None:
         with self._lock:
@@ -431,7 +528,7 @@ class _SharedWebView2STA:
         active_docks: list[WindowsWebView2Dock] = []
         pending_hwnd_docks: list[tuple[WindowsWebView2Dock, int, float]] = []
         last_parent_states: dict[
-            int, tuple[int, int, int, int, bool, bool, bool, bool]
+            int, tuple[int, int, int, int, bool, bool, bool, bool, bool]
         ] = {}
 
         try:
@@ -527,48 +624,18 @@ class _SharedWebView2STA:
                         ):
                             dock._mark_paint_ready()
                         parent_inactive = False
-                        if dock._parent_hwnd and win32gui.IsWindow(dock._parent_hwnd):
-                            try:
-                                cur_rect = win32gui.GetWindowRect(dock._parent_hwnd)
-                                is_min = bool(win32gui.IsIconic(dock._parent_hwnd))
-                                is_vis = bool(
-                                    win32gui.IsWindowVisible(dock._parent_hwnd)
-                                )
-                                parent_inactive = is_min or not is_vis
-                                parent_topmost = bool(
-                                    int(
-                                        ctypes.windll.user32.GetWindowLongW(
-                                            int(dock._parent_hwnd), -20
-                                        )
-                                    )
-                                    & win32con.WS_EX_TOPMOST
-                                )
-                                z_aligned = (
-                                    int(
-                                        win32gui.GetWindow(
-                                            int(dock._parent_hwnd),
-                                            win32con.GW_HWNDPREV,
-                                        )
-                                        or 0
-                                    )
-                                    == int(dock._hwnd)
-                                )
-                                cur_state = (
-                                    cur_rect[0],
-                                    cur_rect[1],
-                                    cur_rect[2],
-                                    cur_rect[3],
-                                    is_min,
-                                    is_vis,
-                                    parent_topmost,
-                                    z_aligned,
-                                )
+                        try:
+                            cur_state = _compute_dock_parent_sync_state(
+                                dock, win32gui, win32con.GW_HWNDPREV
+                            )
+                            if cur_state is not None:
+                                parent_inactive = bool(cur_state[4] or not cur_state[5])
                                 dock_key = id(dock)
                                 if cur_state != last_parent_states.get(dock_key):
                                     last_parent_states[dock_key] = cur_state
                                     dock._apply_window_bounds(preserve_zorder=True)
-                            except Exception:
-                                pass
+                        except Exception:
+                            pass
                         awaiting_paint = (
                             not dock._paint_ready and dock._paint_deadline > 0.0
                         )
@@ -634,7 +701,12 @@ def clear_persisted_webview2_profiles(
     root = Path(profile_root) if profile_root is not None else webview2_profile_root()
     with _PROFILE_SWEEP_LOCK:
         _SWEPT_PROFILE_ROOTS.clear()
-    _SHARED_WV2_STA.release_environments(root if profile_root is not None else None)
+    target_env_root = root if profile_root is not None else None
+    if not (
+        keep_profile_name
+        and _SHARED_WV2_STA.has_only_kept_profile(keep_profile_name, target_env_root)
+    ):
+        _SHARED_WV2_STA.release_environments(target_env_root)
     retry_delays = (0.08, 0.2, 0.4)
     for base in (root, root / "EBWebView"):
         if not base.is_dir():
@@ -1492,6 +1564,7 @@ class WindowsWebView2Dock:
             str(profile_root),
             lambda env: self._enqueue("_env_ready", env),
             self._fail,
+            profile_name=self._profile_name,
         )
         return True
 
@@ -2241,8 +2314,8 @@ class WindowsWebView2Dock:
         import win32gui
 
         msg = wintypes.MSG()
-        last_parent_state: tuple[int, int, int, int, bool, bool, bool, bool] = (
-            0, 0, 0, 0, False, True, False, True,
+        last_parent_state: tuple[int, int, int, int, bool, bool, bool, bool, bool] = (
+            0, 0, 0, 0, False, True, True, False, True,
         )
         while not self._stop_event.is_set():
             self._drain_commands()
@@ -2253,35 +2326,17 @@ class WindowsWebView2Dock:
             ):
                 self._mark_paint_ready()
             parent_inactive = False
-            if self._parent_hwnd and win32gui.IsWindow(self._parent_hwnd):
-                try:
-                    cur_rect = win32gui.GetWindowRect(self._parent_hwnd)
-                    is_min = bool(win32gui.IsIconic(self._parent_hwnd))
-                    is_vis = bool(win32gui.IsWindowVisible(self._parent_hwnd))
-                    parent_inactive = is_min or not is_vis
-                    parent_topmost = bool(
-                        int(ctypes.windll.user32.GetWindowLongW(int(self._parent_hwnd), -20))
-                        & win32con.WS_EX_TOPMOST
-                    )
-                    z_aligned = (
-                        int(win32gui.GetWindow(int(self._parent_hwnd), win32con.GW_HWNDPREV) or 0)
-                        == int(self._hwnd)
-                    )
-                    cur_state = (
-                        cur_rect[0],
-                        cur_rect[1],
-                        cur_rect[2],
-                        cur_rect[3],
-                        is_min,
-                        is_vis,
-                        parent_topmost,
-                        z_aligned,
-                    )
+            try:
+                cur_state = _compute_dock_parent_sync_state(
+                    self, win32gui, win32con.GW_HWNDPREV
+                )
+                if cur_state is not None:
+                    parent_inactive = bool(cur_state[4] or not cur_state[5])
                     if cur_state != last_parent_state:
                         last_parent_state = cur_state
                         self._apply_window_bounds(preserve_zorder=True)
-                except Exception:
-                    pass
+            except Exception:
+                pass
             while ctypes.windll.user32.PeekMessageW(
                 ctypes.byref(msg), 0, 0, 0, win32con.PM_REMOVE
             ):

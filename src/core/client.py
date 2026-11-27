@@ -426,9 +426,7 @@ def _read_html_response_bytes(response, max_bytes: int = 2 * 1024 * 1024) -> byt
             out.extend(piece)
         if len(out) > max_bytes or (decompressor.unconsumed_tail and len(out) >= max_bytes):
             raise ValueError("Moodle web response was too large")
-        if not isinstance(response, (http.client.HTTPResponse, io.IOBase)) and not hasattr(
-            getattr(response, "fp", None), "read"
-        ):
+        if decompressor.eof:
             break
     try:
         tail = decompressor.flush((max_bytes + 1) - len(out))
@@ -1003,7 +1001,8 @@ class MoodleClient:
             gen = int(getattr(self, "_session_generation", 0))
 
         if (
-            has_cookie
+            bool(entry_user)
+            and has_cookie
             and auth_at > 0.0
             and (time.monotonic() - auth_at) < max_idle_seconds
             and (not owner or owner == entry_user)
@@ -1158,7 +1157,8 @@ class MoodleClient:
             auth_at = float(getattr(self, "_session_authenticated_at", 0.0) or 0.0)
             owner = str(getattr(self, "_session_owner", "") or "").strip().casefold()
             cookie_fresh = bool(
-                has_cookie
+                entry_user
+                and has_cookie
                 and auth_at > 0.0
                 and (time.monotonic() - auth_at) < 900.0
                 and (not owner or owner == entry_user)

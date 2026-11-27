@@ -513,6 +513,217 @@ def test_moodle_client_open_html_requests_gzip_and_reuses_cookie_only_live_sessi
     forbidden_ajax.assert_not_called()
 
 
+def test_env_cache_clear_during_inflight_acquire_never_orphans_waiters_and_skips_release_for_kept_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile_root = tmp_path / "wv2_race_root"
+    profile_root.mkdir(parents=True)
+    inflight_ops: list[Any] = []
+
+    class _DeferredOp:
+        def __init__(self, result: Any) -> None:
+            self._result = result
+            self.completed: Any = None
+
+        def finish(self) -> None:
+            if callable(self.completed):
+                self.completed(self, "Completed")
+
+        def get_results(self) -> Any:
+            return self._result
+
+    fake_wv2 = SimpleNamespace(
+        CoreWebView2Environment=SimpleNamespace(
+            create_with_options_async=lambda _bf, _udf, _opt: (
+                inflight_ops.append(_DeferredOp(SimpleNamespace(tag=len(inflight_ops) + 1)))
+                or inflight_ops[-1]
+            )
+        )
+    )
+
+    cache = host_mod._WebView2EnvironmentCache()
+    waiter1_results: list[Any] = []
+    waiter1_errors: list[str] = []
+    cache.acquire_async(
+        fake_wv2,
+        str(profile_root),
+        waiter1_results.append,
+        waiter1_errors.append,
+        profile_name="acct_active",
+    )
+    assert len(inflight_ops) == 1
+
+    # Simulate concurrent clear() while create_with_options_async is in flight!
+    cache.clear(profile_root)
+
+    # Completing the in-flight op MUST still resolve waiter1 (never orphan/hang),
+    # while NOT caching the pre-clear environment for subsequent callers!
+    inflight_ops[0].finish()
+    assert len(waiter1_results) == 1 and waiter1_errors == []
+
+    waiter2_results: list[Any] = []
+    cache.acquire_async(
+        fake_wv2,
+        str(profile_root),
+        waiter2_results.append,
+        lambda _e: None,
+        profile_name="acct_active",
+    )
+    assert len(inflight_ops) == 2
+    inflight_ops[1].finish()
+    assert len(waiter2_results) == 1
+    assert waiter2_results[0] is not waiter1_results[0]
+
+    # Startup sweep with keep_profile_name matching the only active profile MUST NOT release warm env!
+    real_cache = host_mod._SHARED_WV2_STA._env_cache
+    real_cache.clear(profile_root)
+    real_cache.acquire_async(
+        fake_wv2,
+        str(profile_root),
+        lambda _e: None,
+        lambda _e: None,
+        profile_name="acct_active",
+    )
+    inflight_ops[-1].finish()
+    assert host_mod._SHARED_WV2_STA.has_only_kept_profile("acct_active", profile_root) is True
+    assert host_mod._SHARED_WV2_STA.has_only_kept_profile("acct_other", profile_root) is False
+
+    release_spy = Mock()
+    monkeypatch.setattr(host_mod._SHARED_WV2_STA, "release_environments", release_spy)
+    stale_dir = profile_root / "EBWebView" / "acct_stale"
+    kept_dir = profile_root / "EBWebView" / "acct_active"
+    stale_dir.mkdir(parents=True)
+    kept_dir.mkdir(parents=True)
+    clear_persisted_webview2_profiles(
+        keep_profile_name="acct_active", profile_root=profile_root
+    )
+    assert not stale_dir.exists()
+    assert kept_dir.is_dir()
+    release_spy.assert_not_called()
+
+    # Account switch where another profile ("acct_stale") WAS opened MUST release cached env!
+    real_cache.acquire_async(
+        fake_wv2,
+        str(profile_root),
+        lambda _e: None,
+        lambda _e: None,
+        profile_name="acct_stale",
+    )
+    clear_persisted_webview2_profiles(
+        keep_profile_name="acct_active", profile_root=profile_root
+    )
+    release_spy.assert_called_once_with(profile_root)
+    real_cache.clear(profile_root)
+
+
+def test_read_html_response_bytes_streams_large_multi_chunk_gzip_on_wrapper_response() -> None:
+    import os as _os
+
+    # >90 KB incompressible random hex payload so compressed gzip size exceeds 64 KB (multi-chunk!)
+    large_body = (
+        "<html><body>"
+        + _os.urandom(90 * 1024).hex()
+        + '<script>M.cfg={"sesskey":"skTail99"};</script></body></html>'
+    )
+    gz_large = gzip.compress(large_body.encode("utf-8"), compresslevel=1)
+    assert len(gz_large) > 75 * 1024
+
+    class _CustomWrapperResp:
+        def __init__(self, raw: bytes) -> None:
+            self._buf = io.BytesIO(raw)
+            self.headers = Message()
+            self.headers["Content-Type"] = "text/html; charset=utf-8"
+            self.headers["Content-Encoding"] = "gzip"
+
+        def geturl(self) -> str:
+            return "https://courses.ut.edu.vn/course/view.php?id=55"
+
+        def info(self) -> Message:
+            return self.headers
+
+        def read(self, amt: int = -1) -> bytes:
+            return self._buf.read() if amt < 0 else self._buf.read(amt)
+
+        def __enter__(self) -> "_CustomWrapperResp":
+            return self
+
+        def __exit__(self, *_a: Any) -> bool:
+            return False
+
+    client = MoodleClient("https://courses.ut.edu.vn")
+    client._html_opener = SimpleNamespace(
+        open=lambda _req, timeout=20: _CustomWrapperResp(gz_large)
+    )
+    final_url, html_text = client._open_html("/course/view.php?id=55")
+    assert final_url.endswith("id=55")
+    assert len(html_text) == len(large_body)
+    assert "skTail99" in html_text
+
+
+def test_empty_username_never_fast_paths_fresh_cookie_in_ensure_live_session_or_get_session_cookies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as _time
+
+    monkeypatch.setattr(settings, "UTH_USERNAME", "")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "")
+
+    client = MoodleClient("https://courses.ut.edu.vn")
+    client._sesskey = ""
+    client._session_owner = ""
+    client._session_authenticated_at = _time.monotonic()
+    client._cookie_jar.set_cookie(_make_cookie("MoodleSession", "stale_anon_cookie"))
+    monkeypatch.setattr(client, "login_session", lambda **_kw: False)
+
+    assert client.ensure_live_session() is False
+    assert client.get_session_cookies(ensure_login=True, verify_live=True) == []
+
+
+def test_shared_sta_skips_gw_hwndprev_query_for_occluded_dock_coexisting_with_overlay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_global_webview_occlusion()
+    courses_dock = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://courses.ut.edu.vn/course/view.php?id=1",
+        occlusion_layer="courses_pane",
+    )
+    overlay_dock = WindowsWebView2Dock(
+        page_title="UTHelper",
+        url="https://courses.ut.edu.vn/mod/assign/view.php?id=2",
+        occlusion_layer="app_overlay",
+    )
+    try:
+        set_global_webview_occlusion("detail_view", True)
+        assert courses_dock._effective_visible() is False
+        assert overlay_dock._effective_visible() is True
+
+        gw_calls: list[int] = []
+        fake_w32 = SimpleNamespace(
+            IsWindow=lambda _h: True,
+            GetWindowRect=lambda _h: (100, 100, 900, 700),
+            IsIconic=lambda _h: False,
+            IsWindowVisible=lambda _h: True,
+            GetWindow=lambda h, _cmd: gw_calls.append(h) or 222,
+        )
+        courses_dock._parent_hwnd = 999
+        courses_dock._hwnd = 111
+        overlay_dock._parent_hwnd = 999
+        overlay_dock._hwnd = 222
+
+        s_hidden = host_mod._compute_dock_parent_sync_state(courses_dock, fake_w32, 0)
+        assert gw_calls == []
+        assert s_hidden is not None and s_hidden[-1] is True
+
+        s_visible = host_mod._compute_dock_parent_sync_state(overlay_dock, fake_w32, 0)
+        assert gw_calls == [999]
+        assert s_visible is not None and s_visible[-1] is True
+    finally:
+        clear_global_webview_occlusion()
+        courses_dock.dispose()
+        overlay_dock.dispose()
+
+
 @pytest.mark.skipif(
     sys.platform != "win32" or not host_mod._webview2_runtime_available(),
     reason="Requires Windows WebView2 runtime",
