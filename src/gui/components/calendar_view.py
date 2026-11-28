@@ -2355,7 +2355,7 @@ class CalendarView(ft.Container):
                     content=ft.Text(
                         "Học bù",
                         size=9.5,
-                        weight=ft.FontWeight.W_600,
+                        weight=ft.FontWeight.W_700,
                         color="#FDC12A",
                     ),
                     bgcolor=ft.Colors.with_opacity(0.25, "#FCF4A3"),
