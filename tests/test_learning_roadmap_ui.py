@@ -194,7 +194,6 @@ class ViewManagerTests(unittest.TestCase):
         controller = types.SimpleNamespace(
             calendar_btn=types.SimpleNamespace(icon_color=None),
             grades_btn=types.SimpleNamespace(icon_color=None),
-            roadmap_btn=types.SimpleNamespace(icon_color=None),
         )
         page = mock.Mock()
         switcher = types.SimpleNamespace(content=None)
@@ -204,7 +203,7 @@ class ViewManagerTests(unittest.TestCase):
                          roadmap_view=views["roadmap"])
         return vm, views, controller, switcher
 
-    def test_show_roadmap_hides_everything_else_and_highlights_button(self):
+    def test_show_roadmap_keeps_grade_navigation_active(self):
         vm, v, ctl, sw = self.make()
         vm.show_roadmap_loading()
         for name in ("dashboard", "detail", "settings", "calendar", "grades"):
@@ -212,8 +211,7 @@ class ViewManagerTests(unittest.TestCase):
         v["roadmap"].show_loading.assert_called_once()
         self.assertIs(sw.content, v["roadmap"])
         from gui.core.theme import C
-        self.assertEqual(ctl.roadmap_btn.icon_color, C.ACCENT)
-        self.assertEqual(ctl.grades_btn.icon_color, C.TEXT_SECONDARY)
+        self.assertEqual(ctl.grades_btn.icon_color, C.ACCENT)
         self.assertEqual(ctl.calendar_btn.icon_color, C.TEXT_SECONDARY)
 
     def test_every_other_screen_hides_the_roadmap(self):
@@ -229,13 +227,14 @@ class ViewManagerTests(unittest.TestCase):
             call(vm)
             self.assertFalse(v["roadmap"].visible)
 
-    def test_close_roadmap_returns_to_dashboard(self):
+    def test_close_roadmap_returns_to_grade_screen(self):
         vm, v, ctl, sw = self.make()
         vm.show_roadmap_loading()
         asyncio.run(vm.close_roadmap())
         self.assertFalse(v["roadmap"].visible)
-        self.assertTrue(v["dashboard"].visible)
-        self.assertIs(sw.content, v["dashboard"])
+        self.assertTrue(v["grades"].visible)
+        self.assertFalse(v["dashboard"].visible)
+        self.assertIs(sw.content, v["grades"])
 
     def test_grades_close_path_is_unchanged(self):
         vm, v, ctl, sw = self.make()

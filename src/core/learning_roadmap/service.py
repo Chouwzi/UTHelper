@@ -51,17 +51,14 @@ class RoadmapLoadResult:
 class LearningRoadmapService:
     def __init__(
         self,
+        cache_file: Path,
         portal_client: Any = None,
-        cache_dir: Optional[Path] = None,
         *,
         ttl_hours: float = 12.0,
         clock: Callable[[], datetime] = datetime.now,
     ) -> None:
-        if cache_dir is None:
-            from config import get_data_dir  # lazy: keeps this module import-light
-            cache_dir = get_data_dir()
         self._client = portal_client
-        self._cache_file = Path(cache_dir) / CACHE_FILE_NAME
+        self._cache_file = Path(cache_file)
         self._ttl = timedelta(hours=ttl_hours)
         self._clock = clock
 
@@ -88,6 +85,13 @@ class LearningRoadmapService:
                 logger.warning("Roadmap cache write reported failure")
         except Exception as exc:  # cache is best-effort
             logger.warning("Roadmap cache write failed: %s", exc)
+
+    def clear_cache(self) -> None:
+        """Remove this account's persisted roadmap snapshot on logout/switch."""
+        try:
+            self._cache_file.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Roadmap cache removal failed: %s", exc)
 
     @staticmethod
     def _parse_time(raw: str) -> Optional[datetime]:
@@ -134,11 +138,6 @@ class LearningRoadmapService:
         password: str = "",
         force_refresh: bool = False,
     ) -> RoadmapLoadResult:
-        if self._client is None and username and password:
-            from config import settings
-            from core.portal_client import PortalClient
-            self._client = PortalClient(settings.PORTAL_API_BASE)
-
         cache = self._read_cache()
         if cache and not force_refresh:
             fetched = self._parse_time(cache["fetched_at"])

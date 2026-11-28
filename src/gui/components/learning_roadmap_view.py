@@ -317,6 +317,24 @@ class LearningRoadmapView(ft.Container):
         self.offset = ft.Offset(1, 0)
         self.opacity = 0.0
 
+    def reset(self) -> None:
+        """Forget the previous account's roadmap when the account changes."""
+        self._result = None
+        self._snapshot = None
+        self._query = ""
+        self._status_filter = FILTER_ALL
+        self._search_field.value = ""
+        self._list.controls.clear()
+        self._chips_row.controls.clear()
+        self._summary.content = None
+        self._banner.content = None
+        self._banner.visible = False
+        self._updated_text.value = ""
+        self._body.visible = False
+        self._empty_state.visible = False
+        self._loading_row.visible = False
+        self.visible = False
+
     def update_theme(self) -> None:
         current = semantic_palette()
         self._rendered_palette = current
@@ -646,8 +664,12 @@ class LearningRoadmapView(ft.Container):
 
         def on_change(event):
             raw = getattr(event, "data", None)
-            is_open = raw.strip().lower() == "true" if isinstance(raw, str) else bool(
-                getattr(event.control, "expanded", False))
+            if isinstance(raw, bool):
+                is_open = raw
+            elif isinstance(raw, str):
+                is_open = raw.strip().lower() == "true"
+            else:
+                is_open = bool(getattr(event.control, "expanded", False))
             event.control.controls = [body] if is_open else []
             event.control.update()
 

@@ -1,4 +1,4 @@
-"""Adaptive 6-destination navigation rail (>= 600px) and bottom bar (< 600px)."""
+"""Adaptive 5-destination navigation rail (>= 600px) and bottom bar (< 600px)."""
 
 from __future__ import annotations
 
@@ -49,12 +49,6 @@ NAV_DESTINATIONS: tuple[NavDestinationSpec, ...] = (
         "Bảng điểm",
         ft.Icons.INSIGHTS_OUTLINED,
         ft.Icons.INSIGHTS_ROUNDED,
-    ),
-    NavDestinationSpec(
-        "roadmap",
-        "Lộ trình",
-        getattr(ft.Icons, "ROUTE_OUTLINED", ft.Icons.MAP_OUTLINED),
-        getattr(ft.Icons, "ROUTE_ROUNDED", ft.Icons.MAP_ROUNDED),
     ),
     NavDestinationSpec(
         "settings",

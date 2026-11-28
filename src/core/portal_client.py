@@ -663,16 +663,16 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json(
                 "GET",
                 "lichhoc/ngay",
                 token=token,
                 query={"date": target_date.isoformat()},
             )
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        self._store_refreshed_token(payload, username, generation)
         try:
             return parse_portal_day(payload, target_date)
         except ValueError as exc:
@@ -700,13 +700,13 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json(
                 "GET", "lichhoc/lichTuan", token=token, query=query
             )
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        self._store_refreshed_token(payload, username, generation)
         try:
             return parse_portal_week(payload, target_date)
         except ValueError as exc:
@@ -730,11 +730,11 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json("GET", "hoctap/tiendo", token=token)
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        self._store_refreshed_token(payload, username, generation)
         body = payload.get("body")
         return body if isinstance(body, dict) else None
 
@@ -760,15 +760,17 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             payload = self._request_json(
                 "GET",
                 "hoctap/bangdiem2",
                 token=token,
             )
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+        refreshed, generation = self._store_refreshed_token(payload, username, generation)
+        if refreshed:
+            token = refreshed
 
         body = payload.get("body")
         if isinstance(body, list) and body:
@@ -836,13 +838,16 @@ class PortalClient:
         except _PortalHttpError as exc:
             if exc.status != 401:
                 raise
-            token = self._login(username, password, generation)
+            token, generation = self._login_with_generation(
+                username, password, generation
+            )
             hk_payload = self._request_json("GET", "hoctap/hocky", token=token)
 
-        refreshed_token = hk_payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
+        refreshed_token, generation = self._store_refreshed_token(
+            hk_payload, username, generation
+        )
+        if refreshed_token:
             token = refreshed_token
-            self._store_token(refreshed_token, username, generation)
 
         hk_list = hk_payload.get("body")
         if not isinstance(hk_list, list) or not hk_list:
@@ -873,14 +878,17 @@ class PortalClient:
             except _PortalHttpError as exc:
                 if exc.status != 401:
                     raise
-                token = self._login(username, password, generation)
+                token, generation = self._login_with_generation(
+                    username, password, generation
+                )
                 mon_payload = self._request_json(
                     "GET", f"hoctap/montheoky/{dot_id}", token=token
                 )
-            mon_refreshed = mon_payload.get("token")
-            if isinstance(mon_refreshed, str) and mon_refreshed:
+            mon_refreshed, generation = self._store_refreshed_token(
+                mon_payload, username, generation
+            )
+            if mon_refreshed:
                 token = mon_refreshed
-                self._store_token(mon_refreshed, username, generation)
             mon_body = mon_payload.get("body")
             if isinstance(mon_body, list) and mon_body:
                 normalized_items: list[dict[str, Any]] = []
@@ -915,7 +923,7 @@ class PortalClient:
         return (first_ten, [])
 
     # ------------------------------------------------------------------
-    # Learning Roadmap endpoints (see docs/api/portal.md §3 and §6)
+    # Learning Roadmap endpoints
     # ------------------------------------------------------------------
     _ROADMAP_ENDPOINTS: tuple[tuple[str, str], ...] = (
         ("curriculum", "hoctap/chuongtrinhkhung"),
@@ -934,7 +942,7 @@ class PortalClient:
         *,
         query: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """GET with Bearer auth; one transparent re-login on HTTP 401."""
+        """GET with the account's cached token; authentication rejection aborts the bundle."""
         generation = self._current_generation()
         token = self._cached_token(username) or self._login(
             username, password, generation
@@ -942,13 +950,13 @@ class PortalClient:
         try:
             payload = self._request_json("GET", path, token=token, query=query)
         except _PortalHttpError as exc:
-            if exc.status != 401:
-                raise
-            token = self._login(username, password, generation)
-            payload = self._request_json("GET", path, token=token, query=query)
-        refreshed_token = payload.get("token")
-        if isinstance(refreshed_token, str) and refreshed_token:
-            self._store_token(refreshed_token, username, generation)
+            if exc.status in (401, 403):
+                self._discard_token(generation)
+                raise PortalAuthenticationError(
+                    "Portal session expired or was rejected", status=exc.status
+                ) from exc
+            raise
+        self._store_refreshed_token(payload, username, generation)
         return payload
 
     def _collect_body(
@@ -960,13 +968,7 @@ class PortalClient:
         bodies: dict[str, Any],
         errors: dict[str, str],
     ) -> None:
-        """Fetch one endpoint into ``bodies``; record per-endpoint failures.
-
-        Authentication failures and network-level failures abort the whole
-        bundle (re-raised) so the caller can fall back to its offline cache;
-        an HTTP error or malformed payload on a single endpoint only degrades
-        that endpoint.
-        """
+        """Fetch one endpoint, aborting the full bundle on authentication errors."""
         try:
             payload = self._authed_get(path, username, password)
         except PortalAuthenticationError:
@@ -978,77 +980,144 @@ class PortalClient:
             errors[key] = str(exc)
             return
         if payload.get("success") is False:
-            errors[key] = str(payload.get("message") or f"status {payload.get('status')}")
+            errors[key] = str(
+                payload.get("message") or f"status {payload.get('status')}"
+            )
             return
         bodies[key] = payload.get("body")
 
     def fetch_roadmap_bundle(self, username: str, password: str) -> dict[str, Any]:
-        """Fetch everything the Learning Roadmap needs, in one login session.
-
-        Returns ``{"bodies": {...}, "current_semester": {...}, "transcript": [...],
-        "errors": {...}}`` holding *raw* Portal bodies (no token, no credentials)
-        so the result can be cached verbatim and re-interpreted later.
-
-        Raises ``PortalAuthenticationError`` / ``PortalError`` when the Portal
-        is unreachable or rejects the login, and ``PortalProtocolError`` when no
-        usable data came back at all.
-        """
+        """Fetch raw Portal data used to build the Learning Roadmap."""
         if not username or not password:
             raise PortalAuthenticationError("Portal credentials are unavailable")
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            transcript = get_demo_full_transcript()
+            semester_name, current_courses = get_demo_current_semester_courses()
+            semesters = list(reversed(transcript))
+            curriculum: list[dict[str, Any]] = []
+            seen_codes: set[str] = set()
+            for semester_no, semester in enumerate(semesters, start=1):
+                rows = semester.get("danhSachMonHoc", [])
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("maHocPhan") or "").strip()
+                    if not code or code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    curriculum.append({**row, "hocKy": semester_no, "batBuoc": True})
+            for row in current_courses:
+                code = str(row.get("maHocPhan") or "").strip()
+                if code and code not in seen_codes:
+                    seen_codes.add(code)
+                    curriculum.append(
+                        {**row, "hocKy": len(semesters) + 1, "batBuoc": True}
+                    )
+            current = transcript[0] if transcript else {}
+            return {
+                "bodies": {
+                    "curriculum": curriculum,
+                    "exemptions": [],
+                    "certificates": [],
+                    "graduation_info": {},
+                    "credit_progress": get_demo_credit_progress(),
+                },
+                "current_semester": {
+                    "id": current.get("id"),
+                    "name": semester_name or current.get("tenDot") or "",
+                    "courses": current_courses,
+                },
+                "transcript": transcript,
+                "errors": {},
+            }
+
+        generation = self._current_generation()
         if not self._cached_token(username):
-            # fail fast before the other calls
-            self._login(username, password, self._current_generation())
+            self._login(username, password, generation)
 
         bodies: dict[str, Any] = {}
         errors: dict[str, str] = {}
         for key, path in self._ROADMAP_ENDPOINTS:
             self._collect_body(key, path, username, password, bodies, errors)
+        semester_bodies: dict[str, Any] = {}
+        self._collect_body(
+            "semesters", "hoctap/hocky", username, password,
+            semester_bodies, errors,
+        )
+        current_semester: dict[str, Any] = {}
 
-        # Current (latest) semester and the courses registered in it.
-        current: dict[str, Any] = {}
-        sem_bodies: dict[str, Any] = {}
-        self._collect_body("semesters", "hoctap/hocky", username, password, sem_bodies, errors)
-        semesters = sem_bodies.get("semesters")
+        def semester_order(item: dict[str, Any]) -> int:
+            try:
+                return int(item.get("id") or item.get("idDot") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        semesters = semester_bodies.get("semesters")
         if isinstance(semesters, list):
             candidates = [
-                s for s in semesters
-                if isinstance(s, dict) and isinstance(s.get("id"), int)
+                item for item in semesters
+                if isinstance(item, dict) and (item.get("id") or item.get("idDot"))
             ]
             if candidates:
-                latest = max(candidates, key=lambda s: s["id"])
+                latest = max(
+                    candidates,
+                    key=semester_order,
+                )
+                semester_id = latest.get("id") or latest.get("idDot")
                 course_bodies: dict[str, Any] = {}
                 self._collect_body(
                     "current_semester",
-                    f"hoctap/montheoky/{latest['id']}",
+                    f"hoctap/montheoky/{semester_id}",
                     username,
                     password,
                     course_bodies,
                     errors,
                 )
                 if "current_semester" in course_bodies:
-                    current = {
-                        "id": latest["id"],
-                        "name": latest.get("tenDot") or "",
+                    current_semester = {
+                        "id": semester_id,
+                        "name": latest.get("tenDot") or latest.get("name") or "",
                         "courses": course_bodies["current_semester"],
                     }
 
-        try:
-            transcript = self.fetch_full_transcript(username, password)
-        except PortalAuthenticationError:
-            raise
-        except (_PortalHttpError, PortalProtocolError) as exc:
-            errors["transcript"] = str(exc)
-            transcript = []
+        transcript_body: dict[str, Any] = {}
+        self._collect_body(
+            "transcript", "hoctap/bangdiem2", username, password,
+            transcript_body, errors,
+        )
+        raw_transcript = transcript_body.get("transcript")
+        if isinstance(raw_transcript, list):
+            transcript = raw_transcript
+        elif isinstance(raw_transcript, dict):
+            transcript = next(
+                (
+                    raw_transcript[key]
+                    for key in (
+                        "semesters", "bangDiem", "dsDiemHocKy", "kqHocTap",
+                        "dsHocKy", "data", "list",
+                    )
+                    if isinstance(raw_transcript.get(key), list)
+                ),
+                [raw_transcript]
+                if any(
+                    key in raw_transcript
+                    for key in ("diems", "danhSachMonHoc", "dsDiem", "courses")
+                )
+                else [],
+            )
         else:
-            if not transcript:
-                errors["transcript"] = "Không có dữ liệu"
+            transcript = []
+        if not transcript:
+            errors.setdefault("transcript", "Không có dữ liệu")
 
-        got_anything = bool(transcript) or any(v is not None for v in bodies.values())
-        if not got_anything:
+        if not transcript and not any(value is not None for value in bodies.values()):
             raise PortalProtocolError("Portal returned no roadmap data")
         return {
             "bodies": bodies,
-            "current_semester": current,
+            "current_semester": current_semester,
             "transcript": transcript,
             "errors": errors,
         }

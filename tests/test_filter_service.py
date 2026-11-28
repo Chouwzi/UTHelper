@@ -9,7 +9,7 @@ from core.filter_service import FilterService
 
 @pytest.fixture
 def sample_data():
-    from datetime import timedelta
+    from datetime import datetime, timedelta
     now = datetime.now()
     return [
         {
