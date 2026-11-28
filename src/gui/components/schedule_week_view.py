@@ -80,6 +80,16 @@ def _today_pill_style() -> ft.ButtonStyle:
     )
 
 
+def _week_picker_button_style() -> ft.ButtonStyle:
+    return ft.ButtonStyle(
+        color=C.TEXT_PRIMARY,
+        bgcolor=ft.Colors.TRANSPARENT,
+        overlay_color=ft.Colors.with_opacity(0.10, C.ACCENT),
+        padding=ft.Padding.symmetric(horizontal=6, vertical=0),
+        shape=ft.RoundedRectangleBorder(radius=8),
+    )
+
+
 def _extract_inline_https_urls(*texts: str) -> list[str]:
     found: list[str] = []
     for raw in texts:
@@ -235,7 +245,7 @@ class ScheduleWeekView(ft.Container):
             size=16,
             color=C.TEXT_SECONDARY,
         )
-        self._week_label_box = ft.Container(
+        self._week_label_box = ft.TextButton(
             content=ft.Row(
                 [self._week_label, self._picker_chevron_icon],
                 spacing=2,
@@ -244,11 +254,8 @@ class ScheduleWeekView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             height=44,
-            padding=ft.Padding.symmetric(horizontal=6),
-            border_radius=8,
-            alignment=ft.Alignment(0, 0),
-            ink=True,
             tooltip="Chọn ngày trong tháng",
+            style=_week_picker_button_style(),
             on_click=lambda _e: self._show_month_date_picker(
                 return_focus=self._week_label_box
             ),
@@ -605,6 +612,7 @@ class ScheduleWeekView(ft.Container):
         self.bgcolor = C.BG
         self._week_label.color = C.TEXT_PRIMARY
         self._picker_chevron_icon.color = C.TEXT_SECONDARY
+        self._week_label_box.style = _week_picker_button_style()
         self._prev_btn.icon_color = C.TEXT_PRIMARY
         self._next_btn.icon_color = C.TEXT_PRIMARY
         self._stepper_box.bgcolor = C.SURFACE
@@ -648,8 +656,8 @@ class ScheduleWeekView(ft.Container):
                 self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if not skip_focus_restore["skip"] and return_focus is not None:
-                await return_focus.focus()
+            if not skip_focus_restore["skip"]:
+                await self._restore_control_focus(return_focus)
 
         def _pick_date(target: date) -> None:
             self._safe_pop_dialog()
@@ -1403,6 +1411,24 @@ class ScheduleWeekView(ft.Container):
             except Exception:
                 logger.debug("Could not pop active schedule dialog", exc_info=True)
 
+    @staticmethod
+    async def _restore_control_focus(control: Any) -> None:
+        if (
+            control is None
+            or not getattr(control, "visible", True)
+            or getattr(control, "disabled", False)
+        ):
+            return
+        focus_fn = getattr(control, "focus", None)
+        if not callable(focus_fn):
+            return
+        try:
+            result = focus_fn()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Focus restore skipped", exc_info=True)
+
     def _build_action_link_row(
         self,
         *,
@@ -1868,8 +1894,8 @@ class ScheduleWeekView(ft.Container):
                 self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if not skip_focus_restore["skip"] and return_focus is not None:
-                await return_focus.focus()
+            if not skip_focus_restore["skip"]:
+                await self._restore_control_focus(return_focus)
 
         close_btn = ft.Semantics(
             label="Đóng",
@@ -1964,8 +1990,8 @@ class ScheduleWeekView(ft.Container):
                 self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if not skip_focus_restore["skip"] and return_focus is not None:
-                await return_focus.focus()
+            if not skip_focus_restore["skip"]:
+                await self._restore_control_focus(return_focus)
 
         def _handle_back_to_detail(_e=None) -> None:
             if callable(on_back):
