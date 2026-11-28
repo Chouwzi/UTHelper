@@ -156,6 +156,11 @@ class ForegroundSessionTracker:
         with self._lock:
             return self._authenticated and not self._is_demo
 
+    @property
+    def consent(self) -> AnalyticsConsent:
+        with self._lock:
+            return self._consent
+
     def _can_emit_foreground_locked(self) -> bool:
         return (
             self.config.active_eligible

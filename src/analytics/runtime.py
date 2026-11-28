@@ -509,9 +509,13 @@ class AnalyticsRuntime:
                 return
 
         if selected is not AnalyticsConsent.ENABLED:
+            def _revoke_and_purge() -> None:
+                self.tracker.set_consent(selected)
+                self._purge_all_state_and_files()
+
             self.consent_gate.set_consent(
                 selected,
-                on_revoke=self._purge_all_state_and_files,
+                on_revoke=_revoke_and_purge,
             )
             return
 

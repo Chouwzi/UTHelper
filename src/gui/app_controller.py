@@ -1694,13 +1694,13 @@ class AppController:
         )
         telemetry = getattr(self, "_telemetry", None)
         if telemetry is not None:
+            if not self._is_window_hidden_or_minimized() and not telemetry.foreground_visible:
+                telemetry.on_window_restored(screen=self._telemetry_current_screen())
             telemetry.sync_account_state(
                 username=new_username,
                 has_credentials=self._has_sync_credentials(),
                 account_changed=bool(old_username and account_switched_or_logged_out),
             )
-            if not self._is_window_hidden_or_minimized() and not telemetry.foreground_visible:
-                telemetry.on_window_restored(screen=self._telemetry_current_screen())
         if do_android_logout or is_demo_account(settings.UTH_USERNAME):
             mobile_bridge = getattr(self, "_android_background", None)
             if mobile_bridge is not None and getattr(mobile_bridge, "available", False):

@@ -141,7 +141,10 @@ from diagnostics.logging_setup import (  # noqa: E402
 )
 from diagnostics.models import AppPhase  # noqa: E402
 from diagnostics.release_config import load_runtime_public_config  # noqa: E402
-from diagnostics.runtime import create_default_runtime  # noqa: E402
+from diagnostics.runtime import (  # noqa: E402
+    _resolve_runtime_package_format,
+    create_default_runtime,
+)
 from gui.controllers.startup_visibility import is_autostart_launch  # noqa: E402
 from platform_utils import quiz_client_bootstrap  # noqa: E402
 from platform_utils.single_instance import bootstrap_windows_instance  # noqa: E402
@@ -631,10 +634,7 @@ def main() -> int:
     analytics_runtime = None
     try:
         public_config = load_runtime_public_config(development=development)
-        from config import (
-            settings as _startup_settings,
-            subscribe_settings_saved as _subscribe_settings_saved,
-        )
+        import config as _config_mod
         from core.distribution import resolve_distribution_channel
 
         dist_channel = (
@@ -642,10 +642,11 @@ def main() -> int:
             if development
             else resolve_distribution_channel(is_packaged=True).channel.value
         )
-        pkg_format = (
-            "source"
-            if development
-            else (public_config.package_format or "source")
+        pkg_format = _resolve_runtime_package_format(
+            dist_channel,
+            public_config.package_format,
+            development=development,
+            is_windows=desktop_windows,
         )
         analytics_runtime = create_default_analytics_runtime(
             _APPDATA_DIR,
@@ -662,11 +663,11 @@ def main() -> int:
             package_format=pkg_format,
             web_mode=web_mode,
             test_mode=_TEST_MODE,
-            consent=getattr(_startup_settings, "ANALYTICS_CONSENT", "enabled"),
+            consent=getattr(_config_mod.settings, "ANALYTICS_CONSENT", "enabled"),
             consent_provider=lambda: getattr(
-                _startup_settings, "ANALYTICS_CONSENT", "enabled"
+                _config_mod.settings, "ANALYTICS_CONSENT", "enabled"
             ),
-            subscribe_consent_changes=_subscribe_settings_saved,
+            subscribe_consent_changes=_config_mod.subscribe_settings_saved,
         )
         analytics_runtime.start()
     except Exception:

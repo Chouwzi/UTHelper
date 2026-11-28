@@ -118,11 +118,11 @@ class TelemetryBridge:
         if rt is None:
             return False
         current = rt.current_consent
-        if current is not AnalyticsConsent.ENABLED:
-            if rt.tracker.consent is not current:
-                rt.tracker.set_consent(current)
-            return False
-        return True
+        if rt.tracker.consent is not current:
+            events = rt.tracker.set_consent(current)
+            if events:
+                rt._enqueue_ram_events(events, urgent_spool=True)
+        return current is AnalyticsConsent.ENABLED
 
     def apply_consent(self, consent: str) -> None:
         """Apply live user analytics consent choice (``enabled`` | ``disabled``)."""

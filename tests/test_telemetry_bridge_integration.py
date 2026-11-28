@@ -966,7 +966,10 @@ def test_logout_and_account_switch_rotate_distinct_id(
     # Clear spool so we inspect only the second user's session events
     runtime.spool.clear()
 
-    # Log in as a second real student -> brand-new distinct_id
+    # Log in as a second real student (even starting with foreground_visible=False)
+    # -> _complete_login_success marks foreground first, then emits login_completed!
+    runtime.on_background("tray_hide")
+    runtime.tracker._foreground_visible = False
     monkeypatch.setattr(settings, "UTH_USERNAME", "2251120099")
     monkeypatch.setattr(settings, "UTH_PASSWORD", "new-secret")
     ctrl._settings_identity = ("", "")
@@ -976,6 +979,7 @@ def test_logout_and_account_switch_rotate_distinct_id(
     assert install_path.is_file()
     second_events = _drain_spooled_events(runtime)
     assert [e["event"] for e in second_events] == [EventName.SESSION_STARTED.value]
+    assert second_events[0]["properties"]["launch_trigger"] == "login_completed"
     second_distinct_id = second_events[0]["distinct_id"]
     assert second_distinct_id != first_distinct_id
 
@@ -1021,9 +1025,9 @@ def test_live_opt_out_and_reset_purge_spool_and_installation_file(
     assert not install_path.exists()
     assert runtime.spool.pending() == ()
 
-    # Re-enable consent while still visible & authenticated, then test reset_analytics_state
+    # Re-enable consent while still visible & authenticated -> starts session immediately
     ctrl.apply_analytics_consent("enabled")
-    ctrl._telemetry.on_window_restored(screen="home")
+    assert runtime.active_session_id is not None
     re_enabled_events = _drain_spooled_events(runtime)
     assert len(re_enabled_events) == 1
     id_before_reset = re_enabled_events[0]["distinct_id"]
@@ -1082,7 +1086,7 @@ def test_main_secondary_handoff_does_zero_analytics_io_and_primary_closes_before
         return SimpleNamespace(
             dsn=None,
             build_environment="release",
-            package_format="exe",
+            package_format="exe_msi",
             posthog_project_api_key=_VALID_KEY,
             posthog_host=_VALID_HOST,
         )
@@ -1191,6 +1195,14 @@ def test_main_secondary_handoff_does_zero_analytics_io_and_primary_closes_before
     )
     monkeypatch.setattr(application, "load_runtime_public_config", _load_public_cfg)
     monkeypatch.setattr(
+        "core.distribution.resolve_distribution_channel",
+        lambda **_kw: SimpleNamespace(channel=SimpleNamespace(value="exe_lts")),
+    )
+    monkeypatch.setattr(
+        "platform_utils.windows_update.read_install_channel",
+        lambda: "msi",
+    )
+    monkeypatch.setattr(
         application, "create_default_analytics_runtime", _create_analytics
     )
     monkeypatch.setattr(
@@ -1215,8 +1227,15 @@ def test_main_secondary_handoff_does_zero_analytics_io_and_primary_closes_before
     assert received_app_kwargs["analytics_runtime"] is created_spies[0]
     assert created_spies[0].kwargs["api_key"] == _VALID_KEY
     assert created_spies[0].kwargs["host"] == _VALID_HOST
-    assert created_spies[0].kwargs["package_format"] == "exe"
+    assert created_spies[0].kwargs["package_format"] == "msi"
     assert created_spies[0].kwargs["release_channel"] == "release"
+    # Dynamic config.settings rebind honored by consent_provider
+    import config as _cfg_mod
+
+    monkeypatch.setattr(
+        _cfg_mod, "settings", SimpleNamespace(ANALYTICS_CONSENT="disabled")
+    )
+    assert created_spies[0].kwargs["consent_provider"]() == "disabled"
     assert events.index("analytics.close") < events.index("terminate:0")
 
 
@@ -1300,12 +1319,54 @@ def test_consent_provider_refresh_opt_out_blocks_mobile_resume_identity_remint(
     # Simulate settings save listener revoking consent directly on runtime
     consent_box["value"] = "disabled"
     runtime.set_consent("disabled")
+    assert runtime.tracker.consent is AnalyticsConsent.DISABLED
     assert not install_path.exists()
 
-    # Mobile pause + resume while opted out must NOT re-create installation.json
+    # (a) Direct runtime.on_foreground without TelemetryBridge must keep consent DISABLED,
+    #     create no installation.json, and spool zero events.
+    runtime.on_foreground("mobile_resume", screen="home")
+    assert runtime.tracker.consent is AnalyticsConsent.DISABLED
+    assert not install_path.exists()
+    assert _drain_spooled_events(runtime) == []
+
+    # Mobile pause + resume via TelemetryBridge while opted out also creates 0 files/events
     ctrl.page.on_app_lifecycle_state_change(SimpleNamespace(data="pause"))
     ctrl.page.on_app_lifecycle_state_change(SimpleNamespace(data="resume"))
     ctrl._telemetry.record_filter_applied("home", "urgency")
     assert not install_path.exists()
     assert _drain_spooled_events(runtime) == []
+
+
+def test_cold_visible_boot_with_consent_disabled_sets_foreground_and_live_opt_in_starts_session(
+    tmp_path: Path,
+) -> None:
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock, consent="disabled")
+    assert runtime.tracker.consent is AnalyticsConsent.DISABLED
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+
+    install_path = tmp_path / "analytics" / "installation.json"
+    assert ctrl._telemetry.foreground_visible is True
+    assert runtime.active_session_id is None
+    assert not install_path.exists()
+    assert _drain_spooled_events(runtime) == []
+
+    # (b) Toggling consent enabled later immediately emits uth_session_started without on_window_restored
+    ctrl.apply_analytics_consent("enabled")
+    assert runtime.tracker.consent is AnalyticsConsent.ENABLED
+    assert runtime.active_session_id is not None
+    assert install_path.is_file()
+    events = _drain_spooled_events(runtime)
+    assert [e["event"] for e in events] == [EventName.SESSION_STARTED.value]
+
 
