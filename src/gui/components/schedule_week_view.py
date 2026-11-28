@@ -1834,10 +1834,12 @@ class ScheduleWeekView(ft.Container):
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
+                wrap=True,
+                run_spacing=0,
             )
             summary = ft.Column(
                 [time_header, title, class_label, room_label],
-                spacing=3,
+                spacing=2,
                 tight=True,
             )
 
