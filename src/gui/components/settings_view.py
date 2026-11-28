@@ -1651,11 +1651,18 @@ class SettingsView(ft.Container):
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            try:
-                row_ctrl.update()
-            except Exception:
-                import logging as _fb_log
-                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
+            # Update the cards individually. Updating the horizontal Row itself
+            # makes Flet rebuild its scrollable viewport; on Windows and mobile
+            # that can reset its native scroll position to the beginning.
+            for card in row_ctrl.controls:
+                try:
+                    card.update()
+                except Exception:
+                    import logging as _fb_log
+                    _fb_log.getLogger(__name__).debug(
+                        "Ignored exception while refreshing a theme card",
+                        exc_info=True,
+                    )
         else:
             # Fallback if row or length mismatch
             new_row = self._build_theme_selector()
