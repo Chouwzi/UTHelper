@@ -1851,15 +1851,15 @@ class ScheduleWeekView(ft.Container):
         if session.cancelled:
             suspended_watermark = ft.Container(
                 content=ft.Text(
-                    "Tạm ngưng",
-                    size=14,
+                    "TẠM NGƯNG",
+                    size=20,
                     weight=ft.FontWeight.W_700,
-                    color=ft.Colors.with_opacity(0.28, C.CRITICAL),
+                    color=ft.Colors.with_opacity(0.32, C.CRITICAL),
                     text_align=ft.TextAlign.CENTER,
                     no_wrap=True,
                 ),
-                width=220,
-                height=30,
+                width=260,
+                height=38,
                 alignment=ft.Alignment.CENTER,
                 rotate=ft.Rotate(
                     angle=-0.32,
@@ -1869,13 +1869,13 @@ class ScheduleWeekView(ft.Container):
             )
             card_content = ft.Stack(
                 controls=[
+                    card_content,
                     ft.Container(
                         content=suspended_watermark,
                         alignment=ft.Alignment.CENTER,
                         expand=True,
                         ignore_interactions=True,
                     ),
-                    card_content,
                 ],
                 alignment=ft.Alignment.CENTER,
                 fit=ft.StackFit.EXPAND,
@@ -1887,7 +1887,7 @@ class ScheduleWeekView(ft.Container):
             content=card_content,
             padding=ft.Padding.all(8 if not narrow else 10),
             bgcolor=(
-                ft.Colors.with_opacity(0.10, C.CRITICAL)
+                ft.Colors.with_opacity(0.16, C.CRITICAL)
                 if session.cancelled
                 else C.SURFACE
             ),

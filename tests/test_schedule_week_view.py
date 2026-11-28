@@ -855,21 +855,24 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     assert card_narrow.height is None
     assert card_short.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
     assert card_short.bgcolor == C.SURFACE
-    assert card_long.bgcolor == ft.Colors.with_opacity(0.10, C.CRITICAL)
+    assert card_long.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
 
     assert isinstance(card_long.content, ft.Stack)
-    watermark = card_long.content.controls[0].content
+    card_body = card_long.content.controls[0]
+    watermark = card_long.content.controls[1].content
     assert watermark.bgcolor is None
     assert watermark.rotate.angle == -0.32
-    assert "Tạm ngưng" in _text_values(watermark)
+    assert "TẠM NGƯNG" in _text_values(watermark)
+    watermark_text = watermark.content
+    assert watermark_text.size == 20
+    assert watermark_text.color == ft.Colors.with_opacity(0.32, C.CRITICAL)
 
-    card_body = card_long.content.controls[1]
     assert card_body.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
     summary_col = card_body.controls[0]
     top_row = summary_col.controls[0]
     assert isinstance(top_row, ft.Row)
     assert "07:00 – 09:30" in _text_values(top_row)
-    assert "Tạm ngưng" not in _text_values(top_row)
+    assert "TẠM NGƯNG" not in _text_values(top_row)
 
     title_txt, class_txt, room_txt = (
         summary_col.controls[1],
