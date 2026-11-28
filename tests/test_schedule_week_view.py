@@ -1153,8 +1153,9 @@ def test_month_date_picker_today_button_and_escape_key():
     asyncio.run(dialog.on_dismiss(None))
     assert focused == [True]
 
-    # Re-open and click "Hôm nay" inside the picker -> jumps to date.today()
+    # Re-open via real _week_label_box click, pick "Hôm nay", and run real Flet on_dismiss lifecycle
     pops.clear()
+    assert hasattr(view._week_label_box, "focus") and callable(view._week_label_box.focus)
     view._week_label_box.on_click(None)
     dialog2 = dialogs[-1]
     today_btn = next(
@@ -1163,7 +1164,13 @@ def test_month_date_picker_today_button_and_escape_key():
         if isinstance(c, ft.TextButton) and c.content == "Hôm nay"
     )
     today_btn.on_click(None)
+    asyncio.run(dialog2.on_dismiss(None))
     assert pops == [True]
     assert view._selected == date.today()
+
+    # Also verify defensive focus guard when a non-focusable Container is passed to return_focus
+    view._show_month_date_picker(return_focus=ft.Container())
+    asyncio.run(dialogs[-1].on_dismiss(None))
+
 
 
