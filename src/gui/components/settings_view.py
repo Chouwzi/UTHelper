@@ -1090,6 +1090,7 @@ class SettingsView(ft.Container):
         if offset is None or row is None:
             return
         try:
+            await asyncio.sleep(0)
             await row.scroll_to(offset=offset, duration=0)
         except (AttributeError, RuntimeError, TypeError):
             return
@@ -1196,6 +1197,11 @@ class SettingsView(ft.Container):
         log = logging.getLogger("UTHelper.settings")
         log.info(f"[THEME] _on_theme_select called: {theme_key}")
         try:
+            # Snapshot before any theme/page repaint can emit a scroll event at
+            # offset zero and overwrite the last user-selected position.
+            self._theme_cards_pending_scroll_offset = getattr(
+                self, "_theme_cards_scroll_offset", 0.0
+            )
             self._selected_theme = theme_key
             self._apply_theme_colors(theme_key)
             # Apply theme globally RIGHT NOW for instant preview
@@ -1593,7 +1599,8 @@ class SettingsView(ft.Container):
 
     def _rebuild_theme_cards(self):
         """Restore preset previews and update selection state in place."""
-        self._theme_cards_pending_scroll_offset = self._theme_cards_scroll_offset
+        if self._theme_cards_pending_scroll_offset is None:
+            self._theme_cards_pending_scroll_offset = self._theme_cards_scroll_offset
         row_ctrl = self._theme_cards_row.content
         if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) == len(THEME_ORDER):
             for i, key in enumerate(THEME_ORDER):
@@ -1727,7 +1734,11 @@ class SettingsView(ft.Container):
             self._update_save_button_state()
 
         self.update()
-        self._schedule_theme_cards_scroll_restore()
+        schedule_scroll_restore = getattr(
+            self, "_schedule_theme_cards_scroll_restore", None
+        )
+        if callable(schedule_scroll_restore):
+            schedule_scroll_restore()
 
     async def _handle_test_login(self, e):
         raw_user = self._username_field.value or ""
