@@ -2744,3 +2744,20 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests scripts extensions/flet_uth_quiz/src extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/src extensions/flet_uth_background_sync/tests`: **All checks passed!**.
   - Android Gradle Robolectric unit tests (`extensions/flet_uth_background_sync` `:testDebugUnitTest`): **BUILD SUCCESSFUL**.
   - Full `pytest` suite (`tests`, `extensions/flet_uth_quiz/tests`, `extensions/flet_uth_background_sync/tests`): **3604 passed, 27 skipped, 0 failed**.
+
+## PR #143 Calendar Schedule Highlight Regression (2026-11-27)
+
+- Added a regression test that hooks `page.update()` and verifies the schedule
+  tab is already transparent while rendering both Week and Month after leaving
+  Schedule mode.
+- **Verification (local Windows, Python 3.12)**:
+  - `python -m pytest tests/test_calendar_week_view.py -q --tb=short`: **45 passed**.
+  - `ruff check src tests`: **All checks passed**.
+  - `python -m pytest tests -q --tb=short`: **3436 passed, 38 skipped, 3 failed**.
+    The failures were in unrelated cache/Quiz tests:
+    `test_default_user_data_dir_and_filename_sanitization`,
+    `test_live_safe_exam_browser_requirement_preserves_browser_recovery`, and
+    `test_late_old_session_error_cannot_clear_new_open_pending_cookies`.
+- After syncing `develop` on 2026-11-28, the calendar-focused suite passed again:
+  **52 passed**; `ruff check src tests`: **All checks passed**.
+
