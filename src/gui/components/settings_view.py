@@ -96,6 +96,7 @@ class SettingsView(ft.Container):
         self._original_theme = self._selected_theme  # For revert on discard
         self._theme_cards_scroll_offset = 0.0
         self._theme_cards_pending_scroll_offset: float | None = None
+        self._theme_cards_pending_scroll_key: str | None = None
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
         self._hint_containers = []
         self._tiles = []
@@ -1089,27 +1090,36 @@ class SettingsView(ft.Container):
 
     async def _restore_theme_cards_scroll(self) -> None:
         offset = self._theme_cards_pending_scroll_offset
+        scroll_key = self._theme_cards_pending_scroll_key
         row = getattr(getattr(self, "_theme_cards_row", None), "content", None)
-        if offset is None or row is None:
+        if (offset is None and scroll_key is None) or row is None:
             return
         try:
             # Let the page-wide theme repaint finish its Flutter frame before
             # restoring the saved offset; a zero-delay yield can run too early.
             await asyncio.sleep(0.05)
-            await row.scroll_to(offset=offset, duration=0)
+            if offset is not None:
+                await row.scroll_to(offset=offset, duration=0)
+            # If the renderer discarded its scroll offset during the repaint,
+            # keep the newly selected card visible instead of leaving the user
+            # at the beginning of the carousel.
+            if scroll_key is not None:
+                await row.scroll_to(scroll_key=scroll_key, duration=0)
         except (AttributeError, RuntimeError, TypeError):
             return
         if self._theme_cards_pending_scroll_offset == offset:
             self._theme_cards_pending_scroll_offset = None
+        if self._theme_cards_pending_scroll_key == scroll_key:
+            self._theme_cards_pending_scroll_key = None
 
     def _schedule_theme_cards_scroll_restore(self) -> None:
         offset = self._theme_cards_pending_scroll_offset
+        scroll_key = self._theme_cards_pending_scroll_key
         run_task = getattr(getattr(self, "_page", None), "run_task", None)
-        if offset is None:
+        if offset is None and scroll_key is None:
             return
-        if offset <= 0:
+        if offset is not None and offset <= 0:
             self._theme_cards_pending_scroll_offset = None
-            return
         if callable(run_task):
             try:
                 run_task(self._restore_theme_cards_scroll)
@@ -1186,7 +1196,7 @@ class SettingsView(ft.Container):
 
         return ft.Container(
             content=card_content,
-            key=ft.ValueKey(f"settings-theme-card-{key}"),
+            key=ft.ScrollKey(f"settings-theme-card-{key}"),
             width=115,
             padding=ft.Padding.all(8),
             border_radius=12,
@@ -1208,6 +1218,7 @@ class SettingsView(ft.Container):
             self._theme_cards_pending_scroll_offset = getattr(
                 self, "_theme_cards_scroll_offset", 0.0
             )
+            self._theme_cards_pending_scroll_key = f"settings-theme-card-{theme_key}"
             self._selected_theme = theme_key
             self._apply_theme_colors(theme_key)
             # Apply theme globally RIGHT NOW for instant preview
