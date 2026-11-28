@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import flet as ft
 
@@ -85,6 +87,7 @@ class QuizPlayerView(ft.Container):
         client_provider: Callable[[str], Any] | None = None,
         on_auth_required: Callable | None = None,
         on_entry_unavailable: Callable | None = None,
+        on_telemetry_quiz_action: Callable[..., Any] | None = None,
         ready_timeout_seconds: float = _READY_TIMEOUT_SECONDS,
     ):
         self._page = page
@@ -97,7 +100,10 @@ class QuizPlayerView(ft.Container):
         self._client_provider = client_provider
         self._on_auth_required = on_auth_required
         self._on_entry_unavailable = on_entry_unavailable
+        self._on_telemetry_quiz_action = on_telemetry_quiz_action
         self._ready_timeout_seconds = max(0.1, float(ready_timeout_seconds))
+        self._telemetry_started_mono: float | None = None
+        self._telemetry_open_mono: float | None = None
 
         self._player = None
         self._lease = None
@@ -369,6 +375,8 @@ class QuizPlayerView(ft.Container):
         generation = self._generation
         self._target = target
         self._activity = dict(activity) if isinstance(activity, Mapping) else None
+        self._telemetry_open_mono = time.monotonic()
+        self._telemetry_started_mono = None
         self._launch_url = None
         self._title.value = str(
             self._activity.get("title") if self._activity else ""
@@ -926,6 +934,17 @@ class QuizPlayerView(ft.Container):
                 ),
             )
             self._player_host.content = self._player
+            prep_elapsed = (
+                max(0.0, time.monotonic() - self._telemetry_open_mono)
+                if self._telemetry_open_mono is not None
+                else None
+            )
+            self._telemetry_started_mono = time.monotonic()
+            self._emit_quiz_telemetry(
+                "player_started",
+                self._activity,
+                duration_seconds=prep_elapsed,
+            )
             self._safe_update()
             self._run_task(self._wait_for_ready, generation)
             deferred_close = self._deferred_close
@@ -1089,6 +1108,12 @@ class QuizPlayerView(ft.Container):
             return
         activity = self._activity
         callback = self._entry_unavailable_callback
+        if reason == "requires_safe_exam_browser":
+            self._emit_quiz_telemetry("player_blocked_seb", activity)
+        elif reason in {"quiz_unavailable", "unsupported_action", "entry_not_opened"}:
+            self._emit_quiz_telemetry("player_unavailable", activity)
+        self._telemetry_started_mono = None
+        self._telemetry_open_mono = None
         self._close_entry_prompt()
         prepared = self._prepared_entry
         self._prepared_entry = None
@@ -1213,8 +1238,38 @@ class QuizPlayerView(ft.Container):
         self._external_notice_row.visible = True
         self._safe_update()
 
+    def _emit_quiz_telemetry(
+        self,
+        action: str,
+        activity: Mapping[str, Any] | None = None,
+        *,
+        duration_seconds: float | None = None,
+    ) -> None:
+        cb = getattr(self, "_on_telemetry_quiz_action", None)
+        if not callable(cb):
+            return
+        source_site = "courses"
+        if isinstance(activity, Mapping):
+            site_id = str(activity.get("site_identity") or "").strip().casefold()
+            if site_id == "thnn" or str(activity.get("source") or "") == "thnn_sync":
+                source_site = "thnn"
+            else:
+                raw_url = str(activity.get("url") or "").strip()
+                if raw_url and (urlsplit(raw_url).hostname or "").casefold() == "thnn.ut.edu.vn":
+                    source_site = "thnn"
+        elif self._target is not None:
+            if str(getattr(self._target, "site_identity", "") or "").strip().casefold() == "thnn":
+                source_site = "thnn"
+        try:
+            cb(action, source_site, duration_seconds)
+        except Exception:
+            pass
+
     def _show_mount_error(self, code: str):
         """Unwind only failures that happen before an active page is usable."""
+        self._emit_quiz_telemetry("player_unavailable", self._activity)
+        self._telemetry_started_mono = None
+        self._telemetry_open_mono = None
         messages = {
             "webview_unavailable": "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt.",
             "player_unavailable": "Trình xem bài chưa sẵn sàng. Hãy mở bằng trình duyệt.",
@@ -1474,6 +1529,15 @@ class QuizPlayerView(ft.Container):
             pass
 
         activity = self._activity
+        started_mono = getattr(self, "_telemetry_started_mono", None)
+        self._telemetry_started_mono = None
+        self._telemetry_open_mono = None
+        if started_mono is not None:
+            self._emit_quiz_telemetry(
+                "player_closed",
+                activity,
+                duration_seconds=max(0.0, time.monotonic() - started_mono),
+            )
         after_close = self._after_close
         self._after_close = None
         self._account_id = ""

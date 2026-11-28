@@ -56,6 +56,7 @@ class GradeOverviewView(ft.Container):
         course_grades_async_lookup: Optional[
             Callable[[Any, str], Awaitable[MoodleCourseGradesResult]]
         ] = None,
+        on_telemetry_interaction: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -65,6 +66,7 @@ class GradeOverviewView(ft.Container):
         self._on_close = on_close
         self._on_refresh = on_refresh
         self._on_open_courses = on_open_courses
+        self._on_telemetry_interaction = on_telemetry_interaction
         self._page_ref = page
         self._semesters: list[SemesterGradeData] = []
         self._profiles: list[RadarProfile] = []
@@ -241,6 +243,13 @@ class GradeOverviewView(ft.Container):
             on_dialog_closing=self._mark_dialog_closing,
             visible=False,
         )
+        orig_metric_click = getattr(self._radar_card, "_on_metric_click", None)
+        if callable(orig_metric_click):
+            def _wrapped_metric_click(*m_args: Any, **m_kwargs: Any) -> Any:
+                self._emit_telemetry("radar_metric_opened")
+                return orig_metric_click(*m_args, **m_kwargs)
+
+            self._radar_card._on_metric_click = _wrapped_metric_click
         # Form tính GPA mong muốn mở bằng nút trên header (dialog)
         self._gpa_target_card = GpaTargetCard()
         self._graduation_card = GraduationGpaCard()
@@ -645,6 +654,7 @@ class GradeOverviewView(ft.Container):
         if shown_ok:
             self._set_active_dialog_closer(token, _close)
             self._pin_scroll_while_modal_open(token)
+            self._emit_telemetry("gpa_planner_opened")
         else:
             self._open_dialog_tokens.pop(token, None)
 
@@ -945,14 +955,24 @@ class GradeOverviewView(ft.Container):
         if closer is not None:
             self._set_active_dialog_closer(token, closer)
             self._pin_scroll_while_modal_open(token)
+            self._emit_telemetry("course_popup_opened")
         else:
             self._open_dialog_tokens.pop(token, None)
+
+    def _emit_telemetry(self, action: str) -> None:
+        cb = getattr(self, "_on_telemetry_interaction", None)
+        if callable(cb):
+            try:
+                cb(action)
+            except Exception:
+                pass
 
     def _on_semester_changed(self, index: int) -> None:
         self._selected_semester_idx = index
         self._saved_scroll_offset = 0.0
         if 0 <= index < len(self._semesters):
             self._grade_list_view.update_courses(self._semesters[index].courses)
+        self._emit_telemetry("semester_switched")
 
     def _handle_refresh(self, e: ft.ControlEvent) -> None:
         if self._on_refresh:

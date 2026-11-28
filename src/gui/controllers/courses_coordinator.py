@@ -286,12 +286,14 @@ class CoursesCoordinator:
         account_namespace: Optional[str] = None,
         webview_auth_service: Any = None,
         account_epoch_getter: Optional[Callable[[], int]] = None,
+        telemetry_bridge: Any = None,
     ) -> None:
         self._page = page
         self._on_start_quiz = on_start_quiz
         self._account_namespace = account_namespace
         self._webview_auth_service = webview_auth_service
         self._account_epoch_getter = account_epoch_getter
+        self._telemetry = telemetry_bridge
         self.catalog_service = catalog_service
         self.preview_cache = preview_cache
         self.archive_service = archive_service
@@ -335,6 +337,50 @@ class CoursesCoordinator:
                 self._prefetch_course_attachments_async, c, secs
             ),
         )
+        if self._telemetry is not None:
+            attach_courses = getattr(self._telemetry, "attach_courses_view", None)
+            if callable(attach_courses):
+                attach_courses(self.courses_view)
+
+    def _emit_course_activity_opened(self, activity_kind: str, source_site: str) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is None:
+            return
+        fn = getattr(telemetry, "record_course_activity_opened", None)
+        if callable(fn):
+            fn(activity_kind=activity_kind, source_site=source_site)
+
+    def _emit_document_opened(
+        self,
+        *,
+        file_name: str,
+        viewer_kind: str,
+        source_site: str,
+        cache_hit: bool,
+        load_duration_seconds: float | None = None,
+    ) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is None:
+            return
+        fn = getattr(telemetry, "record_document_opened", None)
+        if callable(fn):
+            fn(
+                file_name=file_name,
+                viewer_kind=viewer_kind,
+                source_site=source_site,
+                cache_hit=cache_hit,
+                load_duration_seconds=load_duration_seconds,
+            )
+
+    def _emit_submission_telemetry(
+        self, action: str, outcome: str, file_count: int = 1
+    ) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is None:
+            return
+        fn = getattr(telemetry, "record_submission_action", None)
+        if callable(fn):
+            fn(action=action, outcome=outcome, file_count=file_count)
 
     def _schedule(self, coro_fn: Callable[..., Any], *args: Any) -> None:
         run_task = getattr(self._page, "run_task", None)
@@ -514,6 +560,7 @@ class CoursesCoordinator:
     def _handle_open_assignment(
         self, course: CourseSummary, mod: CourseModuleItem
     ) -> None:
+        self._emit_course_activity_opened("assignment", course.source)
         if self._assignment_detail_fetcher is None:
             self._dispatch_cb(self._on_open_assignment, mod)
             return
@@ -528,6 +575,7 @@ class CoursesCoordinator:
             get_client=lambda src=course.source: self._client_for(src),
             on_status_changed=self._on_assignment_status_changed,
             submission_workflow_factory=self._submission_workflow_factory,
+            on_telemetry_submission=self._emit_submission_telemetry,
             embedded_in_pane=True,
             on_open_url=self._handle_course_url_action,
         )
@@ -678,6 +726,7 @@ class CoursesCoordinator:
             self._show_snack(DEMO_LMS_WEBVIEW_GUARD_MESSAGE)
             return
         site_kind = classify_uth_webview_url(safe_url)
+        self._emit_course_activity_opened("in_app_webview", site_kind)
         resolved_source: CourseSource = (
             "thnn"
             if site_kind == "thnn"
@@ -747,6 +796,7 @@ class CoursesCoordinator:
     ) -> None:
         modname = (mod.modname or "").lower()
         if modname == "attendance" and self._activity_service is not None:
+            self._emit_course_activity_opened("attendance", course.source)
             view = AttendanceActivityView(
                 source=course.source,
                 module=mod,
@@ -761,6 +811,7 @@ class CoursesCoordinator:
             return
 
         if modname in {"groupselect", "choicegroup", "choice"} and self._activity_service is not None:
+            self._emit_course_activity_opened("group_choice", course.source)
             view = GroupActivityView(
                 source=course.source,
                 course_id=course.id,
@@ -776,6 +827,7 @@ class CoursesCoordinator:
             return
 
         if modname == "quiz" and self._activity_service is not None:
+            self._emit_course_activity_opened("quiz_overview", course.source)
             status_cb = self._on_assignment_status_changed
             opened_epoch = self._resolve_account_epoch()
 
@@ -809,6 +861,10 @@ class CoursesCoordinator:
                 ),
                 on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             )
+            telemetry = getattr(self, "_telemetry", None)
+            attach_quiz = getattr(telemetry, "attach_quiz_activity_view", None)
+            if callable(attach_quiz):
+                attach_quiz(view, course.source)
             self.courses_view.push_overlay(view, tag=f"activity:quiz:{mod.cmid}")
             return
 
@@ -832,6 +888,7 @@ class CoursesCoordinator:
 
         modname = (mod.modname or "").lower()
         if modname == "forum":
+            self._emit_course_activity_opened("forum", course.source)
             view = ForumActivityView(
                 source=course.source,
                 course_id=course.id,
@@ -847,6 +904,7 @@ class CoursesCoordinator:
             return
 
         if modname in {"book", "page", "label"}:
+            self._emit_course_activity_opened("rich_content", course.source)
             view = RichContentActivityView(
                 source=course.source,
                 course_id=course.id,
@@ -1232,6 +1290,19 @@ class CoursesCoordinator:
         try:
             await asyncio.sleep(0)
             t0 = time.monotonic()
+            was_cache_hit = False
+            try:
+                probe_cached = await asyncio.to_thread(
+                    self.preview_cache.get_cached_path,
+                    att.file_url,
+                    att.time_modified,
+                    att.file_name,
+                )
+                was_cache_hit = bool(
+                    probe_cached is not None and probe_cached.is_file()
+                )
+            except Exception:
+                was_cache_hit = False
 
             def _on_dl_progress(done_b: int, total_b: int) -> None:
                 if not _is_still_current():
@@ -1513,6 +1584,27 @@ class CoursesCoordinator:
                 cached_file_path=cached_file_path,
             )
             preopened_pdf = None
+            if att.is_archive or att.preview_kind == "archive":
+                resolved_viewer_kind = "archive_explorer"
+            elif rendered_pdf_bytes is not None:
+                resolved_viewer_kind = "office_pdf_bridge"
+            elif att.preview_kind == "pdf":
+                resolved_viewer_kind = (
+                    "pdfjs_webview"
+                    if (preprepared_office_viewer is not None or webview_supported)
+                    else "native_pdf"
+                )
+            elif preprepared_office_viewer is not None:
+                resolved_viewer_kind = "office_webview"
+            else:
+                resolved_viewer_kind = "markdown_html"
+            self._emit_document_opened(
+                file_name=att.file_name,
+                viewer_kind=resolved_viewer_kind,
+                source_site=course.source,
+                cache_hit=was_cache_hit,
+                load_duration_seconds=max(0.0, time.monotonic() - t0),
+            )
         except Exception as exc:
             if preopened_pdf is not None:
                 preopened_pdf.close()
@@ -1656,6 +1748,21 @@ class CoursesCoordinator:
                     pass
                 return
             await ft.UrlLauncher().launch_url(out.as_uri())
+            selected_course = (
+                self.courses_view._state.selected_course()
+                if hasattr(self.courses_view, "_state")
+                else None
+            )
+            ext_source = (
+                selected_course.source if selected_course is not None else "courses"
+            )
+            self._emit_document_opened(
+                file_name=file_name,
+                viewer_kind="external",
+                source_site=ext_source,
+                cache_hit=True,
+                load_duration_seconds=0.0,
+            )
         except Exception:
             if getattr(self, "_account_epoch", 0) != start_epoch:
                 if out is not None:

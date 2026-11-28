@@ -133,12 +133,14 @@ def _release_early_flutter_window_hide_guard() -> None:
 if _detect_embedded_windows_runner_early():
     _start_early_flutter_window_hide_guard()
 
+from analytics.runtime import create_default_analytics_runtime  # noqa: E402
 from diagnostics.logging_setup import (  # noqa: E402
     configure_dependency_logging,
     configure_logging,
     startup_debug_enabled,
 )
 from diagnostics.models import AppPhase  # noqa: E402
+from diagnostics.release_config import load_runtime_public_config  # noqa: E402
 from diagnostics.runtime import create_default_runtime  # noqa: E402
 from gui.controllers.startup_visibility import is_autostart_launch  # noqa: E402
 from platform_utils import quiz_client_bootstrap  # noqa: E402
@@ -626,6 +628,50 @@ def main() -> int:
     except Exception:
         _boot_log("Diagnostic runtime unavailable")
 
+    analytics_runtime = None
+    try:
+        public_config = load_runtime_public_config(development=development)
+        from config import (
+            settings as _startup_settings,
+            subscribe_settings_saved as _subscribe_settings_saved,
+        )
+        from core.distribution import resolve_distribution_channel
+
+        dist_channel = (
+            "source"
+            if development
+            else resolve_distribution_channel(is_packaged=True).channel.value
+        )
+        pkg_format = (
+            "source"
+            if development
+            else (public_config.package_format or "source")
+        )
+        analytics_runtime = create_default_analytics_runtime(
+            _APPDATA_DIR,
+            development=development,
+            api_key=public_config.posthog_project_api_key,
+            host=public_config.posthog_host,
+            app_version=APP_VERSION,
+            release_channel=(
+                "development"
+                if development
+                else (public_config.build_environment or "release")
+            ),
+            distribution_channel=dist_channel,
+            package_format=pkg_format,
+            web_mode=web_mode,
+            test_mode=_TEST_MODE,
+            consent=getattr(_startup_settings, "ANALYTICS_CONSENT", "enabled"),
+            consent_provider=lambda: getattr(
+                _startup_settings, "ANALYTICS_CONSENT", "enabled"
+            ),
+            subscribe_consent_changes=_subscribe_settings_saved,
+        )
+        analytics_runtime.start()
+    except Exception:
+        _boot_log("Analytics runtime unavailable")
+
     # Desktop ownership must be decided before loading the heavyweight Flet
     # runtime. A secondary process can then hand off and exit without starting
     # a second Flutter/Python UI stack.
@@ -637,16 +683,23 @@ def main() -> int:
         development=development
     )
     broker_closed = False
+    analytics_closed = False
     runtime_closed = False
     destroy_started = False
 
     def _close_broker_and_runtime(*, clean: bool) -> None:
-        nonlocal broker_closed, runtime_closed
+        nonlocal broker_closed, analytics_closed, runtime_closed
         try:
             if not broker_closed and result and result.broker:
                 broker_closed = True
                 result.broker.close(timeout_seconds=1.0)
         finally:
+            try:
+                if not analytics_closed and analytics_runtime is not None:
+                    analytics_closed = True
+                    analytics_runtime.close()
+            except Exception:
+                pass
             if not runtime_closed and runtime is not None:
                 runtime_closed = True
                 runtime.mark_phase(AppPhase.SHUTDOWN)
@@ -793,8 +846,11 @@ def main() -> int:
                     else None
                 ),
             }
-            if "diagnostic_recorder" in inspect.signature(app_main).parameters:
+            app_main_params = inspect.signature(app_main).parameters
+            if "diagnostic_recorder" in app_main_params:
                 app_options["diagnostic_recorder"] = runtime
+            if "analytics_runtime" in app_main_params:
+                app_options["analytics_runtime"] = analytics_runtime
             active_controller = app_main(page, **app_options)
             logger.info("App started successfully")
             

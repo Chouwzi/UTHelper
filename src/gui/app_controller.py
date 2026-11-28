@@ -94,6 +94,7 @@ from gui.controllers.startup_visibility import (
     should_hide_startup_window,
 )
 from gui.controllers.autostart_settings import apply_initial_autostart_default
+from gui.controllers.telemetry_bridge import TelemetryBridge
 from core.activity_status import (
     COMPLETED_SUBMISSION_STATUSES,
     extract_canonical_submission_status,
@@ -488,12 +489,15 @@ class AppController:
         force_visible: bool = False,
         error_reporter=None,
         diagnostic_recorder=None,
+        analytics_runtime=None,
     ):
         self.page = page
         self.activation_broker = activation_broker
         self.force_visible = force_visible
         self._unhandled_error_reporter = error_reporter
         self._diagnostic_recorder = diagnostic_recorder
+        self._analytics_runtime = analytics_runtime
+        self._telemetry = TelemetryBridge(analytics_runtime)
         self._cards_lock = threading.Lock()
         self._data_lock = threading.Lock()
         self._exit_cleanup_lock = threading.Lock()
@@ -605,6 +609,9 @@ class AppController:
         self.page.on_disconnect = self._on_disconnect
         self.page.on_keyboard_event = self._on_keyboard_event
         self.page.on_resize = self._on_page_resize
+        self._telemetry.install_page_lifecycle_hook(
+            self.page, self._telemetry_current_screen
+        )
         
         # Intercept the native root-view pop on Android/iOS. This app swaps
         # controls inside one root View, so on_view_pop alone cannot prevent the
@@ -633,6 +640,19 @@ class AppController:
                 needs_initial_sync,
             )
         else:
+            self._telemetry.sync_account_state(
+                username=settings.UTH_USERNAME,
+                has_credentials=self._has_sync_credentials(),
+                account_changed=False,
+            )
+            self._telemetry.on_startup_visibility(
+                is_autostart=bool(
+                    not platform_utils.IS_MOBILE and is_autostart_launch()
+                ),
+                force_visible=bool(self.force_visible),
+                window_hidden_or_minimized=self._is_window_hidden_or_minimized(),
+                screen="home",
+            )
             if not needs_initial_sync:
                 hydration_started = self._schedule_cached_detail_hydration(
                     has_cached_snapshot
@@ -646,6 +666,73 @@ class AppController:
                 self._safe_run_task(self._show_login_dialog)
             else:
                 self._safe_run_task(self._load_data_async, "startup")
+
+    def apply_analytics_consent(self, consent: str) -> None:
+        """SettingsView seam: apply live analytics consent change."""
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.apply_consent(consent)
+
+    def reset_analytics_state(self) -> None:
+        """SettingsView seam: clear local analytics spool and rotate UUID."""
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.reset_state()
+
+    def _telemetry_current_screen(self) -> str:
+        quiz_player = getattr(self, "quiz_player_view", None)
+        if quiz_player is not None and getattr(quiz_player, "visible", False):
+            return "quiz_player"
+        detail = getattr(self, "detail_view", None)
+        if detail is not None and getattr(detail, "visible", False):
+            return "detail"
+        return self._current_section()
+
+    def _nav_shell_telemetry_source(self) -> str:
+        nav_shell = getattr(self, "_nav_shell", None)
+        if nav_shell is not None and bool(getattr(nav_shell, "rail_visible", False)):
+            return "rail"
+        return "tab_bar"
+
+    def _on_screen_telemetry(self, screen: str, nav_source: str) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_screen_viewed(screen, nav_source)
+
+    def _on_submission_telemetry(
+        self, action: str, outcome: str, file_count: int = 1
+    ) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_submission_action(
+                action=action,
+                outcome=outcome,
+                file_count=file_count,
+            )
+
+    def _on_grades_telemetry(self, action: str) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_grades_interaction(action)
+
+    def _on_quiz_telemetry(
+        self,
+        action: str,
+        source_site: str,
+        duration_seconds: float | None = None,
+    ) -> None:
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is None:
+            return
+        if action == "player_started":
+            telemetry.record_screen_viewed("quiz_player", "card_tap")
+        telemetry.record_quiz_action(
+            action=action,
+            source_site=source_site,
+            duration_seconds=duration_seconds,
+        )
+        if action == "player_closed":
+            telemetry.record_screen_viewed(self._telemetry_current_screen(), "back")
 
     def _diag_screen(self, screen: str) -> None:
         recorder = getattr(self, "_diagnostic_recorder", None)
@@ -1605,6 +1692,15 @@ class AppController:
             clear_ui=identity_changed,
             preserve_login_state=True,
         )
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.sync_account_state(
+                username=new_username,
+                has_credentials=self._has_sync_credentials(),
+                account_changed=bool(old_username and account_switched_or_logged_out),
+            )
+            if not self._is_window_hidden_or_minimized() and not telemetry.foreground_visible:
+                telemetry.on_window_restored(screen=self._telemetry_current_screen())
         if do_android_logout or is_demo_account(settings.UTH_USERNAME):
             mobile_bridge = getattr(self, "_android_background", None)
             if mobile_bridge is not None and getattr(mobile_bridge, "available", False):
@@ -1778,6 +1874,13 @@ class AppController:
             clear_ui=True,
             mark_logged_out=True,
         )
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.sync_account_state(
+                username="",
+                has_credentials=False,
+                account_changed=True,
+            )
         if getattr(getattr(self, "settings_view", None), "visible", False):
             close_settings = getattr(self, "_close_settings", None)
             if callable(close_settings):
@@ -2272,9 +2375,13 @@ class AppController:
             except Exception:
                 logger.debug("App WebView suspend skipped", exc_info=True)
 
-    def _on_window_restored(self) -> None:
+    def _on_window_restored(self, *, notify_telemetry: bool = True) -> None:
         if self._is_window_hidden_or_minimized():
             return
+        if notify_telemetry:
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.on_window_restored(screen=self._telemetry_current_screen())
         pane = getattr(self, "_app_webview_pane", None)
         host = getattr(self, "_app_webview_host", None)
         if pane is None or host is None or not getattr(host, "visible", False):
@@ -2301,6 +2408,9 @@ class AppController:
                     pass
             self._suspend_app_webview_for_window_hide()
             self.page.window.visible = False
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.on_window_hidden(to_tray=True)
             self.page.update()
             # H-01: Show tray balloon the first time so user knows app is still running
             if not getattr(self, "_tray_balloon_shown", False):
@@ -2359,6 +2469,13 @@ class AppController:
         }
         if ev_type in hide_types or ev_data in {"minimize", "hide"}:
             self._suspend_app_webview_for_window_hide()
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                is_hide = (
+                    ev_type == getattr(win_ev_cls, "HIDE", object())
+                    or ev_data == "hide"
+                )
+                telemetry.on_window_hidden(to_tray=bool(is_hide))
         elif ev_type in restore_types or ev_data in {
             "restore",
             "show",
@@ -2367,7 +2484,11 @@ class AppController:
             "maximize",
             "unmaximize",
         }:
-            self._on_window_restored()
+            is_resize_only = (
+                ev_type == getattr(win_ev_cls, "RESIZE", object())
+                or ev_data == "resize"
+            )
+            self._on_window_restored(notify_telemetry=not is_resize_only)
 
     # ------------------------------------------------------------------
     # Responsive desktop layout
@@ -2484,6 +2605,9 @@ class AppController:
         """Minimize from the custom desktop header without hiding to tray."""
         self._suspend_app_webview_for_window_hide()
         self.page.window.minimized = True
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.on_window_hidden(to_tray=False)
         self.page.update()
 
     async def _destroy_window(self) -> None:
@@ -2551,6 +2675,9 @@ class AppController:
             if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not getattr(e, "alt", False)):
                 toggle_expand = getattr(courses_view, "toggle_pane3_expanded", None)
                 if callable(toggle_expand):
+                    telemetry = getattr(self, "_telemetry", None)
+                    if telemetry is not None:
+                        telemetry.record_interaction(screen="courses")
                     toggle_expand()
                     return
             if (ctrl and key.lower() == "k") or (
@@ -2560,6 +2687,9 @@ class AppController:
             ):
                 focus_search = getattr(courses_view, "focus_search", None)
                 if callable(focus_search):
+                    telemetry = getattr(self, "_telemetry", None)
+                    if telemetry is not None:
+                        telemetry.record_interaction(screen="courses")
                     res = focus_search()
                     if inspect.isawaitable(res):
                         await res
@@ -2630,6 +2760,10 @@ class AppController:
             self._sweep_closed_modal_dialogs()
             return True
         handled = False
+        vm = getattr(self, "view_manager", None)
+        set_nav_src = getattr(vm, "set_next_nav_source", None)
+        if callable(set_nav_src):
+            set_nav_src("back")
         course_grades_view = getattr(self, "course_grades_view", None)
         if self.settings_view.visible:
             await self.settings_view._handle_back(None)
@@ -3426,6 +3560,7 @@ class AppController:
             account_id_provider=lambda: settings.UTH_USERNAME,
             client_provider=self._quiz_client_for_site,
             on_auth_required=self._show_quiz_auth_dialog,
+            on_telemetry_quiz_action=self._on_quiz_telemetry,
         )
         orig_open_quiz_activity = getattr(self.quiz_player_view, "open_activity", None)
         if callable(orig_open_quiz_activity):
@@ -3469,6 +3604,8 @@ class AppController:
             on_open_url=self._open_url_in_app,
             on_open_external=self._open_url_external,
             get_account_epoch=lambda: getattr(self, "_account_epoch", 0),
+            on_telemetry_submission=self._on_submission_telemetry,
+            on_telemetry_quiz_action=self._on_quiz_telemetry,
         )
         self.calendar_view = CalendarView(
             self.page,
@@ -3479,6 +3616,7 @@ class AppController:
             on_open_url=self._open_url_in_app,
             on_open_external=self._open_url_external,
         )
+        self._telemetry.attach_calendar_view(self.calendar_view)
         schedule_view = getattr(self.calendar_view, "_schedule_view", None)
         if schedule_view is not None:
             try:
@@ -3511,6 +3649,8 @@ class AppController:
         # and Settings -> Tài khoản login route through unified AppController isolation.
         self.settings_view.on_logout = self._handle_logout_async
         self.settings_view.on_account_login = self._handle_settings_account_login_async
+        self.settings_view.on_analytics_consent_changed = self.apply_analytics_consent
+        self.settings_view.on_reset_analytics = self.reset_analytics_state
 
         self.grade_overview_view = GradeOverviewView(
             on_close=lambda: self._safe_run_task(self._close_grades),
@@ -3520,6 +3660,7 @@ class AppController:
             on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
             course_grades_lookup=self._lookup_moodle_course_grades_cached,
             course_grades_async_lookup=self._fetch_moodle_course_grades_async,
+            on_telemetry_interaction=self._on_grades_telemetry,
         )
         self.course_grades_view = CoursesView(
             on_close=lambda: self._safe_run_task(self._close_course_grades),
@@ -3593,6 +3734,7 @@ class AppController:
             account_namespace=courses_namespace,
             webview_auth_service=self._webview_auth_service,
             account_epoch_getter=lambda: getattr(self, "_account_epoch", 0),
+            telemetry_bridge=self._telemetry,
         )
         if sys.platform == "win32" and not bool(getattr(self.page, "web", False)):
             from gui.components.courses.embedded_webview_host import (
@@ -3740,6 +3882,7 @@ class AppController:
             detail_switcher=self.detail_switcher,
             empty_detail=self._empty_detail,
             on_destination_change=self._nav_shell.set_active,
+            on_screen_telemetry=self._on_screen_telemetry,
         )
         body_with_rail = ft.Row(
             controls=[self._nav_shell.rail_slot, main_stack],
@@ -4071,6 +4214,10 @@ class AppController:
         await self._perform_destination_navigation(key)
 
     async def _perform_destination_navigation(self, key: str) -> None:
+        vm = getattr(self, "view_manager", None)
+        set_nav_src = getattr(vm, "set_next_nav_source", None)
+        if callable(set_nav_src) and getattr(vm, "_pending_nav_source", None) is None:
+            set_nav_src(self._nav_shell_telemetry_source())
         if key == "home":
             self.view_manager.show_dashboard()
             if hasattr(self, "_diag_screen"):
@@ -4364,6 +4511,12 @@ class AppController:
         if site_kind in {"courses", "thnn", "portal"}:
             validated = _normalize_uth_target_url(
                 validated, has_credentials=has_creds
+            )
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_course_activity_opened(
+                activity_kind="in_app_webview",
+                source_site=site_kind,
             )
 
         host = getattr(self, "_app_webview_host", None)
@@ -5053,9 +5206,28 @@ class AppController:
             identity_getter=lambda: getattr(self, "_settings_identity", None),
             android_bridge=getattr(self, "_android_background", None),
         )
+        if not effective_clear_only and bool(settings.NOTIFY_CLASS_SCHEDULE_ENABLED):
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.record_notification_summary(
+                    kind="class_schedule",
+                    delivered_count=0,
+                    scheduled_count=len(effective_sessions or ()),
+                    had_channel_failure=False,
+                    notifier_manager=manager,
+                    android_bridge=getattr(self, "_android_background", None),
+                )
 
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
         self._today_schedule_state = state
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.on_today_schedule_state(
+                state,
+                manual_requested=bool(
+                    getattr(self, "_manual_today_schedule_requested", False)
+                ),
+            )
         if state.status is ScheduleLoadStatus.READY and state.snapshot is not None:
             # Reconcile from the Portal snapshot already fetched for the dashboard.
             # The platform receives only the scheduled reminder payload, never credentials.
@@ -5156,16 +5328,25 @@ class AppController:
         self.active_urgency = key
         self.urgency_filter_menu.set_selected(key)
         self._refresh_ui()
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_filter_applied("home", "urgency")
 
     async def _set_type(self, key: str):
         self.active_type = key
         self.type_filter_menu.set_selected(key)
         self._refresh_ui()
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_filter_applied("home", "activity_type")
 
     async def _set_course(self, course_name: str):
         self.active_course = course_name
         self.course_filter_menu.set_selected(course_name)
         self._refresh_ui()
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_filter_applied("home", "course_select")
 
     def _apply_settings_filter(self, data: list) -> list:
         result = []
@@ -5228,10 +5409,17 @@ class AppController:
         self.course_filter_menu.set_selected("all")
         self._sync_filter_controls_state()
         self._refresh_ui()
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.record_filter_applied("home", "reset")
 
     def _on_search(self, e):
         self.active_search = (e.control.value or "").strip()
         self._sync_filter_controls_state()
+        if self.active_search:
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.record_filter_applied("home", "search_used")
         # Debounce: 150ms - fast enough to feel instant, prevents excessive renders
         if hasattr(self, '_search_task') and self._search_task:
             self._search_task.cancel()
@@ -5765,6 +5953,20 @@ class AppController:
             if not platform_utils.IS_IOS:
                 await self._initialize_android_background()
 
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            telemetry.sync_account_state(
+                username=settings.UTH_USERNAME,
+                has_credentials=self._has_sync_credentials(),
+                account_changed=False,
+            )
+            telemetry.on_startup_visibility(
+                is_autostart=False,
+                force_visible=bool(getattr(self, "force_visible", False)),
+                window_hidden_or_minimized=self._is_window_hidden_or_minimized(),
+                screen="home",
+            )
+
         if not needs_initial_sync:
             hydration_started = self._schedule_cached_detail_hydration(
                 has_cached_snapshot
@@ -5920,6 +6122,9 @@ class AppController:
                 self._update_footer()
                 self.page.update()
 
+        import time as _sync_time
+
+        sync_mono_start = _sync_time.monotonic()
         try:
             import time
             fetch_start_time = time.time()
@@ -6137,6 +6342,24 @@ class AppController:
                             schedule_result.cancelled,
                             schedule_result.failed,
                         )
+                        telemetry_notif = getattr(self, "_telemetry", None)
+                        if telemetry_notif is not None and (
+                            dispatch_result.delivered > 0
+                            or schedule_result.scheduled > 0
+                            or schedule_result.failed > 0
+                            or bool(dispatch_result.failed_channels)
+                        ):
+                            telemetry_notif.record_notification_summary(
+                                kind="activity_deadline",
+                                delivered_count=dispatch_result.delivered,
+                                scheduled_count=schedule_result.scheduled,
+                                had_channel_failure=bool(
+                                    dispatch_result.failed_channels
+                                    or schedule_result.failed > 0
+                                ),
+                                notifier_manager=self.notifier,
+                                android_bridge=self._android_background,
+                            )
                     except Exception as e:
                         logger.error(f"[UTHelper] Dispatcher lỗi: {e}")
 
@@ -6168,6 +6391,15 @@ class AppController:
             self._diag_breadcrumb(
                 "refresh", "succeeded", "moodle", duration=duration
             )
+            telemetry_sync = getattr(self, "_telemetry", None)
+            if telemetry_sync is not None:
+                telemetry_sync.record_sync_completed(
+                    provider="activities",
+                    trigger=trigger,
+                    outcome="succeeded",
+                    duration_seconds=_sync_time.monotonic() - sync_mono_start,
+                    item_count=total_count,
+                )
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
         except UthMaintenanceError as maint_exc:
@@ -6227,6 +6459,15 @@ class AppController:
             self._handle_uth_maintenance(
                 maint_exc.notice, user_initiated=user_initiated
             )
+            telemetry_sync = getattr(self, "_telemetry", None)
+            if telemetry_sync is not None:
+                telemetry_sync.record_sync_completed(
+                    provider="activities",
+                    trigger=trigger,
+                    outcome="maintenance",
+                    duration_seconds=_sync_time.monotonic() - sync_mono_start,
+                    item_count=len(self.all_data),
+                )
         except Exception as exc:
             if not _epoch_is_current():
                 return
@@ -6269,6 +6510,25 @@ class AppController:
                 self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
                 self.error_state.visible = True
                 self._set_sync_status("error", "Lỗi kết nối server")
+            telemetry_sync = getattr(self, "_telemetry", None)
+            if telemetry_sync is not None:
+                exc_text = str(exc).casefold()
+                if cached_data:
+                    sync_outcome = "offline_cached"
+                elif any(
+                    tok in exc_text
+                    for tok in ("auth", "credential", "login", "401", "403", "token")
+                ):
+                    sync_outcome = "auth_error"
+                else:
+                    sync_outcome = "failed"
+                telemetry_sync.record_sync_completed(
+                    provider="activities",
+                    trigger=trigger,
+                    outcome=sync_outcome,
+                    duration_seconds=_sync_time.monotonic() - sync_mono_start,
+                    item_count=len(cached_data) if cached_data else 0,
+                )
         finally:
             if (
                 getattr(self, "_active_sync_epoch", None) == account_epoch
@@ -6422,6 +6682,12 @@ class AppController:
                 )
             return
         if state == "requires_safe_exam_browser":
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.record_quiz_action(
+                    action="player_blocked_seb",
+                    source_site=course.source,
+                )
             overlay = self._active_course_quiz_overlay(activity)
             if overlay is not None:
                 overlay.set_runtime_notice(
@@ -6431,6 +6697,12 @@ class AppController:
                 self._open_url_external(url)
             return
         if target is None or state in {"player_unavailable", "unsupported_runtime"}:
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.record_quiz_action(
+                    action="player_unavailable",
+                    source_site=course.source,
+                )
             if url and getattr(self, "_courses_coordinator", None) is not None:
                 self._courses_coordinator.open_in_app_webview(
                     course.source, mod.name or "Bài kiểm tra", url, tag=f"webview:quiz:{mod.cmid}"
@@ -6713,6 +6985,10 @@ class AppController:
         self._sync_rail_active()
 
         # Load academic radar data from daily cache / Portal in background thread
+        import time as _grades_time
+
+        grades_mono_start = _grades_time.monotonic()
+        grades_trigger = "manual" if force_refresh else "startup_fg"
         try:
             from core.academic_radar import AcademicGradeService
             service = getattr(self, "_academic_grade_service", None)
@@ -6753,6 +7029,22 @@ class AppController:
                     self._handle_uth_maintenance(
                         svc_maint, user_initiated=force_refresh
                     )
+                telemetry_grades = getattr(self, "_telemetry", None)
+                if telemetry_grades is not None:
+                    course_total = sum(
+                        len(getattr(s, "courses", ()) or ()) for s in semesters
+                    )
+                    telemetry_grades.record_sync_completed(
+                        provider="academic_grades",
+                        trigger=grades_trigger,
+                        outcome=(
+                            "maintenance"
+                            if isinstance(svc_maint, MaintenanceNotice)
+                            else "succeeded"
+                        ),
+                        duration_seconds=_grades_time.monotonic() - grades_mono_start,
+                        item_count=course_total,
+                    )
             else:
                 # Fallback to Moodle grades if Portal returned no semesters
                 userid = await asyncio.to_thread(
@@ -6760,6 +7052,7 @@ class AppController:
                 )
                 if not _is_current():
                     return
+                fallback_count = 0
                 if userid:
                     courses_grades, grade_items = await asyncio.to_thread(
                         self.orchestrator.moodle_service.fetch_all_grades, userid
@@ -6772,10 +7065,24 @@ class AppController:
                     if moodle_semesters:
                         profiles = service.get_radar_profiles(moodle_semesters)
                         self.view_manager.show_academic_radar_data(moodle_semesters, profiles)
+                        fallback_count = sum(
+                            len(getattr(s, "courses", ()) or ())
+                            for s in moodle_semesters
+                        )
                     else:
                         self.view_manager.show_grades_data(courses_grades or [], grade_items or {})
+                        fallback_count = len(courses_grades or ())
                 else:
                     self.view_manager.show_academic_radar_data([], [])
+                telemetry_grades = getattr(self, "_telemetry", None)
+                if telemetry_grades is not None:
+                    telemetry_grades.record_sync_completed(
+                        provider="academic_grades",
+                        trigger=grades_trigger,
+                        outcome="succeeded",
+                        duration_seconds=_grades_time.monotonic() - grades_mono_start,
+                        item_count=fallback_count,
+                    )
         except UthMaintenanceError as maint_exc:
             if not _is_current():
                 return
@@ -6790,6 +7097,15 @@ class AppController:
             self._handle_uth_maintenance(
                 maint_exc.notice, user_initiated=force_refresh
             )
+            telemetry_grades = getattr(self, "_telemetry", None)
+            if telemetry_grades is not None:
+                telemetry_grades.record_sync_completed(
+                    provider="academic_grades",
+                    trigger=grades_trigger,
+                    outcome="maintenance",
+                    duration_seconds=_grades_time.monotonic() - grades_mono_start,
+                    item_count=0,
+                )
         except Exception as e:
             if not _is_current():
                 return
@@ -6797,6 +7113,15 @@ class AppController:
             self.view_manager.show_grades_error(
                 "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
             )
+            telemetry_grades = getattr(self, "_telemetry", None)
+            if telemetry_grades is not None:
+                telemetry_grades.record_sync_completed(
+                    provider="academic_grades",
+                    trigger=grades_trigger,
+                    outcome="failed",
+                    duration_seconds=_grades_time.monotonic() - grades_mono_start,
+                    item_count=0,
+                )
 
     async def _show_course_grades(self, force_refresh: bool = False):
         """Mở danh sách môn & điểm/chuyên cần từ màn hình Bảng điểm."""
@@ -7779,6 +8104,13 @@ class AppController:
                 clear_ui=True,
                 mark_logged_out=True,
             )
+            telemetry = getattr(self, "_telemetry", None)
+            if telemetry is not None:
+                telemetry.sync_account_state(
+                    username=new_username,
+                    has_credentials=self._has_sync_credentials(),
+                    account_changed=account_switched_or_logged_out,
+                )
 
         load_theme_from_settings()
         set_page_theme(self.page)
@@ -8394,6 +8726,10 @@ class AppController:
                 close_ch = getattr(channel, "close", None)
                 if callable(close_ch):
                     self._run_shutdown_step("notifier_channel.close", close_ch)
+
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            self._run_shutdown_step("telemetry.close", telemetry.close)
 
         orchestrator = getattr(self, "orchestrator", None)
         for client_attr in ("client", "thnn_client"):

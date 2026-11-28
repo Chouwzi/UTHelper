@@ -2,7 +2,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import parse_qsl, urlsplit
 
 # Patch path for direct execution / Flet preview compatibility
@@ -112,6 +112,8 @@ class DetailView(ft.Container):
         on_open_url=None,
         on_open_external=None,
         get_account_epoch=None,
+        on_telemetry_submission=None,
+        on_telemetry_quiz_action=None,
         *,
         embedded_in_pane: bool = False,
     ):
@@ -126,6 +128,8 @@ class DetailView(ft.Container):
             on_open_url,
             on_open_external,
             get_account_epoch,
+            on_telemetry_submission=on_telemetry_submission,
+            on_telemetry_quiz_action=on_telemetry_quiz_action,
             embedded_in_pane=embedded_in_pane,
         )
         self._init_controls()
@@ -144,6 +148,8 @@ class DetailView(ft.Container):
         on_open_external=None,
         get_account_epoch=None,
         *,
+        on_telemetry_submission=None,
+        on_telemetry_quiz_action=None,
         embedded_in_pane: bool = False,
     ):
         self._page          = page
@@ -161,6 +167,8 @@ class DetailView(ft.Container):
         self._on_open_url = on_open_url
         self._on_open_external = on_open_external
         self._get_account_epoch = get_account_epoch
+        self._on_telemetry_submission = on_telemetry_submission
+        self._on_telemetry_quiz_action = on_telemetry_quiz_action
         self._quiz_launch_target = None
         self._selected_files = []          
         self._is_uploading  = False
@@ -1501,11 +1509,15 @@ class DetailView(ft.Container):
                     "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
                 self._quiz_runtime_notice.visible = True
+                DetailView._emit_quiz_telemetry(self, "player_unavailable", data)
+            elif target is not None and player_state == "unsupported_runtime":
+                DetailView._emit_quiz_telemetry(self, "player_unavailable", data)
             elif player_state == "requires_safe_exam_browser":
                 self._quiz_runtime_notice.value = (
                     "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt."
                 )
                 self._quiz_runtime_notice.visible = True
+                DetailView._emit_quiz_telemetry(self, "player_blocked_seb", data)
             elif player_state == "missing_account":
                 self._quiz_auth_btn.visible = True
 
@@ -2405,6 +2417,65 @@ class DetailView(ft.Container):
         if pending is not None:
             await self._execute_file_mutation(*pending)
 
+    @staticmethod
+    def _resolve_quiz_source_site(data: Mapping[str, Any] | None) -> str:
+        if isinstance(data, Mapping):
+            site_id = str(data.get("site_identity") or "").strip().casefold()
+            if site_id == "thnn" or str(data.get("source") or "") == "thnn_sync":
+                return "thnn"
+            raw_url = str(data.get("url") or "").strip()
+            if raw_url:
+                host = (urlsplit(raw_url).hostname or "").casefold()
+                if host == "thnn.ut.edu.vn":
+                    return "thnn"
+        return "courses"
+
+    def _emit_quiz_telemetry(
+        self, action: str, data: Mapping[str, Any] | None = None
+    ) -> None:
+        cb = getattr(self, "_on_telemetry_quiz_action", None)
+        if not callable(cb):
+            return
+        try:
+            source_site = DetailView._resolve_quiz_source_site(
+                data if data is not None else getattr(self, "_current_data", None)
+            )
+            cb(action, source_site)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _submission_telemetry_action(operation: MutationOperation) -> str:
+        if operation is MutationOperation.ADD:
+            return "upload_add"
+        if operation is MutationOperation.REPLACE:
+            return "upload_replace"
+        if operation in (MutationOperation.REMOVE, MutationOperation.CLEAR):
+            return "delete_file"
+        return "rename_file"
+
+    @staticmethod
+    def _submission_telemetry_outcome(result: SubmissionMutationResult) -> str:
+        if result.ok:
+            return "succeeded"
+        issue = getattr(result, "issue", None)
+        code = str(getattr(issue, "code", "") or "").casefold()
+        msg = str(getattr(issue, "message", "") or "").casefold()
+        if "maintenance" in code or "bảo trì" in msg:
+            return "maintenance"
+        return "failed"
+
+    def _emit_submission_telemetry(
+        self, action: str, outcome: str, file_count: int = 1
+    ) -> None:
+        cb = getattr(self, "_on_telemetry_submission", None)
+        if not callable(cb):
+            return
+        try:
+            cb(action, outcome, max(1, int(file_count)))
+        except Exception:
+            pass
+
     async def _execute_file_mutation(
         self,
         operation: MutationOperation,
@@ -2442,6 +2513,13 @@ class DetailView(ft.Container):
             new_filepath=new_filepath,
         )
         selected_files = DetailView._selected_submission_files(self)
+        telemetry_action = DetailView._submission_telemetry_action(operation)
+        if operation in (MutationOperation.ADD, MutationOperation.REPLACE):
+            telemetry_file_count = max(1, len(selected_files) or len(self._selected_files))
+        elif operation in (MutationOperation.REMOVE, MutationOperation.CLEAR):
+            telemetry_file_count = max(1, len(remove_identities))
+        else:
+            telemetry_file_count = 1
         self._is_uploading = True
         self._upload_progress.visible = True
         self._upload_progress.value = None
@@ -2461,6 +2539,14 @@ class DetailView(ft.Container):
                 account_generation, expected_epoch
             ):
                 return
+            telemetry_outcome = DetailView._submission_telemetry_outcome(result)
+            DetailView._emit_submission_telemetry(
+                self, telemetry_action, telemetry_outcome, telemetry_file_count
+            )
+            if finalize and result.ok:
+                DetailView._emit_submission_telemetry(
+                    self, "finalize", "succeeded", telemetry_file_count
+                )
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
@@ -2479,16 +2565,25 @@ class DetailView(ft.Container):
                     target_url,
                     expected_account_epoch=expected_epoch,
                 )
-        except Exception:
+        except Exception as exc:
             logger.error("Submission mutation failed unexpectedly")
             if self._is_account_context_current(
                 account_generation, expected_epoch
-            ) and self._is_current_mutation_context(
-                generation, target_url, target_course_id
             ):
-                self._show_upload_status(
-                    "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                exc_outcome = (
+                    "maintenance"
+                    if "maintenance" in type(exc).__name__.casefold()
+                    else "failed"
                 )
+                DetailView._emit_submission_telemetry(
+                    self, telemetry_action, exc_outcome, telemetry_file_count
+                )
+                if self._is_current_mutation_context(
+                    generation, target_url, target_course_id
+                ):
+                    self._show_upload_status(
+                        "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                    )
         finally:
             if getattr(
                 self, "_account_generation", 0
@@ -2526,6 +2621,9 @@ class DetailView(ft.Container):
         expected_epoch = self._effective_expected_account_epoch()
         target_url = url
         target_course_id = course_id
+        telemetry_file_count = max(
+            1, len(getattr(self, "_submitted_files", ()) or ())
+        )
         finalize_intent = FinalizeSubmissionIntent(
             accept_statement=(
                 getattr(self._submission_statement, "value", False) is True
@@ -2550,6 +2648,12 @@ class DetailView(ft.Container):
                 account_generation, expected_epoch
             ):
                 return
+            DetailView._emit_submission_telemetry(
+                self,
+                "finalize",
+                DetailView._submission_telemetry_outcome(result),
+                telemetry_file_count,
+            )
             if self._is_current_mutation_context(
                 generation, target_url, target_course_id
             ):
@@ -2565,16 +2669,25 @@ class DetailView(ft.Container):
                     target_url,
                     expected_account_epoch=expected_epoch,
                 )
-        except Exception:
+        except Exception as exc:
             logger.error("Submission finalization failed unexpectedly")
             if self._is_account_context_current(
                 account_generation, expected_epoch
-            ) and self._is_current_mutation_context(
-                generation, target_url, target_course_id
             ):
-                self._show_upload_status(
-                    "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                exc_outcome = (
+                    "maintenance"
+                    if "maintenance" in type(exc).__name__.casefold()
+                    else "failed"
                 )
+                DetailView._emit_submission_telemetry(
+                    self, "finalize", exc_outcome, telemetry_file_count
+                )
+                if self._is_current_mutation_context(
+                    generation, target_url, target_course_id
+                ):
+                    self._show_upload_status(
+                        "Không thể đồng bộ bài nộp với Moodle.", C.CRITICAL
+                    )
         finally:
             if getattr(
                 self, "_account_generation", 0
