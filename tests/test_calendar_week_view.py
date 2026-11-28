@@ -44,6 +44,24 @@ def test_seeding_month_and_week_modes_always_builds_three_slots():
     )
 
 
+@pytest.mark.parametrize("target_mode", ["week", "month"])
+def test_schedule_tab_is_unhighlighted_during_calendar_mode_page_update(target_mode):
+    page = _page_stub()
+    view = CalendarView(page)
+    view._toggle_view_mode("schedule")
+
+    update_calls = []
+
+    def assert_schedule_tab_is_clear_during_render(*_controls):
+        assert view._mode_schedule_btn.bgcolor == "transparent"
+        update_calls.append(target_mode)
+
+    page.update = assert_schedule_tab_is_clear_during_render
+    view._toggle_view_mode(target_mode)
+
+    assert update_calls
+
+
 def test_page_change_advances_month_once_and_recenters():
     view = CalendarView(_page_stub())
     view._toggle_view_mode("month")

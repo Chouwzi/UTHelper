@@ -2744,6 +2744,22 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - Android Gradle Robolectric unit tests (`extensions/flet_uth_background_sync` `:testDebugUnitTest`): **BUILD SUCCESSFUL**.
   - Full `pytest` suite (`tests`, `extensions/flet_uth_quiz/tests`, `extensions/flet_uth_background_sync/tests`): **3604 passed, 27 skipped, 0 failed**.
 
+## PR #143 Calendar Schedule Highlight Regression (2026-11-27)
+
+- Added a regression test that hooks `page.update()` and verifies the schedule
+  tab is already transparent while rendering both Week and Month after leaving
+  Schedule mode.
+- **Verification (local Windows, Python 3.12)**:
+  - `python -m pytest tests/test_calendar_week_view.py -q --tb=short`: **45 passed**.
+  - `ruff check src tests`: **All checks passed**.
+  - `python -m pytest tests -q --tb=short`: **3436 passed, 38 skipped, 3 failed**.
+    The failures were in unrelated cache/Quiz tests:
+    `test_default_user_data_dir_and_filename_sanitization`,
+    `test_live_safe_exam_browser_requirement_preserves_browser_recovery`, and
+    `test_late_old_session_error_cannot_clear_new_open_pending_cookies`.
+- After syncing `develop` on 2026-11-28, the calendar-focused suite passed again:
+  **52 passed**; `ruff check src tests`: **All checks passed**.
+
 ## Calendar Week-First Default & Schedule Month Date-Picker Popup (2026-11-28)
 
 - **Branch & Scope**: `feature/schedule-month-date-picker` — `src/gui/components/{calendar_view,schedule_week_view}.py`, `tests/{test_calendar_week_view,test_schedule_week_view,test_theme_propagation}.py`, `docs/releases/2.7.0.md`, `docs/architecture/refactoring-log.md`.
@@ -2752,5 +2768,5 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - **Month Date-Picker Dialog on `ScheduleWeekView` (`_show_month_date_picker`)**: Made `ScheduleWeekView._week_label_box` interactive (`44px` touch target, `Semantics` button, subtle chevron indicator refreshed in `update_theme()`) to open a Monday-first Vietnamese month calendar `AlertDialog` (`Tháng M, YYYY`, `<`/`>` month navigation with year rollover, active week band highlight, selected day + today highlight, cached class dots, `"Hôm nay"` shortcut, and `Escape` dismiss) that jumps directly to any chosen date/week on 1 click (`self._go(target)`).
 - **Verification**:
   - `ruff check src tests`: **All checks passed!**.
-  - Full `pytest` suite (`tests/`): **3538 passed, 26 skipped, 0 failed** (3,607 passed across root + extension test suites).
+  - Full `pytest` suite (`tests/`): **3540 passed, 26 skipped, 0 failed** (3,609 passed across root + extension test suites).
 
