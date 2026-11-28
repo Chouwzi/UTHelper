@@ -20,7 +20,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # `config` needs pydantic + OS dirs; the roadmap only needs these two names.
-if "config" not in sys.modules:
+# Installed per test session in setUpModule (not at import time) so importing this
+# module never leaks a fake ``config`` into the other test modules.
+_FAKE_CONFIG: types.ModuleType | None = None
+
+
+def _install_fake_config() -> None:
+    global _FAKE_CONFIG
     _cfg = types.ModuleType("config")
     _cfg.settings = types.SimpleNamespace(
         PORTAL_API_BASE="https://portal-publicapp.ut.edu.vn/api/v1",
@@ -28,6 +34,19 @@ if "config" not in sys.modules:
     )
     _cfg.get_data_dir = lambda: Path(tempfile.gettempdir())
     sys.modules["config"] = _cfg
+    _FAKE_CONFIG = _cfg
+
+
+def setUpModule() -> None:
+    if "config" not in sys.modules:
+        _install_fake_config()
+
+
+def tearDownModule() -> None:
+    global _FAKE_CONFIG
+    if _FAKE_CONFIG is not None:
+        sys.modules.pop("config", None)
+        _FAKE_CONFIG = None
 
 from core.learning_roadmap.builder import attempt_outcome, build_snapshot  # noqa: E402
 from core.learning_roadmap.filtering import (  # noqa: E402
