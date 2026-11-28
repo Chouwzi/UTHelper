@@ -1859,13 +1859,13 @@ class ScheduleWeekView(ft.Container):
             status_watermark = ft.Container(
                 content=ft.Text(
                     status_label,
-                    size=16,
+                    size=18 if is_makeup_session else 16,
                     weight=ft.FontWeight.W_800,
                     color=ft.Colors.with_opacity(0.70, status_color),
                     text_align=ft.TextAlign.CENTER,
                     no_wrap=True,
                 ),
-                width=120,
+                width=148 if is_makeup_session else 120,
                 height=24,
                 alignment=ft.Alignment.CENTER,
                 rotate=ft.Rotate(
