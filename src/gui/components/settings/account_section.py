@@ -99,6 +99,22 @@ def init_account_controls(view):
         ),
         height=44,
     )
+    view._open_profile_btn = ft.OutlinedButton(
+        "Hồ sơ & Học phí",
+        icon=ft.Icons.BADGE_OUTLINED,
+        on_click=lambda _event: (
+            view._on_open_profile()
+            if callable(getattr(view, "_on_open_profile", None))
+            else None
+        ),
+        style=ft.ButtonStyle(
+            color=C.ACCENT,
+            side=ft.BorderSide(1, C.ACCENT),
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=12,
+        ),
+        height=44,
+    )
     # Thanh ProgressBar hiển thị trạng thái đang kiểm tra (mặc định ẩn)
     view._test_loading_bar = ft.ProgressBar(color=C.ACCENT, bgcolor=C.SURFACE, visible=False)
     # Văn bản & icon thông báo kết quả kiểm tra đăng nhập
@@ -125,6 +141,7 @@ def build_account_section(view) -> ft.Control:
             view._test_login_status_row,
             view._test_login_btn,
             view._logout_btn,
+            view._open_profile_btn,
         ],
         spacing=12,
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,

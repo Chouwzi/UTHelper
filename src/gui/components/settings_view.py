@@ -53,9 +53,9 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import ClassScheduleLeadHoursError, SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None, on_logout=None, on_account_login=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None, on_logout=None, on_account_login=None, on_open_profile=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url, on_logout, on_account_login)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url, on_logout, on_account_login, on_open_profile)
         self._init_controls()
         self._init_layout()
         self._rendered_palette = semantic_palette()
@@ -66,7 +66,7 @@ class SettingsView(ft.Container):
             return profile
         return resolve_distribution_channel()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None, on_logout=None, on_account_login=None):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None, on_logout=None, on_account_login=None, on_open_profile=None):
         self._page    = page
         self._orchestrator = orchestrator
         self._on_close_cb = on_close
@@ -74,6 +74,7 @@ class SettingsView(ft.Container):
         self.on_save = on_saved
         self.on_logout = on_logout
         self.on_account_login = on_account_login
+        self._on_open_profile = on_open_profile
         self._on_test_tray = on_test_tray
         self._on_test_mobile = on_test_mobile
         self._on_test_tele = on_test_tele

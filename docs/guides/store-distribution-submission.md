@@ -139,7 +139,8 @@ UTHelper is an independent student study companion for Ho Chi Minh City Universi
    - Tab 3 ("Lịch"): Monthly assignment calendar and interactive weekly class timetable with session details and course syllabi.
    - Tab 4 ("Bảng điểm"): Multi-semester transcript, 6-axis Academic Radar chart, credit progress, and target GPA planner.
    - Tab 5 ("Cài đặt"): Theme presets, notification preferences, privacy controls, and account switching.
-4. Note: File submission mutations and live external `*.ut.edu.vn` LMS WebView/Quiz launches are intentionally read-only in Demo Mode and display a clear informational notice so reviewers and automated crawlers never modify live university records. No 2FA, VPN, or geographic IP allowlisting is required.
+4. On phones, "Profile & Tuition" is available from Settings > Account. On desktop, it remains a primary navigation item.
+5. Note: File submission mutations and live external `*.ut.edu.vn` LMS WebView/Quiz launches are intentionally read-only in Demo Mode and display a clear informational notice so reviewers and automated crawlers never modify live university records. No 2FA, VPN, or geographic IP allowlisting is required.
 ```
 
 ### Data Safety Flow Review

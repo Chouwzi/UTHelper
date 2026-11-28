@@ -1,4 +1,4 @@
-"""Adaptive 5-destination navigation rail (>= 600px) and bottom bar (< 600px)."""
+"""Adaptive six-item desktop rail and five-item mobile bottom bar."""
 
 from __future__ import annotations
 
@@ -51,6 +51,12 @@ NAV_DESTINATIONS: tuple[NavDestinationSpec, ...] = (
         ft.Icons.INSIGHTS_ROUNDED,
     ),
     NavDestinationSpec(
+        "profile",
+        "Hồ sơ",
+        ft.Icons.BADGE_OUTLINED,
+        ft.Icons.BADGE_ROUNDED,
+    ),
+    NavDestinationSpec(
         "settings",
         "Cài đặt",
         ft.Icons.SETTINGS_OUTLINED,
@@ -59,6 +65,12 @@ NAV_DESTINATIONS: tuple[NavDestinationSpec, ...] = (
 )
 _KEY_TO_INDEX: dict[str, int] = {
     spec.key: idx for idx, spec in enumerate(NAV_DESTINATIONS)
+}
+MOBILE_NAV_DESTINATIONS: tuple[NavDestinationSpec, ...] = tuple(
+    spec for spec in NAV_DESTINATIONS if spec.key != "profile"
+)
+_MOBILE_KEY_TO_INDEX: dict[str, int] = {
+    spec.key: idx for idx, spec in enumerate(MOBILE_NAV_DESTINATIONS)
 }
 
 
@@ -122,10 +134,10 @@ class AdaptiveNavShell:
                     selected_icon=spec.selected_icon,
                     label=spec.label,
                 )
-                for spec in NAV_DESTINATIONS
+                for spec in MOBILE_NAV_DESTINATIONS
             ],
             visible=True,
-            on_change=self._handle_change,
+            on_change=self._handle_bar_change,
         )
 
     def _handle_change(self, e) -> None:
@@ -144,15 +156,32 @@ class AdaptiveNavShell:
             if key in _KEY_TO_INDEX:
                 self._on_navigate(key)
 
+    def _handle_bar_change(self, e) -> None:
+        control = getattr(e, "control", None)
+        raw_idx = getattr(control, "selected_index", None)
+        if raw_idx is None:
+            raw_idx = getattr(e, "data", None)
+        if raw_idx is None or isinstance(raw_idx, bool):
+            return
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            return
+        if 0 <= idx < len(MOBILE_NAV_DESTINATIONS):
+            self._on_navigate(MOBILE_NAV_DESTINATIONS[idx].key)
+
     def set_active(self, key: str) -> None:
         """Synchronize the selected destination across both rail and bottom bar."""
         if key not in _KEY_TO_INDEX:
             return
-        idx = _KEY_TO_INDEX[key]
-        if self.rail.selected_index != idx:
-            self.rail.selected_index = idx
-        if self.bar.selected_index != idx:
-            self.bar.selected_index = idx
+        rail_idx = _KEY_TO_INDEX[key]
+        if self.rail.selected_index != rail_idx:
+            self.rail.selected_index = rail_idx
+        # The mobile bar has five slots; profile remains reachable from
+        # Settings → Account and keeps Settings selected as its entry point.
+        bar_idx = _MOBILE_KEY_TO_INDEX.get(key, _MOBILE_KEY_TO_INDEX["settings"])
+        if self.bar.selected_index != bar_idx:
+            self.bar.selected_index = bar_idx
 
     def apply_width(self, width: float) -> bool:
         """Switch between NavigationRail (>= 600px) and NavigationBar (< 600px)."""

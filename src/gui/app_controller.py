@@ -28,7 +28,8 @@ from core.distribution import DistributionProfile, resolve_distribution_channel
 from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
-from core.portal_client import PortalClient, PortalMaintenanceError
+from core.portal_client import PortalAuthenticationError, PortalClient, PortalMaintenanceError
+from core.student_profile import StudentProfileCache, StudentProfileService
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
@@ -55,6 +56,7 @@ except ImportError:
     _core_classify_uth_webview_url = None
     _core_normalize_uth_webview_target_url = None
 from config import (
+    get_data_dir,
     get_sync_interval_minutes,
     hydrate_secrets,
     pop_pending_plaintext_migration,
@@ -74,6 +76,7 @@ from gui.components.quiz_player_view import QuizPlayerView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from gui.components.profile_view import ProfileView
 from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
@@ -1237,6 +1240,12 @@ class AppController:
         can coalesce with or overwrite the new account's caches, UI, or alerts.
         """
         new_username = str(new_identity[0] or "").strip()
+        previous_identity = getattr(self, "_settings_identity", None)
+        previous_profile_username = (
+            str(previous_identity[0] or "").strip()
+            if previous_identity
+            else ""
+        )
         # 1. Flip identity & advance epochs BEFORE scheduling or mutating anything.
         self._settings_identity = new_identity
         should_advance_account_epoch = bool(
@@ -1476,6 +1485,35 @@ class AppController:
                     self._schedule_webview2_profile_purge(keep_profile)
                 except Exception:
                     logger.debug("WebView2 profile purge skipped", exc_info=True)
+
+        # Student profile data is private account-owned information. Remove
+        # its disk snapshot and rendered controls on logout, account switch,
+        # or any credential change (including a password change).
+        if reset_moodle_and_caches or account_switched_or_logged_out or mark_logged_out:
+            profile_service = getattr(self, "_profile_service", None)
+            profile_cache = getattr(profile_service, "cache", None)
+            clear_profile_cache = getattr(profile_cache, "clear", None)
+            if callable(clear_profile_cache):
+                try:
+                    clear_profile_cache()
+                except Exception:
+                    logger.debug("Student profile cache clear failed", exc_info=True)
+            elif previous_profile_username:
+                try:
+                    StudentProfileCache(
+                        cache_dir=get_data_dir(), namespace=previous_profile_username
+                    ).clear()
+                except Exception:
+                    logger.debug("Student profile cache clear failed", exc_info=True)
+            self._profile_service = None
+            self._profile_service_account = None
+            profile_view = getattr(self, "profile_view", None)
+            clear_profile_view = getattr(profile_view, "clear", None)
+            if callable(clear_profile_view):
+                try:
+                    clear_profile_view()
+                except Exception:
+                    logger.debug("Student profile UI clear failed", exc_info=True)
 
         # 6. Clear schedule caches & views.
         week_cache = getattr(self, "_week_schedule_cache", None)
@@ -2387,6 +2425,8 @@ class AppController:
             getattr(self, "course_grades_view", None), "visible", False
         ):
             return "grades"
+        if getattr(getattr(self, "profile_view", None), "visible", False):
+            return "profile"
         if getattr(getattr(self, "courses_view", None), "visible", False):
             return "courses"
         return "home"
@@ -2459,12 +2499,16 @@ class AppController:
             await self._close_calendar()
         elif current == "grades":
             await self._close_grades()
+        elif current == "profile":
+            await self._close_profile()
         elif current == "courses":
             await self._close_courses()
         if target == "calendar":
             await self._show_calendar()
         elif target == "grades":
             await self._show_grades()
+        elif target == "profile":
+            await self._show_profile()
         elif target == "courses":
             await self._show_courses()
         elif target == "settings":
@@ -2649,6 +2693,9 @@ class AppController:
                 self._sweep_closed_modal_dialogs()
                 return True
             await self._close_grades()
+            handled = True
+        elif getattr(self, "profile_view", None) is not None and self.profile_view.visible:
+            await self._close_profile()
             handled = True
         elif courses_view is not None and getattr(courses_view, "visible", False):
             await self._close_courses()
@@ -3506,6 +3553,7 @@ class AppController:
             ),
             distribution_profile=self._get_distribution_profile(),
             on_open_store_url=self._open_store_url,
+            on_open_profile=lambda: self._safe_run_task(self._show_profile),
         )
         # Seam contracts with SettingsView (`ui-webview-docs`): explicit logout
         # and Settings -> Tài khoản login route through unified AppController isolation.
@@ -3523,6 +3571,11 @@ class AppController:
         self.course_grades_view = CoursesView(
             on_close=lambda: self._safe_run_task(self._close_course_grades),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_course_grades(force_refresh=True)),
+        )
+        self.profile_view = ProfileView(
+            on_close=lambda: self._safe_run_task(self._close_profile),
+            on_refresh=lambda: self._safe_run_task(self._show_profile),
+            page=self.page,
         )
 
         from core.courses.activity_service import CourseActivityService
@@ -3624,6 +3677,7 @@ class AppController:
             self.grade_overview_view,
             self.courses_view,
             self.course_grades_view,
+            self.profile_view,
         ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
@@ -3733,6 +3787,7 @@ class AppController:
             self,
             courses_view=self.courses_view,
             course_grades_view=self.course_grades_view,
+            profile_view=self.profile_view,
             view_host=main_stack,
             overlays=overlays,
             tab_switcher=self.tab_switcher,
@@ -3899,6 +3954,7 @@ class AppController:
         zero_margin = ft.Margin(left=0, right=0, top=0, bottom=0)
         for view in (
             getattr(self, "grade_overview_view", None),
+            getattr(self, "profile_view", None),
             getattr(self, "calendar_view", None),
             courses_view,
             getattr(self, "course_grades_view", None),
@@ -4091,6 +4147,8 @@ class AppController:
             await self._show_calendar()
         elif key == "grades":
             await self._show_grades()
+        elif key == "profile":
+            await self._show_profile()
         elif key == "settings":
             await self._show_settings()
 
@@ -6883,6 +6941,105 @@ class AppController:
         self._diag_screen("home")
         self._sync_rail_active()
 
+    def _get_profile_service(self) -> StudentProfileService:
+        """Service hồ sơ/học phí theo tài khoản Portal hiện tại (tạo lazily)."""
+        # Chỉ dùng tài khoản Portal (UTH); Settings không có MOODLE_USERNAME.
+        username = settings.UTH_USERNAME or ""
+        service = getattr(self, "_profile_service", None)
+        if service is None or getattr(self, "_profile_service_account", None) != username:
+            service = StudentProfileService(
+                self._portal_client,
+                StudentProfileCache(
+                    cache_dir=get_data_dir(), namespace=username or "anon"
+                ),
+            )
+            self._profile_service = service
+            self._profile_service_account = username
+        return service
+
+    async def _show_profile(self):
+        """Mở màn Hồ sơ & Học phí: hiện bản lưu trước, làm mới nền từ Portal.
+
+        Cache-first để màn hình xuất hiện ngay cả khi offline; sau đó gọi Portal
+        (chạy nền, không chặn UI) và chỉ rơi về banner dữ liệu đã lưu khi lỗi.
+        """
+        self._diag_screen("profile")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="profile")
+        self.view_manager.show_profile_loading()
+        self._sync_rail_active()
+
+        service = self._get_profile_service()
+        username = settings.UTH_USERNAME or ""
+        password = settings.UTH_PASSWORD or ""
+        request_account_epoch = getattr(self, "_account_epoch", 0)
+        has_credentials = bool(username.strip() and password)
+        cached = (
+            await asyncio.to_thread(service.load_cached)
+            if has_credentials
+            else None
+        )
+        if (
+            request_account_epoch != getattr(self, "_account_epoch", 0)
+            or username != (settings.UTH_USERNAME or "")
+            or password != (settings.UTH_PASSWORD or "")
+        ):
+            return
+        if cached is not None:
+            self.view_manager.show_profile_data(cached, from_cache=True)
+        try:
+            result = await asyncio.to_thread(
+                service.load,
+                username,
+                password,
+                force_refresh=True,
+                is_current=lambda: (
+                    request_account_epoch == getattr(self, "_account_epoch", 0)
+                    and username == (settings.UTH_USERNAME or "")
+                    and password == (settings.UTH_PASSWORD or "")
+                ),
+            )
+        except Exception as exc:
+            if (
+                request_account_epoch != getattr(self, "_account_epoch", 0)
+                or username != (settings.UTH_USERNAME or "")
+                or password != (settings.UTH_PASSWORD or "")
+            ):
+                return
+            logger.error("Student profile load failed: %s", exc)
+            status = getattr(exc, "status_code", getattr(exc, "status", None))
+            if isinstance(exc, PortalAuthenticationError) or status in (401, 403):
+                self.profile_view.clear()
+                self.view_manager.show_profile_error(
+                    "Tài khoản Portal không được xác thực. Hãy kiểm tra lại MSSV và mật khẩu."
+                )
+            elif cached is None:
+                self.view_manager.show_profile_error(
+                    "Không tải được hồ sơ từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
+                )
+            else:
+                self.view_manager.show_profile_stale_notice(
+                    "Không thể làm mới · đang hiển thị dữ liệu đã lưu."
+                )
+            return
+        if (
+            request_account_epoch != getattr(self, "_account_epoch", 0)
+            or username != (settings.UTH_USERNAME or "")
+            or password != (settings.UTH_PASSWORD or "")
+            or not getattr(self.profile_view, "visible", False)
+        ):
+            return  # Người dùng đã chuyển màn trước khi tải xong.
+        self.view_manager.show_profile_data(result.snapshot, from_cache=result.from_cache)
+        if result.from_cache:
+            self.view_manager.show_profile_stale_notice(
+                "Không thể làm mới · đang hiển thị dữ liệu đã lưu."
+            )
+
+    async def _close_profile(self):
+        """Đóng màn Hồ sơ & Học phí và quay về Dashboard."""
+        await self.view_manager.close_profile()
+        self._diag_screen("home")
+        self._sync_rail_active()
+
     def _rebuild_colors(self, *, sync_nav: bool = True, update_page: bool = True):
         """Repaint ALL existing controls with current C values for live theme switching.
 
@@ -7132,6 +7289,7 @@ class AppController:
             "calendar_view",
             "detail_view",
             "grade_overview_view",
+            "profile_view",
             "courses_view",
             "course_grades_view",
             "quiz_player_view",
