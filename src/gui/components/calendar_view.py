@@ -116,8 +116,8 @@ class CalendarView(ft.Container):
         self._selected_day: Optional[int] = today.day
         self._all_data: List[Dict[str, Any]] = []
         self._deadline_map: Dict[str, List[Dict[str, Any]]] = {}
-        # Week view state
-        self._view_mode: str = "month"  # "month" or "week"
+        # Week view state (default when opening Calendar)
+        self._view_mode: str = "week"  # "week", "month", or "schedule"
         self._week_start: date = today - timedelta(days=today.weekday())  # Monday
         self._selected_date: Optional[date] = today  # full date for week view
         self._detail_filter_mode: Literal["day", "week_classes", "tasks"] = "day"
@@ -268,43 +268,43 @@ class CalendarView(ft.Container):
             alignment=ft.MainAxisAlignment.CENTER,
         )
 
-        # Mode toggle (Month / Week)
-        self._mode_month_icon = ft.Icon(
-            ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_PRIMARY
-        )
-        self._mode_month_text = ft.Text(
-            "Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
-        )
-        self._mode_month_btn = ft.Container(
-            content=ft.Row(controls=[
-                self._mode_month_icon,
-                self._mode_month_text,
-            ], spacing=4, tight=True),
-            bgcolor=ft.Colors.with_opacity(0.19, C.ACCENT),
-            border_radius=12,
-            height=44,
-            alignment=ft.Alignment(0, 0),
-            padding=ft.Padding(left=12, right=12, top=0, bottom=0),
-            on_click=lambda _: self._toggle_view_mode("month"),
-            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
-        )
+        # Mode toggle (Week / Month / Schedule)
         self._mode_week_icon = ft.Icon(
-            ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_SECONDARY
+            ft.Icons.VIEW_WEEK_ROUNDED, size=14, color=C.TEXT_PRIMARY
         )
         self._mode_week_text = ft.Text(
-            "Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+            "Tuần", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY
         )
         self._mode_week_btn = ft.Container(
             content=ft.Row(controls=[
                 self._mode_week_icon,
                 self._mode_week_text,
             ], spacing=4, tight=True),
-            bgcolor="transparent",
+            bgcolor=ft.Colors.with_opacity(0.19, C.ACCENT),
             border_radius=12,
             height=44,
             alignment=ft.Alignment(0, 0),
             padding=ft.Padding(left=12, right=12, top=0, bottom=0),
             on_click=lambda _: self._toggle_view_mode("week"),
+            animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
+        )
+        self._mode_month_icon = ft.Icon(
+            ft.Icons.CALENDAR_MONTH_ROUNDED, size=14, color=C.TEXT_SECONDARY
+        )
+        self._mode_month_text = ft.Text(
+            "Tháng", size=11, weight=ft.FontWeight.W_600, color=C.TEXT_SECONDARY
+        )
+        self._mode_month_btn = ft.Container(
+            content=ft.Row(controls=[
+                self._mode_month_icon,
+                self._mode_month_text,
+            ], spacing=4, tight=True),
+            bgcolor="transparent",
+            border_radius=12,
+            height=44,
+            alignment=ft.Alignment(0, 0),
+            padding=ft.Padding(left=12, right=12, top=0, bottom=0),
+            on_click=lambda _: self._toggle_view_mode("month"),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
         )
         self._mode_schedule_icon = ft.Icon(
@@ -329,7 +329,7 @@ class CalendarView(ft.Container):
         )
         self._mode_toggle = ft.Container(
             content=ft.Row(
-                [self._mode_month_btn, self._mode_week_btn, self._mode_schedule_btn],
+                [self._mode_week_btn, self._mode_month_btn, self._mode_schedule_btn],
                 spacing=2,
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
@@ -358,6 +358,7 @@ class CalendarView(ft.Container):
             controls=[self._weekday_row] + self._grid_rows,
             spacing=2,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=False,
         )
 
         # Week strip (7 day-columns)
@@ -381,7 +382,7 @@ class CalendarView(ft.Container):
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-            visible=False,  # Hidden by default (month mode)
+            visible=True,
         )
 
         # Selected day detail panel
@@ -543,7 +544,7 @@ class CalendarView(ft.Container):
         self._native_desktop_period_drag = platform_utils.UI_IS_DESKTOP
         self._period_pager = ft.PageView(
             controls=[],
-            height=316,
+            height=88,
             selected_index=1,
             horizontal=True,
             snap=True,
@@ -558,7 +559,7 @@ class CalendarView(ft.Container):
         # is the stationary viewport that clips that overflow.
         self._desktop_period_host = ft.Container(
             width=float("inf"),
-            height=316,
+            height=88,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
         # The slot itself is positioned in the outer stage. It must be a
@@ -1797,27 +1798,22 @@ class CalendarView(ft.Container):
         self.visible = True
         hide_schedule = self._should_hide_separate_schedule_tab()
         self._mode_schedule_btn.visible = not hide_schedule
-        # Always anchor to today when opening - reduces cognitive orientation time
+        # Always anchor to today and open on Week view by default
         today = date.today()
         self._year = today.year
         self._month = today.month
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
-        if hide_schedule and self._view_mode == "schedule":
-            self._leave_schedule_mode()
+        if self._view_mode != "week":
+            if self._view_mode == "schedule":
+                self._leave_schedule_mode()
             self._view_mode = "week"
             self._grid.visible = False
             self._week_strip.visible = True
             self._style_mode_buttons()
         self._reset_period_pager()
-        if self._view_mode == "month":
-            self._render_month()
-        elif self._view_mode == "week":
-            self._render_week()
-        else:
-            self._apply_schedule_header()
-            self._schedule_view.show()
+        self._render_week()
 
     def hide(self):
         self.visible = False
@@ -2134,8 +2130,8 @@ class CalendarView(ft.Container):
     # Schedule (Portal timetable) mode
     def _style_mode_buttons(self) -> None:
         for mode, btn, icon, text in (
-            ("month", self._mode_month_btn, self._mode_month_icon, self._mode_month_text),
             ("week", self._mode_week_btn, self._mode_week_icon, self._mode_week_text),
+            ("month", self._mode_month_btn, self._mode_month_icon, self._mode_month_text),
             ("schedule", self._mode_schedule_btn, self._mode_schedule_icon, self._mode_schedule_text),
         ):
             active = self._view_mode == mode

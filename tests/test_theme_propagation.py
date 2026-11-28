@@ -204,6 +204,11 @@ def test_calendar_mounted_period_states_keep_semantic_roles_across_all_themes():
     try:
         apply_theme(THEME_ORDER[0])
         calendar = CalendarView(_page(), on_close=lambda: None)
+        assert calendar._view_mode == "week"
+        assert calendar._mode_week_btn.bgcolor == ft.Colors.with_opacity(
+            0.19, C.ACCENT
+        )
+        calendar._toggle_view_mode("month")
         today = date.today()
         calendar._year, calendar._month = today.year, today.month
         calendar._selected_day = today.day
