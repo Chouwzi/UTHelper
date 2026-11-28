@@ -532,6 +532,7 @@ def show_course_components_dialog(
     async_loader: Optional[Callable[[CourseGradeItem], Awaitable[MoodleCourseGradesResult]]] = None,
     on_dismiss: Optional[Callable[[], Any]] = None,
     on_closing: Optional[Callable[[], Any]] = None,
+    on_tab_change: Optional[Callable[[int], Any]] = None,
 ) -> Optional[Callable[[], None]]:
     """Mở popup 2 tab (Portal | Course) cho một học phần."""
     if page is None:
@@ -620,6 +621,11 @@ def show_course_components_dialog(
         body_host.content = _render_active_tab()
         safe_control_update(tab_track)
         safe_control_update(body_host)
+        if callable(on_tab_change):
+            try:
+                on_tab_change(idx)
+            except Exception:
+                logger.debug("Course components dialog on_tab_change failed", exc_info=True)
 
     tab_pills: list[ft.Container] = [
         ft.Container(
@@ -720,10 +726,16 @@ def show_course_components_dialog(
         page.show_dialog(dialog)
     except Exception:
         logger.warning("page.show_dialog failed; falling back to overlay", exc_info=True)
+        overlay = getattr(page, "overlay", None)
+        if overlay is None:
+            return None
         used_overlay = True
-        page.overlay.append(dialog)
+        overlay.append(dialog)
         dialog.open = True
-        page.update()
+        try:
+            page.update()
+        except Exception:
+            pass
 
     if should_fetch_async:
         async def _load_async() -> None:

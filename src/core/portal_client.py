@@ -24,6 +24,12 @@ from core.demo_sandbox import (
     is_demo_account,
     verify_demo_credentials_cached,
 )
+from core.maintenance import (
+    MaintenanceNotice,
+    UthMaintenanceError,
+    detect_uth_maintenance,
+    read_bounded_error_body,
+)
 from core.today_schedule import (
     ClassSession,
     ScheduleAuthenticationError,
@@ -273,6 +279,21 @@ class PortalAuthenticationError(PortalError, ScheduleAuthenticationError):
 PortalAuthError = PortalAuthenticationError
 
 
+class PortalMaintenanceError(PortalError, UthMaintenanceError):
+    """Portal returned a UTH maintenance response; cached credentials remain valid."""
+
+    def __init__(
+        self,
+        notice: MaintenanceNotice,
+        message: str | None = None,
+        *,
+        status: int | None = None,
+    ) -> None:
+        self.status = status
+        self.status_code = status
+        UthMaintenanceError.__init__(self, notice, message)
+
+
 class PortalProtocolError(PortalError):
     """Portal returned a response outside the verified JSON contract."""
 
@@ -324,6 +345,7 @@ class PortalClient:
         self._token_generation = 0
         self._clear_generation = 0
         self._token_lock = threading.Lock()
+        self.last_maintenance_notice: MaintenanceNotice | None = None
 
     def clear_token(self) -> None:
         """Drop the cached token and invalidate any login still in flight.
@@ -443,8 +465,15 @@ class PortalClient:
             method=method,
         )
         opener = self._ensure_opener()
+        resp_status = 200
+        resp_ct = ""
         try:
             with opener(request, timeout=self._timeout) as response:
+                resp_status = int(getattr(response, "status", 200) or 200)
+                if getattr(response, "headers", None) is not None and hasattr(
+                    response.headers, "get"
+                ):
+                    resp_ct = str(response.headers.get("Content-Type") or "")
                 geturl = getattr(response, "geturl", None)
                 if callable(geturl):
                     final_url = str(geturl() or "")
@@ -489,15 +518,41 @@ class PortalClient:
                     except zlib.error as exc:
                         raise PortalProtocolError("Portal response was not valid gzip") from exc
         except urllib.error.HTTPError as exc:
+            try:
+                err_body, err_ct = read_bounded_error_body(exc)
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+            notice = detect_uth_maintenance(
+                status=exc.code,
+                body=err_body,
+                content_type=err_ct,
+                source="portal",
+            )
+            if notice is not None:
+                self.last_maintenance_notice = notice
+                raise PortalMaintenanceError(notice, status=exc.code) from exc
             raise _PortalHttpError(exc.code) from exc
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             raise PortalError("Portal network request failed") from exc
         try:
             payload = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            notice = detect_uth_maintenance(
+                status=resp_status,
+                body=raw[:65536] if isinstance(raw, (bytes, bytearray)) else raw,
+                content_type=resp_ct,
+                source="portal",
+            )
+            if notice is not None:
+                self.last_maintenance_notice = notice
+                raise PortalMaintenanceError(notice, status=resp_status) from exc
             raise PortalProtocolError("Portal response was not JSON") from exc
         if not isinstance(payload, dict):
             raise PortalProtocolError("Portal response envelope was not an object")
+        self.last_maintenance_notice = None
         return payload
 
     def _login_with_role_and_generation(
@@ -539,6 +594,13 @@ class PortalClient:
             username, password, generation
         )
         return token
+
+    def authenticate(self, username: str, password: str) -> str:
+        """Authenticate against Portal `/user/login` and return the Bearer token."""
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            return ""
+        return self._login(username, password, self._current_generation())
 
     def _login_with_generation(
         self, username: str, password: str, generation: int | None = None
@@ -984,10 +1046,14 @@ class PortalClient:
                                 kq_dict.setdefault("id", dot_id)
                                 kq_dict.setdefault("tenDot", hk.get("tenDot") or f"Học kỳ {dot_id}")
                                 results.append(kq_dict)
+                    except PortalMaintenanceError:
+                        raise
                     except Exception:
                         pass
                 if results:
                     return results
+        except PortalMaintenanceError:
+            raise
         except Exception:
             pass
 

@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sentry-dsn", nargs="?", const="", default="")
     parser.add_argument("--require-configured", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--build-environment", default="")
+    parser.add_argument("--package-format", default="")
     parser.add_argument("--distribution-channel", default="")
     parser.add_argument("--distribution-output", type=Path)
     parser.add_argument("--android-package-id", default="")
@@ -42,8 +44,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--distribution-channel and --distribution-output must be provided together"
         )
+    build_env = args.build_environment.strip() or None
+    pkg_format = args.package_format.strip() or None
     try:
-        generate_public_config(args.output, args.sentry_dsn)
+        generate_public_config(
+            args.output,
+            args.sentry_dsn,
+            build_environment=build_env,
+            package_format=pkg_format,
+        )
         if args.distribution_output is not None:
             write_distribution_channel(
                 args.distribution_output,

@@ -151,6 +151,11 @@ jobs:
 
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
+          if [ "${GITHUB_REF:-}" = "refs/heads/main" ] || [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            BUILD_ENV="release"
+          else
+            BUILD_ENV="develop"
+          fi
 
           export UTH_DISTRIBUTION_CHANNEL="$CHANNEL"
           export ORG_GRADLE_PROJECT_uthDistributionChannel="$CHANNEL"
@@ -222,7 +227,7 @@ jobs:
           # manifest removals, and 16 KB packaging before the final build pass.
           for build_attempt in 1 2 3; do
             python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
             if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter; then
               break
             fi
@@ -238,7 +243,7 @@ jobs:
           build_ok=0
           for build_attempt in 1 2 3; do
             python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
             if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose; then
               build_ok=1
               break

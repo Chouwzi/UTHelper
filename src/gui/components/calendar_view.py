@@ -20,13 +20,15 @@ if _project_root not in sys.path:
 
 import asyncio
 import calendar
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import flet as ft
 import platform_utils
 
+from core.today_schedule import ClassSession
 from gui.components.calendar_navigation import (
     MonthAnchor,
     month_slot_anchors,
@@ -34,7 +36,11 @@ from gui.components.calendar_navigation import (
     shift_week,
     week_slot_anchors,
 )
-from gui.components.schedule_week_view import ScheduleWeekView
+from gui.components.schedule_week_view import (
+    ScheduleWeekView,
+    classify_session_shift,
+    compact_room_badge_text,
+)
 from gui.core.theme import (
     C,
     on_color,
@@ -47,12 +53,34 @@ from gui.core.utils import (
     parse_datetime,
 )
 
+_COMPACT_SHELL_BREAKPOINT = 600
 _WEEKDAYS = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+_WEEKDAYS_LONG_VI = (
+    "Thứ 2",
+    "Thứ 3",
+    "Thứ 4",
+    "Thứ 5",
+    "Thứ 6",
+    "Thứ 7",
+    "Chủ nhật",
+)
 _MONTHS_VI = {
     1: "Tháng 1", 2: "Tháng 2", 3: "Tháng 3", 4: "Tháng 4",
     5: "Tháng 5", 6: "Tháng 6", 7: "Tháng 7", 8: "Tháng 8",
     9: "Tháng 9", 10: "Tháng 10", 11: "Tháng 11", 12: "Tháng 12",
 }
+
+
+def _mondays_overlapping_month(year: int, month: int) -> list[date]:
+    first_day = date(year, month, 1)
+    last_day = date(year, month, calendar.monthrange(year, month)[1])
+    cursor = first_day - timedelta(days=first_day.weekday())
+    end_monday = last_day - timedelta(days=last_day.weekday())
+    mondays: list[date] = []
+    while cursor <= end_monday:
+        mondays.append(cursor)
+        cursor += timedelta(days=7)
+    return mondays
 
 
 @dataclass(slots=True)
@@ -92,6 +120,9 @@ class CalendarView(ft.Container):
         self._view_mode: str = "month"  # "month" or "week"
         self._week_start: date = today - timedelta(days=today.weekday())  # Monday
         self._selected_date: Optional[date] = today  # full date for week view
+        self._detail_filter_mode: Literal["day", "week_classes", "tasks"] = "day"
+        self._last_measured_width: float = 0.0
+        self._rendering_calendar: bool = False
 
         self._schedule_view = ScheduleWeekView(
             page,
@@ -99,12 +130,14 @@ class CalendarView(ft.Container):
             schedule_cache,
             on_open_url=on_open_url,
             on_open_external=on_open_external,
+            on_weeks_changed=self._on_schedule_weeks_changed,
         )
 
         self._force_period_rebuild = False
         self._defer_page_update = False
 
         self._build_ui()
+        self.on_size_change = self._on_size_change
         self._rendered_palette = semantic_palette()
 
     # Build UI
@@ -288,6 +321,7 @@ class CalendarView(ft.Container):
             bgcolor="transparent",
             border_radius=12,
             height=44,
+            visible=not self._should_hide_separate_schedule_tab(),
             alignment=ft.Alignment(0, 0),
             padding=ft.Padding(left=12, right=12, top=0, bottom=0),
             on_click=lambda _: self._toggle_view_mode("schedule"),
@@ -351,6 +385,95 @@ class CalendarView(ft.Container):
         )
 
         # Selected day detail panel
+        self._filter_day_text = ft.Text(
+            "Theo ngày", size=11, weight=ft.FontWeight.W_600, color=C.ACCENT
+        )
+        self._filter_day_chip = ft.Container(
+            content=self._filter_day_text,
+            height=30,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+            border_radius=999,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=ft.Colors.with_opacity(0.16, C.ACCENT),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.35, C.ACCENT)),
+            ink=True,
+            data={"filter_mode": "day"},
+            on_click=lambda _: self._set_detail_filter_mode("day"),
+        )
+        self._filter_week_text = ft.Text(
+            "Cả tuần (0 ca)",
+            size=11,
+            weight=ft.FontWeight.W_500,
+            color=C.TEXT_SECONDARY,
+        )
+        self._filter_week_chip = ft.Container(
+            content=self._filter_week_text,
+            height=30,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+            border_radius=999,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            ink=True,
+            data={"filter_mode": "week_classes"},
+            on_click=lambda _: self._set_detail_filter_mode("week_classes"),
+        )
+        self._filter_tasks_text = ft.Text(
+            "Bài tập (0)",
+            size=11,
+            weight=ft.FontWeight.W_500,
+            color=C.TEXT_SECONDARY,
+        )
+        self._filter_tasks_chip = ft.Container(
+            content=self._filter_tasks_text,
+            height=30,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=0),
+            border_radius=999,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            ink=True,
+            data={"filter_mode": "tasks"},
+            on_click=lambda _: self._set_detail_filter_mode("tasks"),
+        )
+        self._detail_refresh_btn = ft.IconButton(
+            icon=ft.Icons.REFRESH_ROUNDED,
+            icon_color=C.TEXT_SECONDARY,
+            icon_size=17,
+            tooltip="Tải lại lịch học",
+            padding=0,
+            size_constraints=icon_constraints,
+            on_click=lambda _: self._reload_active_schedule_week(),
+        )
+        self._filter_bar_row = ft.Row(
+            controls=[
+                ft.Row(
+                    controls=[
+                        self._filter_day_chip,
+                        self._filter_week_chip,
+                        self._filter_tasks_chip,
+                    ],
+                    spacing=6,
+                    scroll=ft.ScrollMode.AUTO,
+                    expand=True,
+                ),
+                ft.Semantics(
+                    label="Tải lại lịch học",
+                    button=True,
+                    content=self._detail_refresh_btn,
+                ),
+            ],
+            spacing=4,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._portal_status_row = ft.Row(
+            controls=[],
+            spacing=8,
+            visible=False,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
         self._day_title = ft.Text("", size=14, weight=ft.FontWeight.W_600, color=C.TEXT_PRIMARY)
         self._day_count = ft.Text("", size=11, color=C.TEXT_SECONDARY)
         self._day_list = ft.ListView(spacing=6, expand=True)
@@ -385,11 +508,19 @@ class CalendarView(ft.Container):
                 controls=[
                     self._detail_divider,
                     ft.Container(
+                        content=self._filter_bar_row,
+                        padding=ft.Padding.only(left=14, right=8, top=4, bottom=0),
+                    ),
+                    ft.Container(
+                        content=self._portal_status_row,
+                        padding=ft.Padding.only(left=16, right=14, top=0, bottom=2),
+                    ),
+                    ft.Container(
                         content=ft.Row(
                             controls=[self._day_title, self._day_count],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         ),
-                        padding=ft.Padding.only(left=16, right=16, top=8, bottom=4),
+                        padding=ft.Padding.only(left=16, right=16, top=2, bottom=4),
                     ),
                     ft.Container(
                         content=ft.Stack(controls=[self._day_list, self._day_empty], expand=True),
@@ -577,6 +708,7 @@ class CalendarView(ft.Container):
         return period
 
     def _seed_period_pages(self, *, delta: int | None = None) -> None:
+        self._schedule_view._hydrate()
         if self._view_mode == "month":
             anchors = month_slot_anchors(MonthAnchor(self._year, self._month))
             build_period = self._build_month_period_page
@@ -803,6 +935,30 @@ class CalendarView(ft.Container):
         self._desktop_period_host.height = height
         self._seed_period_pages()
 
+    def _advance_week_selection(
+        self, target_week_start: date, delta: int
+    ) -> None:
+        today = date.today()
+        if self._selected_date is not None:
+            next_selected = self._selected_date + timedelta(days=7 * delta)
+            if not (
+                target_week_start
+                <= next_selected
+                <= target_week_start + timedelta(days=6)
+            ):
+                next_selected = target_week_start + timedelta(
+                    days=self._selected_date.weekday()
+                )
+        elif target_week_start <= today <= target_week_start + timedelta(days=6):
+            next_selected = today
+        else:
+            next_selected = target_week_start
+        self._week_start = target_week_start
+        self._selected_date = next_selected
+        self._year = next_selected.year
+        self._month = next_selected.month
+        self._selected_day = next_selected.day
+
     def _apply_period_delta(self, delta: int) -> bool:
         if delta not in (-1, 1):
             return False
@@ -817,9 +973,7 @@ class CalendarView(ft.Container):
             target = shift_week(self._week_start, delta)
             if target == self._week_start:
                 return False
-            self._week_start = target
-            self._selected_date = None
-            self._selected_day = None
+            self._advance_week_selection(target, delta)
         return True
 
     async def _on_period_page_change(self, event) -> None:
@@ -1042,6 +1196,10 @@ class CalendarView(ft.Container):
                 today_dot = cell.data["today_dot"]
                 today_dot.visible = False
                 today_dot.bgcolor = C.ACCENT
+                class_bar = cell.data.get("class_bar")
+                if class_bar is not None:
+                    class_bar.visible = False
+                cell.data["dots_row"].controls.clear()
                 continue
             self._style_period_cell(
                 cell,
@@ -1055,6 +1213,36 @@ class CalendarView(ft.Container):
                 ),
             )
 
+    def _render_shift_bars(
+        self, shift_bars: ft.Column, cell_date: Optional[date]
+    ) -> int:
+        sessions = (
+            self._schedule_view.sessions_for_day(cell_date)
+            if cell_date is not None
+            else ()
+        )
+        buckets: dict[str, list[ClassSession]] = {
+            "morning": [],
+            "afternoon": [],
+            "evening": [],
+        }
+        for sess in sessions:
+            buckets[classify_session_shift(sess)].append(sess)
+        for shift_key, bar in zip(
+            ("morning", "afternoon", "evening"), shift_bars.controls
+        ):
+            group = buckets[shift_key]
+            if not group:
+                bar.bgcolor = C.BORDER
+                bar.opacity = 0.25
+            elif any(not s.cancelled for s in group):
+                bar.bgcolor = C.ACCENT
+                bar.opacity = 1.0
+            else:
+                bar.bgcolor = C.CRITICAL
+                bar.opacity = 0.45
+        return len(sessions)
+
     def _render_week_period_page(self, period: _CalendarPeriodPage) -> None:
         today = date.today()
         urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
@@ -1065,6 +1253,7 @@ class CalendarView(ft.Container):
             day_text = cell.data["day_text"]
             weekday_label = cell.data["wd_label"]
             count_text = cell.data["count_text"]
+            shift_bars = cell.data["shift_bars"]
             is_today = cell_date == today
             most_urgent_color = None
             if acts:
@@ -1117,6 +1306,7 @@ class CalendarView(ft.Container):
                 )
                 day_text.weight = ft.FontWeight.W_400
 
+            self._render_shift_bars(shift_bars, cell_date)
             self._render_activity_markers(
                 cell.data["dots_row"], acts, most_urgent_color
             )
@@ -1135,6 +1325,7 @@ class CalendarView(ft.Container):
         day_text = cell.data["day_text"]
         dots_row = cell.data["dots_row"]
         acts = self._deadline_map.get(cell_date.isoformat(), [])
+        has_classes = bool(self._schedule_view.sessions_for_day(cell_date))
         is_today = cell_date == today
         today_dot = cell.data["today_dot"]
         today_dot.visible = is_today
@@ -1181,13 +1372,24 @@ class CalendarView(ft.Container):
             most_urgent_color = get_urgency_color(
                 most_urgent.get("urgency", "safe")
             )
-        self._render_activity_markers(dots_row, acts, most_urgent_color)
+        self._render_activity_markers(
+            dots_row,
+            acts,
+            most_urgent_color,
+            class_bar=cell.data.get("class_bar"),
+            has_classes=has_classes,
+        )
 
     def _render_activity_markers(
         self,
         dots_row: ft.Row,
         activities: list[dict[str, Any]],
         most_urgent_color: Optional[str],
+        *,
+        class_bar: Optional[ft.Container] = None,
+        has_classes: bool = False,
+        badge_size: int = 16,
+        badge_font_size: int = 8,
     ) -> None:
         dots_row.controls.clear()
         if len(activities) >= 3:
@@ -1196,38 +1398,53 @@ class CalendarView(ft.Container):
                 ft.Container(
                     content=ft.Text(
                         str(len(activities)),
-                        size=8,
+                        size=badge_font_size,
                         color=on_color(color),
                         weight=ft.FontWeight.W_700,
                         text_align=ft.TextAlign.CENTER,
                     ),
-                    width=16,
-                    height=16,
-                    border_radius=8,
+                    width=badge_size,
+                    height=badge_size,
+                    border_radius=badge_size // 2,
                     bgcolor=color,
                     alignment=ft.Alignment(0, 0),
                 )
             )
-            return
-        seen = set()
-        for activity in activities:
-            color = get_urgency_color(activity.get("urgency", "safe"))
-            if color in seen:
-                continue
-            seen.add(color)
-            dots_row.controls.append(
-                ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+        else:
+            seen = set()
+            for activity in activities:
+                color = get_urgency_color(activity.get("urgency", "safe"))
+                if color in seen:
+                    continue
+                seen.add(color)
+                if len(dots_row.controls) < 3:
+                    dots_row.controls.append(
+                        ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
+                    )
+        if has_classes:
+            bar = class_bar or ft.Container(
+                width=10, height=2.5, border_radius=1.5, bgcolor=C.ACCENT
             )
+            bar.bgcolor = C.ACCENT
+            bar.visible = True
+            dots_row.controls.append(bar)
+        elif class_bar is not None:
+            class_bar.visible = False
 
     def _on_absolute_date_click(self, selected: date) -> None:
         self._year, self._month = selected.year, selected.month
         self._selected_day = selected.day
         self._selected_date = selected
-        self._render_period_pages()
         if self._view_mode == "week":
+            if self._detail_filter_mode in ("week_classes", "tasks"):
+                self._detail_filter_mode = "day"
             self._week_start = selected - timedelta(days=selected.weekday())
+            self._render_period_pages()
             self._render_week()
         else:
+            if self._detail_filter_mode == "week_classes":
+                self._week_start = selected - timedelta(days=selected.weekday())
+            self._render_period_pages()
             self._render_month()
 
     def _make_day_cell(self) -> ft.Container:
@@ -1237,7 +1454,15 @@ class CalendarView(ft.Container):
         today_dot = ft.Container(
             width=5, height=5, border_radius=3, bgcolor=C.ACCENT, visible=False,
         )
-        dots_row = ft.Row(controls=[], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
+        class_bar = ft.Container(
+            width=10, height=2.5, border_radius=1.5, bgcolor=C.ACCENT, visible=False,
+        )
+        dots_row = ft.Row(
+            controls=[],
+            spacing=2,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         cell = ft.Container(
             content=ft.Column(
                 controls=[
@@ -1253,7 +1478,13 @@ class CalendarView(ft.Container):
             alignment=ft.Alignment(0, -0.1),
             on_click=lambda e, c=None: self._on_day_click(e),
         )
-        cell.data = {"day_text": day_num, "dots_row": dots_row, "today_dot": today_dot, "day": 0}
+        cell.data = {
+            "day_text": day_num,
+            "dots_row": dots_row,
+            "today_dot": today_dot,
+            "class_bar": class_bar,
+            "day": 0,
+        }
         return cell
 
     def _make_week_cell(self, col_index: int) -> ft.Container:
@@ -1266,15 +1497,30 @@ class CalendarView(ft.Container):
             color=wd_color, text_align=ft.TextAlign.CENTER,
         )
         day_num = ft.Text(
-            "", size=18, weight=ft.FontWeight.W_600,
+            "", size=16, weight=ft.FontWeight.W_600,
             color=C.TEXT_PRIMARY, text_align=ft.TextAlign.CENTER,
+        )
+        shift_bars = ft.Column(
+            controls=[
+                ft.Container(
+                    width=16,
+                    height=1.8,
+                    border_radius=1,
+                    bgcolor=C.BORDER,
+                    opacity=0.25,
+                )
+                for _ in range(3)
+            ],
+            spacing=1,
+            tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
         dots_row = ft.Row(controls=[], spacing=2, alignment=ft.MainAxisAlignment.CENTER)
         count_text = ft.Text("", size=9, color=C.TEXT_SECONDARY, text_align=ft.TextAlign.CENTER)
 
         cell = ft.Container(
             content=ft.Column(
-                controls=[wd_label, day_num, dots_row, count_text],
+                controls=[wd_label, day_num, shift_bars, dots_row, count_text],
                 spacing=1,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
@@ -1285,9 +1531,13 @@ class CalendarView(ft.Container):
             on_click=lambda e, idx=col_index: self._on_week_cell_click(idx),
         )
         cell.data = {
-            "wd_label": wd_label, "day_text": day_num,
-            "dots_row": dots_row, "count_text": count_text,
-            "col": col_index, "date": None,
+            "wd_label": wd_label,
+            "day_text": day_num,
+            "shift_bars": shift_bars,
+            "dots_row": dots_row,
+            "count_text": count_text,
+            "col": col_index,
+            "date": None,
         }
         return cell
 
@@ -1296,148 +1546,149 @@ class CalendarView(ft.Container):
         cell = self._week_cells[col_index]
         cell_date = cell.data.get("date")
         if cell_date:
+            if self._detail_filter_mode in ("week_classes", "tasks"):
+                self._detail_filter_mode = "day"
             self._selected_date = cell_date
             self._selected_day = cell_date.day
             self._year = cell_date.year
             self._month = cell_date.month
+            self._render_period_pages()
             self._render_week()
 
-    def _render_week(self, *, update_page: bool = True):
+    def _render_week(
+        self, *, update_page: bool = True, ensure_schedule: bool = True
+    ):
         """Render the 7-day week strip for self._week_start."""
-        today = date.today()
-        week_num = self._week_start.isocalendar()[1]
-        month_name = _MONTHS_VI[self._week_start.month]
+        was_rendering = self._rendering_calendar
+        self._rendering_calendar = True
+        try:
+            if ensure_schedule:
+                self._schedule_view.hydrate_and_ensure_weeks(
+                    [self._week_start], debounce_ms=0
+                )
+            else:
+                self._schedule_view._hydrate()
+            today = date.today()
+            week_num = self._week_start.isocalendar()[1]
+            month_name = _MONTHS_VI[self._week_start.month]
 
-        # Determine if week spans 2 months
-        week_end = self._week_start + timedelta(days=6)
-        if self._week_start.month != week_end.month:
-            m2 = _MONTHS_VI[week_end.month]
-            self._month_label.value = f"Tuần {week_num} · {month_name} – {m2}"
-        else:
-            self._month_label.value = f"Tuần {week_num} · {month_name} {self._week_start.year}"
+            # Determine if week spans 2 months
+            week_end = self._week_start + timedelta(days=6)
+            if self._week_start.month != week_end.month:
+                m2 = _MONTHS_VI[week_end.month]
+                self._month_label.value = f"Tuần {week_num} · {month_name} – {m2}"
+            else:
+                self._month_label.value = f"Tuần {week_num} · {month_name} {self._week_start.year}"
 
-        # Summary for week
-        week_total = 0
-        week_submitted = 0
-        for i in range(7):
-            d = self._week_start + timedelta(days=i)
-            key = d.strftime("%Y-%m-%d")
-            acts = self._deadline_map.get(key, [])
-            week_total += len(acts)
-            for a in acts:
-                sub = a.get("submission_status", "")
-                if sub in ("submitted", "Đã nộp", "graded", "Đã chấm"):
-                    week_submitted += 1
+            # Summary for week (combining classes and assignments when classes exist)
+            week_total = 0
+            week_submitted = 0
+            for i in range(7):
+                d = self._week_start + timedelta(days=i)
+                key = d.strftime("%Y-%m-%d")
+                acts = self._deadline_map.get(key, [])
+                week_total += len(acts)
+                for a in acts:
+                    sub = a.get("submission_status", "")
+                    if sub in ("submitted", "Đã nộp", "graded", "Đã chấm"):
+                        week_submitted += 1
 
-        if week_total > 0:
+            week_sessions_map = self._schedule_view.sessions_for_week(
+                self._week_start
+            )
+            week_classes = sum(len(v) for v in week_sessions_map.values())
             done_text = f" · {week_submitted} đã nộp" if week_submitted > 0 else ""
-            self._month_summary.value = f"{week_total} bài tập{done_text}"
-        else:
-            self._month_summary.value = "Không có bài tập trong tuần này"
-
-        # Render 7 cells
-        for i in range(7):
-            d = self._week_start + timedelta(days=i)
-            cell = self._week_cells[i]
-            day_text: ft.Text = cell.data["day_text"]
-            dots_row: ft.Row = cell.data["dots_row"]
-            count_text: ft.Text = cell.data["count_text"]
-            cell.data["date"] = d
-
-            day_text.value = str(d.day)
-            count_text.color = C.TEXT_SECONDARY
-
-            is_today = (d == today)
-            is_selected = (d == self._selected_date)
-
-            key = d.strftime("%Y-%m-%d")
-            acts = self._deadline_map.get(key, [])
-            has_deadline = len(acts) > 0
-
-            # Most urgent color
-            most_urgent_color = None
-            if has_deadline:
-                urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
-                sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
-                most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
-
-            # Styling
-            wd_label: ft.Text = cell.data["wd_label"]
-            if is_selected and is_today:
-                cell.bgcolor = ft.Colors.with_opacity(0.13, C.ACCENT)
-                cell.border = ft.Border.all(2, C.ACCENT)
-                day_text.color = C.ACCENT
-                day_text.weight = ft.FontWeight.W_700
-                wd_label.color = C.ACCENT
-            elif is_selected:
-                cell.bgcolor = C.SURFACE_HOVER
-                cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
-                day_text.color = C.TEXT_PRIMARY
-                day_text.weight = ft.FontWeight.W_700
-                wd_label.color = C.TEXT_PRIMARY
-            elif is_today:
-                cell.bgcolor = ft.Colors.with_opacity(0.06, C.ACCENT)
-                cell.border = ft.Border.all(
-                    1, ft.Colors.with_opacity(0.31, C.ACCENT)
+            if week_classes > 0 and week_total > 0:
+                self._month_summary.value = (
+                    f"{week_classes} ca học · {week_total} bài tập{done_text}"
                 )
-                day_text.color = C.ACCENT
-                day_text.weight = ft.FontWeight.W_700
-                wd_label.color = C.ACCENT
-            elif has_deadline:
-                cell.bgcolor = ft.Colors.with_opacity(
-                    0.05, most_urgent_color or C.ACCENT
-                )
-                cell.border = ft.Border.all(
-                    0.5,
-                    ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
-                )
-                day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
-                day_text.weight = ft.FontWeight.W_500
-                wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
+            elif week_classes > 0:
+                self._month_summary.value = f"{week_classes} ca học trong tuần này"
+            elif week_total > 0:
+                self._month_summary.value = f"{week_total} bài tập{done_text}"
             else:
-                cell.bgcolor = None
-                cell.border = None
-                day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
-                day_text.weight = ft.FontWeight.W_400
-                wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
+                self._month_summary.value = "Không có bài tập trong tuần này"
 
-            # Activity dots
-            dots_row.controls.clear()
-            if acts:
-                if len(acts) >= 3:
-                    dots_row.controls.append(
-                        ft.Container(
-                            content=ft.Text(
-                                str(len(acts)),
-                                size=8,
-                                color=on_color(most_urgent_color or C.ACCENT),
-                                weight=ft.FontWeight.W_700,
-                                text_align=ft.TextAlign.CENTER,
-                            ),
-                            width=16, height=16, border_radius=8,
-                            bgcolor=most_urgent_color or C.ACCENT,
-                            alignment=ft.Alignment(0, 0),
-                        )
+            # Render 7 cells
+            for i in range(7):
+                d = self._week_start + timedelta(days=i)
+                cell = self._week_cells[i]
+                day_text: ft.Text = cell.data["day_text"]
+                dots_row: ft.Row = cell.data["dots_row"]
+                count_text: ft.Text = cell.data["count_text"]
+                shift_bars: ft.Column = cell.data["shift_bars"]
+                cell.data["date"] = d
+
+                day_text.value = str(d.day)
+                count_text.color = C.TEXT_SECONDARY
+
+                is_today = (d == today)
+                is_selected = (d == self._selected_date)
+
+                key = d.strftime("%Y-%m-%d")
+                acts = self._deadline_map.get(key, [])
+                has_deadline = len(acts) > 0
+
+                most_urgent_color = None
+                if has_deadline:
+                    urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+                    sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
+                    most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
+
+                wd_label: ft.Text = cell.data["wd_label"]
+                if is_selected and is_today:
+                    cell.bgcolor = ft.Colors.with_opacity(0.13, C.ACCENT)
+                    cell.border = ft.Border.all(2, C.ACCENT)
+                    day_text.color = C.ACCENT
+                    day_text.weight = ft.FontWeight.W_700
+                    wd_label.color = C.ACCENT
+                elif is_selected:
+                    cell.bgcolor = C.SURFACE_HOVER
+                    cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                    day_text.color = C.TEXT_PRIMARY
+                    day_text.weight = ft.FontWeight.W_700
+                    wd_label.color = C.TEXT_PRIMARY
+                elif is_today:
+                    cell.bgcolor = ft.Colors.with_opacity(0.06, C.ACCENT)
+                    cell.border = ft.Border.all(
+                        1, ft.Colors.with_opacity(0.31, C.ACCENT)
                     )
+                    day_text.color = C.ACCENT
+                    day_text.weight = ft.FontWeight.W_700
+                    wd_label.color = C.ACCENT
+                elif has_deadline:
+                    cell.bgcolor = ft.Colors.with_opacity(
+                        0.05, most_urgent_color or C.ACCENT
+                    )
+                    cell.border = ft.Border.all(
+                        0.5,
+                        ft.Colors.with_opacity(0.19, most_urgent_color or C.BORDER),
+                    )
+                    day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
+                    day_text.weight = ft.FontWeight.W_500
+                    wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
                 else:
-                    seen = set()
-                    for a in acts:
-                        urg = a.get("urgency", "safe")
-                        col = get_urgency_color(urg)
-                        if col not in seen:
-                            seen.add(col)
-                            dots_row.controls.append(
-                                ft.Container(width=6, height=6, border_radius=3, bgcolor=col)
-                            )
+                    cell.bgcolor = None
+                    cell.border = None
+                    day_text.color = C.CRITICAL if i == 6 else C.TEXT_PRIMARY
+                    day_text.weight = ft.FontWeight.W_400
+                    wd_label.color = C.CRITICAL if i == 6 else C.TEXT_SECONDARY
 
-            # Count text
-            if len(acts) > 0:
-                count_text.value = f"{len(acts)} bài"
-                count_text.color = most_urgent_color or C.TEXT_SECONDARY
-            else:
-                count_text.value = ""
+                self._render_shift_bars(shift_bars, d)
+                self._render_activity_markers(dots_row, acts, most_urgent_color)
 
-        self._update_day_panel()
+                if len(acts) > 0:
+                    count_text.value = f"{len(acts)} bài"
+                    count_text.color = most_urgent_color or C.TEXT_SECONDARY
+                else:
+                    count_text.value = ""
+
+            if hasattr(self, "_period_pages"):
+                self._render_period_pages()
+            self._update_day_panel()
+        finally:
+            self._rendering_calendar = was_rendering
+
         if update_page and not getattr(self, "_defer_page_update", False):
             try:
                 self._page_ref.update()
@@ -1462,11 +1713,90 @@ class CalendarView(ft.Container):
         else:
             self._apply_schedule_header()
 
+    def _resolve_page_width(
+        self, explicit_width: Optional[float] = None
+    ) -> float:
+        for candidate in (
+            explicit_width,
+            getattr(self._page_ref, "width", None),
+            getattr(getattr(self._page_ref, "window", None), "width", None),
+            self._last_measured_width if self._last_measured_width > 0 else None,
+        ):
+            if candidate is None or isinstance(candidate, bool):
+                continue
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric) and numeric > 0:
+                return numeric
+        return 0.0
+
+    def _should_hide_separate_schedule_tab(
+        self, width: Optional[float] = None
+    ) -> bool:
+        if platform_utils.UI_IS_MOBILE:
+            return True
+        page_width = self._resolve_page_width(width)
+        return 0 < page_width < _COMPACT_SHELL_BREAKPOINT
+
+    def handle_viewport_resize(self, width: Optional[float] = None) -> None:
+        hide_schedule = self._should_hide_separate_schedule_tab(width)
+        visibility_changed = self._mode_schedule_btn.visible != (
+            not hide_schedule
+        )
+        self._mode_schedule_btn.visible = not hide_schedule
+        if hide_schedule and self._view_mode == "schedule":
+            preserved = self._schedule_view._selected
+            self._leave_schedule_mode()
+            self._view_mode = "week"
+            self._selected_date = preserved
+            self._year = preserved.year
+            self._month = preserved.month
+            self._selected_day = preserved.day
+            self._week_start = preserved - timedelta(days=preserved.weekday())
+            self._grid.visible = False
+            self._week_strip.visible = True
+            self._style_mode_buttons()
+            self._reset_period_pager()
+            self._render_week()
+            return
+        if (
+            visibility_changed
+            and self.visible
+            and not getattr(self, "_defer_page_update", False)
+        ):
+            try:
+                self._page_ref.update()
+            except Exception:
+                pass
+
+    def _on_size_change(self, event=None) -> None:
+        try:
+            measured = float(getattr(event, "width", 0) or 0)
+        except (TypeError, ValueError):
+            measured = 0.0
+        if measured > 0:
+            self._last_measured_width = measured
+        self.handle_viewport_resize()
+
+    def _on_schedule_weeks_changed(self) -> None:
+        if self._rendering_calendar:
+            return
+        if self._view_mode == "schedule":
+            return
+        if self._view_mode == "week":
+            self._render_week(update_page=self.visible, ensure_schedule=False)
+        elif self._view_mode == "month":
+            self._render_month(update_page=self.visible, ensure_schedule=False)
+
     def show(self, activities: Optional[List[Dict[str, Any]]] = None):
         if activities is not None:
             self._all_data = activities
             self._build_deadline_map()
         self.visible = True
+        hide_schedule = self._should_hide_separate_schedule_tab()
+        self._mode_schedule_btn.visible = not hide_schedule
         # Always anchor to today when opening - reduces cognitive orientation time
         today = date.today()
         self._year = today.year
@@ -1474,6 +1804,12 @@ class CalendarView(ft.Container):
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
+        if hide_schedule and self._view_mode == "schedule":
+            self._leave_schedule_mode()
+            self._view_mode = "week"
+            self._grid.visible = False
+            self._week_strip.visible = True
+            self._style_mode_buttons()
         self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
@@ -1498,153 +1834,156 @@ class CalendarView(ft.Container):
             key = dt.strftime("%Y-%m-%d")
             self._deadline_map.setdefault(key, []).append(act)
 
-    def _render_month(self, *, update_page: bool = True):
+    def _render_month(
+        self, *, update_page: bool = True, ensure_schedule: bool = True
+    ):
         """Render the grid for self._year / self._month."""
-        self._month_label.value = f"{_MONTHS_VI[self._month]} {self._year}"
+        was_rendering = self._rendering_calendar
+        self._rendering_calendar = True
+        try:
+            if ensure_schedule:
+                self._schedule_view.hydrate_and_ensure_weeks(
+                    _mondays_overlapping_month(self._year, self._month),
+                    debounce_ms=250,
+                )
+            else:
+                self._schedule_view._hydrate()
+            self._month_label.value = f"{_MONTHS_VI[self._month]} {self._year}"
 
-        today = date.today()
-        cal = calendar.Calendar(firstweekday=0)
-        month_days = cal.monthdayscalendar(self._year, self._month)
-        while len(month_days) < 6:
-            month_days.append([0] * 7)
+            today = date.today()
+            cal = calendar.Calendar(firstweekday=0)
+            month_days = cal.monthdayscalendar(self._year, self._month)
+            while len(month_days) < 6:
+                month_days.append([0] * 7)
 
-        # CV-05: Month summary
-        month_total = 0
-        month_submitted = 0
-        for key, acts in self._deadline_map.items():
-            try:
-                d = datetime.strptime(key, "%Y-%m-%d")
-                if d.year == self._year and d.month == self._month:
-                    month_total += len(acts)
-                    for a in acts:
-                        sub = a.get("submission_status", "")
-                        if sub in ("submitted", "Đã nộp", "graded", "Đã chấm"):
-                            month_submitted += 1
-            except ValueError:
-                pass
+            # CV-05: Month summary
+            month_total = 0
+            month_submitted = 0
+            for key, acts in self._deadline_map.items():
+                try:
+                    d = datetime.strptime(key, "%Y-%m-%d")
+                    if d.year == self._year and d.month == self._month:
+                        month_total += len(acts)
+                        for a in acts:
+                            sub = a.get("submission_status", "")
+                            if sub in ("submitted", "Đã nộp", "graded", "Đã chấm"):
+                                month_submitted += 1
+                except ValueError:
+                    pass
 
-        if month_total > 0:
+            days_in_month = calendar.monthrange(self._year, self._month)[1]
+            month_classes = sum(
+                len(
+                    self._schedule_view.sessions_for_day(
+                        date(self._year, self._month, day_num)
+                    )
+                )
+                for day_num in range(1, days_in_month + 1)
+            )
             done_text = f" · {month_submitted} đã nộp" if month_submitted > 0 else ""
-            self._month_summary.value = f"{month_total} bài tập{done_text}"
-        else:
-            self._month_summary.value = "Không có bài tập trong tháng này"
+            if month_classes > 0 and month_total > 0:
+                self._month_summary.value = (
+                    f"{month_classes} ca học · {month_total} bài tập{done_text}"
+                )
+            elif month_classes > 0:
+                self._month_summary.value = f"{month_classes} ca học trong tháng này"
+            elif month_total > 0:
+                self._month_summary.value = f"{month_total} bài tập{done_text}"
+            else:
+                self._month_summary.value = "Không có bài tập trong tháng này"
 
-        if self._native_desktop_period_drag:
-            for r, week in enumerate(month_days):
-                for c, day in enumerate(week):
-                    cell = self._day_cells[r][c]
-                    day_text: ft.Text = cell.data["day_text"]
-                    dots_row: ft.Row = cell.data["dots_row"]
-                    cell.data["day"] = day
+            if self._native_desktop_period_drag:
+                for r, week in enumerate(month_days):
+                    for c, day in enumerate(week):
+                        cell = self._day_cells[r][c]
+                        day_text: ft.Text = cell.data["day_text"]
+                        dots_row: ft.Row = cell.data["dots_row"]
+                        cell.data["day"] = day
 
-                    if day == 0:
-                        day_text.value = ""
-                        dots_row.controls.clear()
-                        cell.data["today_dot"].visible = False
-                        cell.bgcolor = None
-                        cell.border = None
-                        cell.on_click = None
-                        continue
+                        if day == 0:
+                            day_text.value = ""
+                            dots_row.controls.clear()
+                            cell.data["today_dot"].visible = False
+                            if cell.data.get("class_bar") is not None:
+                                cell.data["class_bar"].visible = False
+                            cell.bgcolor = None
+                            cell.border = None
+                            cell.on_click = None
+                            continue
 
-                    day_text.value = str(day)
-                    cell.on_click = lambda e, d=day: self._on_day_click_by_day(d)
+                        day_text.value = str(day)
+                        cell.on_click = lambda e, d=day: self._on_day_click_by_day(d)
 
-                    is_today = (day == today.day and self._month == today.month and self._year == today.year)
-                    is_selected = (day == self._selected_day)
+                        cell_date = date(self._year, self._month, day)
+                        is_today = (cell_date == today)
+                        is_selected = (day == self._selected_day)
 
-                    # Deadline data for this day
-                    key = f"{self._year}-{self._month:02d}-{day:02d}"
-                    acts = self._deadline_map.get(key, [])
-                    has_deadline = len(acts) > 0
-
-                    # CV-07: Determine most urgent urgency for cell hint
-                    most_urgent_color = None
-                    if has_deadline:
-                        urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
-                        sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
-                        most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
-
-                    # Cell styling
-                    # Today  = accent dot indicator (always visible, unique landmark)
-                    # Selected = white/silver border (navigation state)
-                    # Today+Selected = both combined
-                    # Has deadline = subtle urgency-tinted bg
-
-                    today_dot: ft.Container = cell.data["today_dot"]
-                    today_dot.visible = is_today  # dot is ONLY for today
-                    today_dot.bgcolor = C.ACCENT
-
-                    if is_selected and is_today:
-                        # Both: accent text + white selection border + today dot
-                        cell.bgcolor = C.SURFACE_HOVER
-                        cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
-                        day_text.color = C.ACCENT
-                        day_text.weight = ft.FontWeight.W_700
-                    elif is_selected:
-                        # Selected only: white/silver border, neutral bg
-                        cell.bgcolor = C.SURFACE_HOVER
-                        cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
-                        day_text.color = C.TEXT_PRIMARY
-                        day_text.weight = ft.FontWeight.W_600
-                    elif is_today:
-                        # Today only: accent text + dot, NO border
-                        cell.bgcolor = None
-                        cell.border = None
-                        day_text.color = C.ACCENT
-                        day_text.weight = ft.FontWeight.W_700
-                    elif has_deadline:
-                        # Has deadline: subtle urgency bg
-                        cell.bgcolor = ft.Colors.with_opacity(
-                            0.06, most_urgent_color or C.ACCENT
+                        key = f"{self._year}-{self._month:02d}-{day:02d}"
+                        acts = self._deadline_map.get(key, [])
+                        has_deadline = len(acts) > 0
+                        has_classes = bool(
+                            self._schedule_view.sessions_for_day(cell_date)
                         )
-                        cell.border = ft.Border.all(
-                            0.5,
-                            ft.Colors.with_opacity(
-                                0.19, most_urgent_color or C.BORDER
-                            ),
-                        )
-                        day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
-                        day_text.weight = ft.FontWeight.W_500
-                    else:
-                        cell.bgcolor = None
-                        cell.border = None
-                        day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
-                        day_text.weight = ft.FontWeight.W_400
 
-                    # CV-03: Larger dots (6px) with smarter display
-                    dots_row.controls.clear()
-                    if acts:
-                        if len(acts) >= 3:
-                            # Show count badge instead of many dots
-                            dots_row.controls.append(
-                                ft.Container(
-                                    content=ft.Text(
-                                        str(len(acts)),
-                                        size=7,
-                                        color=on_color(most_urgent_color or C.ACCENT),
-                                        weight=ft.FontWeight.W_700,
-                                        text_align=ft.TextAlign.CENTER,
-                                    ),
-                                    width=14, height=14, border_radius=7,
-                                    bgcolor=most_urgent_color or C.ACCENT,
-                                    alignment=ft.Alignment(0, 0),
-                                )
+                        most_urgent_color = None
+                        if has_deadline:
+                            urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+                            sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
+                            most_urgent_color = get_urgency_color(sorted_acts[0].get("urgency", "safe"))
+
+                        today_dot: ft.Container = cell.data["today_dot"]
+                        today_dot.visible = is_today
+                        today_dot.bgcolor = C.ACCENT
+
+                        if is_selected and is_today:
+                            cell.bgcolor = C.SURFACE_HOVER
+                            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                            day_text.color = C.ACCENT
+                            day_text.weight = ft.FontWeight.W_700
+                        elif is_selected:
+                            cell.bgcolor = C.SURFACE_HOVER
+                            cell.border = ft.Border.all(1.5, C.BORDER_STRONG)
+                            day_text.color = C.TEXT_PRIMARY
+                            day_text.weight = ft.FontWeight.W_600
+                        elif is_today:
+                            cell.bgcolor = None
+                            cell.border = None
+                            day_text.color = C.ACCENT
+                            day_text.weight = ft.FontWeight.W_700
+                        elif has_deadline:
+                            cell.bgcolor = ft.Colors.with_opacity(
+                                0.06, most_urgent_color or C.ACCENT
                             )
+                            cell.border = ft.Border.all(
+                                0.5,
+                                ft.Colors.with_opacity(
+                                    0.19, most_urgent_color or C.BORDER
+                                ),
+                            )
+                            day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
+                            day_text.weight = ft.FontWeight.W_500
                         else:
-                            urgency_colors = []
-                            seen = set()
-                            for a in acts:
-                                urg = a.get("urgency", "safe")
-                                col = get_urgency_color(urg)
-                                if col not in seen:
-                                    seen.add(col)
-                                    urgency_colors.append(col)
-                            for color in urgency_colors[:3]:
-                                dots_row.controls.append(
-                                    ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
-                                )
+                            cell.bgcolor = None
+                            cell.border = None
+                            day_text.color = C.CRITICAL if c == 6 else C.TEXT_PRIMARY
+                            day_text.weight = ft.FontWeight.W_400
 
-        self._update_day_panel()
+                        self._render_activity_markers(
+                            dots_row,
+                            acts,
+                            most_urgent_color,
+                            class_bar=cell.data.get("class_bar"),
+                            has_classes=has_classes,
+                            badge_size=14,
+                            badge_font_size=7,
+                        )
+
+            if hasattr(self, "_period_pages"):
+                self._render_period_pages()
+            self._update_day_panel()
+        finally:
+            self._rendering_calendar = was_rendering
+
         if update_page and not getattr(self, "_defer_page_update", False):
             try:
                 self._page_ref.update()
@@ -1657,12 +1996,14 @@ class CalendarView(ft.Container):
         day_text: ft.Text = cell.data["day_text"]
         dots_row: ft.Row = cell.data["dots_row"]
 
-        is_today = (day == today.day and self._month == today.month and self._year == today.year)
+        cell_date = date(self._year, self._month, day)
+        is_today = (cell_date == today)
         is_selected = (day == self._selected_day)
 
         key = f"{self._year}-{self._month:02d}-{day:02d}"
         acts = self._deadline_map.get(key, [])
         has_deadline = len(acts) > 0
+        has_classes = bool(self._schedule_view.sessions_for_day(cell_date))
 
         most_urgent_color = None
         if has_deadline:
@@ -1705,36 +2046,15 @@ class CalendarView(ft.Container):
             day_text.color = C.CRITICAL if col == 6 else C.TEXT_PRIMARY
             day_text.weight = ft.FontWeight.W_400
 
-        dots_row.controls.clear()
-        if acts:
-            if len(acts) >= 3:
-                dots_row.controls.append(
-                    ft.Container(
-                        content=ft.Text(
-                            str(len(acts)),
-                            size=7,
-                            color=on_color(most_urgent_color or C.ACCENT),
-                            weight=ft.FontWeight.W_700,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        width=14, height=14, border_radius=7,
-                        bgcolor=most_urgent_color or C.ACCENT,
-                        alignment=ft.Alignment(0, 0),
-                    )
-                )
-            else:
-                urgency_colors = []
-                seen = set()
-                for a in acts:
-                    urg = a.get("urgency", "safe")
-                    col_c = get_urgency_color(urg)
-                    if col_c not in seen:
-                        seen.add(col_c)
-                        urgency_colors.append(col_c)
-                for color in urgency_colors[:3]:
-                    dots_row.controls.append(
-                        ft.Container(width=6, height=6, border_radius=3, bgcolor=color)
-                    )
+        self._render_activity_markers(
+            dots_row,
+            acts,
+            most_urgent_color,
+            class_bar=cell.data.get("class_bar"),
+            has_classes=has_classes,
+            badge_size=14,
+            badge_font_size=7,
+        )
 
     def _navigate(self, delta: int):
         """Navigate based on current view mode."""
@@ -1757,10 +2077,9 @@ class CalendarView(ft.Container):
         self._render_month()
 
     def _change_week(self, delta: int):
-        """Move ±1 week."""
-        self._week_start += timedelta(weeks=delta)
-        self._selected_date = None
-        self._selected_day = None
+        """Move ±1 week while advancing the selected weekday."""
+        target = self._week_start + timedelta(weeks=delta)
+        self._advance_week_selection(target, delta)
         self._render_week()
 
     def _go_today(self):
@@ -1777,7 +2096,7 @@ class CalendarView(ft.Container):
             self._render_week()
 
     def _toggle_view_mode(self, mode: str):
-        """Switch between month and week view."""
+        """Switch between month, week, and schedule view."""
         if self._view_mode == mode:
             return
         previous_mode = self._view_mode
@@ -1789,33 +2108,15 @@ class CalendarView(ft.Container):
             self._leave_schedule_mode()
 
         if mode == "month":
-            # Update toggle styling
-            self._mode_month_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
-            self._mode_month_icon.color = C.TEXT_PRIMARY
-            self._mode_month_text.color = C.TEXT_PRIMARY
-            self._mode_week_btn.bgcolor = "transparent"
-            self._mode_week_icon.color = C.TEXT_SECONDARY
-            self._mode_week_text.color = C.TEXT_SECONDARY
-            # Show/hide
             self._grid.visible = True
             self._week_strip.visible = False
-            # Sync: if a date was selected in week view, jump to that month
             if self._selected_date:
                 self._year = self._selected_date.year
                 self._month = self._selected_date.month
                 self._selected_day = self._selected_date.day
         else:
-            # Update toggle styling
-            self._mode_week_btn.bgcolor = ft.Colors.with_opacity(0.19, C.ACCENT)
-            self._mode_week_icon.color = C.TEXT_PRIMARY
-            self._mode_week_text.color = C.TEXT_PRIMARY
-            self._mode_month_btn.bgcolor = "transparent"
-            self._mode_month_icon.color = C.TEXT_SECONDARY
-            self._mode_month_text.color = C.TEXT_SECONDARY
-            # Show/hide
             self._grid.visible = False
             self._week_strip.visible = True
-            # Sync: jump to week containing selected day
             if self._selected_day:
                 try:
                     sel = date(self._year, self._month, self._selected_day)
@@ -1823,12 +2124,12 @@ class CalendarView(ft.Container):
                     self._selected_date = sel
                 except ValueError:
                     pass
+        self._style_mode_buttons()
         self._reset_period_pager()
         if self._view_mode == "month":
             self._render_month()
         else:
             self._render_week()
-        self._style_mode_buttons()
 
     # Schedule (Portal timetable) mode
     def _style_mode_buttons(self) -> None:
@@ -1869,6 +2170,7 @@ class CalendarView(ft.Container):
 
     def reset_schedule(self) -> None:
         """Drop in-memory timetable data (account/cache namespace changed)."""
+        self._detail_filter_mode = "day"
         self._schedule_view.reset()
 
     def _leave_schedule_mode(self) -> None:
@@ -1884,12 +2186,14 @@ class CalendarView(ft.Container):
     def _on_day_click_by_day(self, day: int):
         old_day = self._selected_day
         self._selected_day = day
-        # Sync selected_date for week view
         try:
             self._selected_date = date(self._year, self._month, day)
+            if self._detail_filter_mode == "week_classes":
+                self._week_start = self._selected_date - timedelta(
+                    days=self._selected_date.weekday()
+                )
         except ValueError:
             pass
-        # H1: Only restyle the 2 affected cells instead of full 42-cell re-render
         today = date.today()
         for r in range(6):
             for c in range(7):
@@ -1899,6 +2203,8 @@ class CalendarView(ft.Container):
                     if cell_day == 0:
                         continue
                     self._restyle_cell(cell, cell_day, c, today)
+        if hasattr(self, "_period_pages"):
+            self._render_period_pages()
         self._update_day_panel()
         try:
             self._page_ref.update()
@@ -1906,40 +2212,383 @@ class CalendarView(ft.Container):
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
-    def _update_day_panel(self):
-        """Update bottom panel - CV-06: better microcopy."""
-        self._day_list.controls.clear()
+    def _active_schedule_monday(self) -> date:
+        if self._view_mode == "week":
+            return self._week_start
+        if self._selected_day is not None:
+            try:
+                sel = date(self._year, self._month, self._selected_day)
+                return sel - timedelta(days=sel.weekday())
+            except ValueError:
+                pass
+        today = date.today()
+        if today.year == self._year and today.month == self._month:
+            return today - timedelta(days=today.weekday())
+        first_day = date(self._year, self._month, 1)
+        return first_day - timedelta(days=first_day.weekday())
 
-        if self._selected_day is None:
+    def _set_detail_filter_mode(
+        self, mode: Literal["day", "week_classes", "tasks"]
+    ) -> None:
+        if self._detail_filter_mode == mode:
+            return
+        self._detail_filter_mode = mode
+        if mode == "week_classes":
+            monday = self._active_schedule_monday()
+            self._schedule_view.hydrate_and_ensure_weeks([monday], debounce_ms=0)
+        self._update_day_panel()
+        try:
+            self._page_ref.update()
+        except Exception:
+            pass
+
+    def _reload_active_schedule_week(self) -> None:
+        monday = self._active_schedule_monday()
+        self._schedule_view.reload_week(monday)
+        self._update_day_panel()
+        try:
+            self._page_ref.update()
+        except Exception:
+            pass
+
+    def _style_filter_chips(
+        self, week_class_count: int, tasks_count: int
+    ) -> None:
+        self._filter_week_text.value = f"Cả tuần ({week_class_count} ca)"
+        self._filter_tasks_text.value = f"Bài tập ({tasks_count})"
+        for mode, chip, txt in (
+            ("day", self._filter_day_chip, self._filter_day_text),
+            ("week_classes", self._filter_week_chip, self._filter_week_text),
+            ("tasks", self._filter_tasks_chip, self._filter_tasks_text),
+        ):
+            active = self._detail_filter_mode == mode
+            chip.bgcolor = (
+                ft.Colors.with_opacity(0.16, C.ACCENT) if active else C.SURFACE
+            )
+            chip.border = ft.Border.all(
+                1,
+                ft.Colors.with_opacity(0.35, C.ACCENT) if active else C.BORDER,
+            )
+            txt.color = C.ACCENT if active else C.TEXT_SECONDARY
+            txt.weight = (
+                ft.FontWeight.W_600 if active else ft.FontWeight.W_500
+            )
+
+    def _render_portal_status_row(self, monday: date) -> None:
+        is_loading, error_msg = self._schedule_view.week_status(monday)
+        controls: list[ft.Control] = []
+        if is_loading:
+            controls = [
+                ft.ProgressRing(
+                    width=13, height=13, stroke_width=2, color=C.ACCENT
+                ),
+                ft.Text("Đang tải lịch học…", size=11, color=C.TEXT_SECONDARY),
+            ]
+        elif error_msg:
+            is_maint = "bảo trì" in error_msg.casefold()
+            icon_tone = C.WARNING if is_maint else C.CRITICAL
+            text_tone = C.TEXT_PRIMARY if is_maint else C.CRITICAL
+            icon = (
+                ft.Icons.WARNING_AMBER_ROUNDED
+                if is_maint
+                else ft.Icons.ERROR_OUTLINE_ROUNDED
+            )
+            controls = [
+                ft.Icon(icon, size=15, color=icon_tone),
+                ft.Text(
+                    error_msg,
+                    size=11,
+                    color=text_tone,
+                    max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                    expand=True,
+                ),
+                ft.TextButton(
+                    "Thử lại",
+                    height=34,
+                    on_click=lambda _: self._reload_active_schedule_week(),
+                ),
+            ]
+        self._portal_status_row.controls = controls
+        self._portal_status_row.visible = bool(controls)
+
+    def _make_compact_session_row(self, session: ClassSession) -> ft.Container:
+        room_badge = compact_room_badge_text(session)
+        is_online = room_badge == "E-Learning"
+        room_fg = C.SAFE if is_online else C.TEXT_SECONDARY
+        room_bg = (
+            ft.Colors.with_opacity(0.10, C.SAFE)
+            if is_online
+            else C.SURFACE_ELEVATED
+        )
+
+        meta_controls: list[ft.Control] = [
+            ft.Container(
+                content=ft.Text(
+                    room_badge,
+                    size=10,
+                    weight=ft.FontWeight.W_600 if is_online else ft.FontWeight.W_500,
+                    color=room_fg,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                bgcolor=room_bg,
+                border_radius=5,
+                padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
+            )
+        ]
+        if session.cancelled:
+            meta_controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        "Tạm ngưng",
+                        size=9.5,
+                        weight=ft.FontWeight.W_600,
+                        color=C.CRITICAL,
+                    ),
+                    bgcolor=ft.Colors.with_opacity(0.12, C.CRITICAL),
+                    border_radius=5,
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
+                )
+            )
+
+        time_col = ft.Container(
+            width=44,
+            alignment=ft.Alignment(-1, 0),
+            content=ft.Column(
+                controls=[
+                    ft.Text(
+                        f"{session.start_at:%H:%M}",
+                        size=11,
+                        weight=ft.FontWeight.W_700,
+                        color=C.ACCENT,
+                        max_lines=1,
+                    ),
+                    ft.Text(
+                        f"{session.end_at:%H:%M}",
+                        size=10,
+                        color=C.TEXT_SECONDARY,
+                        max_lines=1,
+                    ),
+                ],
+                spacing=1,
+                tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.START,
+            ),
+        )
+        accent_bar = ft.Container(
+            width=3,
+            height=32,
+            border_radius=2,
+            bgcolor=C.CRITICAL if session.cancelled else C.ACCENT,
+        )
+        middle_col = ft.Column(
+            controls=[
+                ft.Text(
+                    session.subject,
+                    size=12.5,
+                    weight=ft.FontWeight.W_600,
+                    color=C.TEXT_PRIMARY,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+                ft.Row(
+                    controls=meta_controls,
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            spacing=2,
+            tight=True,
+            expand=True,
+        )
+        row_container = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            bgcolor=C.SURFACE,
+            border_radius=8,
+            border=ft.Border.all(1, C.BORDER),
+            ink=True,
+            tooltip="Xem chi tiết buổi học",
+            data={"compact_session_row": True, "min_height": 46},
+            content=ft.Row(
+                controls=[
+                    ft.Container(width=0, height=32),
+                    time_col,
+                    accent_bar,
+                    middle_col,
+                    ft.Icon(
+                        ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                        size=18,
+                        color=C.TEXT_SECONDARY,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            on_click=lambda _e, item=session: self._schedule_view.open_session_details(
+                item
+            ),
+        )
+        return row_container
+
+    def _update_day_panel(self):
+        """Update bottom panel with filter chips, compact class rows, and activity mini-cards."""
+        self._day_list.controls.clear()
+        urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
+
+        active_monday = self._active_schedule_monday()
+        week_sessions_map = self._schedule_view.sessions_for_week(active_monday)
+        week_class_count = sum(len(v) for v in week_sessions_map.values())
+
+        if self._view_mode == "week":
+            day_date = self._selected_date
+            tasks_scope_count = sum(
+                len(
+                    self._deadline_map.get(
+                        (self._week_start + timedelta(days=i)).isoformat(), []
+                    )
+                )
+                for i in range(7)
+            )
+        else:
+            if self._selected_day is not None:
+                try:
+                    day_date = date(self._year, self._month, self._selected_day)
+                except ValueError:
+                    day_date = None
+            else:
+                day_date = None
+            tasks_scope_count = (
+                len(self._deadline_map.get(day_date.isoformat(), []))
+                if day_date is not None
+                else 0
+            )
+
+        self._style_filter_chips(week_class_count, tasks_scope_count)
+        self._render_portal_status_row(active_monday)
+
+        today = date.today()
+
+        if self._detail_filter_mode == "week_classes":
+            week_end = active_monday + timedelta(days=6)
+            self._day_title.value = (
+                f"Lịch học tuần {active_monday:%d/%m} - {week_end:%d/%m}"
+            )
+            self._day_count.value = (
+                f"{week_class_count} ca học" if week_class_count else ""
+            )
+            for i in range(7):
+                d = active_monday + timedelta(days=i)
+                sessions = week_sessions_map.get(d, ())
+                if not sessions:
+                    continue
+                self._day_list.controls.append(
+                    ft.Container(
+                        padding=ft.Padding.only(top=4 if self._day_list.controls else 0, bottom=1),
+                        content=ft.Text(
+                            f"{_WEEKDAYS_LONG_VI[d.weekday()]}, {d:%d/%m}",
+                            size=11,
+                            weight=ft.FontWeight.W_600,
+                            color=C.ACCENT if d == today else C.TEXT_SECONDARY,
+                        ),
+                    )
+                )
+                for sess in sessions:
+                    self._day_list.controls.append(
+                        self._make_compact_session_row(sess)
+                    )
+            self._day_empty_title.value = "Tuần này không có lịch học"
+            self._day_empty_hint.value = "Chuyển tuần khác hoặc bấm tải lại để kiểm tra"
+            self._day_empty.visible = week_class_count == 0
+            return
+
+        if self._detail_filter_mode == "tasks" and self._view_mode == "week":
+            week_end = self._week_start + timedelta(days=6)
+            self._day_title.value = (
+                f"Bài tập tuần {self._week_start:%d/%m} - {week_end:%d/%m}"
+            )
+            self._day_count.value = (
+                f"{tasks_scope_count} bài tập" if tasks_scope_count else ""
+            )
+            for i in range(7):
+                d = self._week_start + timedelta(days=i)
+                acts = self._deadline_map.get(d.isoformat(), [])
+                if not acts:
+                    continue
+                sorted_acts = sorted(
+                    acts,
+                    key=lambda a: urgency_priority.get(
+                        a.get("urgency", "safe"), 3
+                    ),
+                )
+                self._day_list.controls.append(
+                    ft.Container(
+                        padding=ft.Padding.only(top=4 if self._day_list.controls else 0, bottom=1),
+                        content=ft.Text(
+                            f"{_WEEKDAYS_LONG_VI[d.weekday()]}, {d:%d/%m}",
+                            size=11,
+                            weight=ft.FontWeight.W_600,
+                            color=C.ACCENT if d == today else C.TEXT_SECONDARY,
+                        ),
+                    )
+                )
+                for act in sorted_acts:
+                    self._day_list.controls.append(self._make_mini_card(act))
+            self._day_empty_title.value = "Không có bài tập trong tuần này"
+            self._day_empty_hint.value = "Chuyển sang tuần khác để xem tiếp"
+            self._day_empty.visible = tasks_scope_count == 0
+            return
+
+        if day_date is None:
             self._day_title.value = "Chọn một ngày"
             self._day_count.value = ""
+            self._day_empty_title.value = "Không có bài tập đến hạn"
+            self._day_empty_hint.value = "Chọn ngày có chấm màu để xem"
             self._day_empty.visible = True
             return
 
-        key = f"{self._year}-{self._month:02d}-{self._selected_day:02d}"
-        acts = self._deadline_map.get(key, [])
-
         try:
             from gui.core.utils import get_vi_weekday
-            wd = get_vi_weekday(datetime(self._year, self._month, self._selected_day))
-            self._day_title.value = f"{wd}, {self._selected_day:02d}/{self._month:02d}"
+            wd = get_vi_weekday(
+                datetime(day_date.year, day_date.month, day_date.day)
+            )
+            self._day_title.value = f"{wd}, {day_date.day:02d}/{day_date.month:02d}"
         except Exception:
-            self._day_title.value = f"{self._selected_day:02d}/{self._month:02d}/{self._year}"
+            self._day_title.value = (
+                f"{day_date.day:02d}/{day_date.month:02d}/{day_date.year}"
+            )
 
-        # CV-06: Better count text
-        if acts:
-            self._day_count.value = f"{len(acts)} bài tập"
+        acts = self._deadline_map.get(day_date.isoformat(), [])
+        sorted_acts = sorted(
+            acts,
+            key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3),
+        )
+        day_sessions = (
+            ()
+            if self._detail_filter_mode == "tasks"
+            else self._schedule_view.sessions_for_day(day_date)
+        )
+
+        if day_sessions and sorted_acts:
+            self._day_count.value = (
+                f"{len(day_sessions)} ca học · {len(sorted_acts)} bài tập"
+            )
+        elif day_sessions:
+            self._day_count.value = f"{len(day_sessions)} ca học"
+        elif sorted_acts:
+            self._day_count.value = f"{len(sorted_acts)} bài tập"
         else:
             self._day_count.value = ""
-        self._day_empty.visible = len(acts) == 0
 
-        # Sort by urgency (most urgent first)
-        urgency_priority = {"overdue": 0, "critical": 1, "warning": 2, "safe": 3}
-        sorted_acts = sorted(acts, key=lambda a: urgency_priority.get(a.get("urgency", "safe"), 3))
-
+        for sess in day_sessions:
+            self._day_list.controls.append(self._make_compact_session_row(sess))
         for act in sorted_acts:
-            card = self._make_mini_card(act)
-            self._day_list.controls.append(card)
+            self._day_list.controls.append(self._make_mini_card(act))
+
+        has_items = bool(day_sessions or sorted_acts)
+        self._day_empty_title.value = "Không có bài tập đến hạn"
+        self._day_empty_hint.value = "Chọn ngày có chấm màu để xem"
+        self._day_empty.visible = not has_items
 
     def _make_mini_card(self, act: Dict[str, Any]) -> ft.Container:
         """Create a compact activity card - CV-04, CV-08 fixes."""
@@ -2099,7 +2748,8 @@ class CalendarView(ft.Container):
         # Day Panel Static Info
         self._day_title.color = C.TEXT_PRIMARY
         self._day_count.color = C.TEXT_SECONDARY
-        
+        self._detail_refresh_btn.icon_color = C.TEXT_SECONDARY
+
         # Day Empty State
         self._day_empty_icon.color = C.BORDER
         self._day_empty_title.color = C.TEXT_SECONDARY
@@ -2111,14 +2761,23 @@ class CalendarView(ft.Container):
         for row in self._day_cells:
             for cell in row:
                 cell.data["today_dot"].bgcolor = C.ACCENT
+                if cell.data.get("class_bar") is not None:
+                    cell.data["class_bar"].bgcolor = C.ACCENT
         for cell in self._week_cells:
             cell.data["count_text"].color = C.TEXT_SECONDARY
+            self._render_shift_bars(
+                cell.data["shift_bars"], cell.data.get("date")
+            )
 
         # Re-render Cells (applies new colors to grid cells)
         if self._view_mode == "month":
-            self._render_month()
+            self._render_month(
+                update_page=False, ensure_schedule=self.visible
+            )
         elif self._view_mode == "week":
-            self._render_week()
+            self._render_week(
+                update_page=False, ensure_schedule=self.visible
+            )
         self._render_period_pages()
 
         # Re-render selected day details list (re-creates mini-cards with correct theme)

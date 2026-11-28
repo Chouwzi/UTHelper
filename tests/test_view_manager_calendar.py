@@ -92,3 +92,56 @@ def test_calendar_show_reuses_period_pages_and_defers_duplicate_update(monkeypat
         ]
     )
     assert [period.control for period in calendar._period_pages] != initial_controls
+
+
+def test_show_calendar_hydrates_cached_schedule_in_single_update(tmp_path):
+    from datetime import date, datetime, time
+    from core.today_schedule import ClassSession, WeekScheduleCache, monday_of
+
+    today = date.today()
+    monday = monday_of(today)
+    cache = WeekScheduleCache(cache_dir=tmp_path, namespace="vm-cal")
+    cache.save_week(
+        monday,
+        {
+            today: (
+                ClassSession(
+                    session_id="vm-sess-1",
+                    subject="Kiến trúc máy tính",
+                    course_code="0101001",
+                    start_at=datetime.combine(today, time(7, 30)),
+                    end_at=datetime.combine(today, time(10, 0)),
+                    room="F502 - CS1 (P.Thạnh Mỹ Tây, TP.HCM)",
+                    campus="Cơ sở 1",
+                    period_start=1,
+                    period_end=3,
+                    cancelled=False,
+                    note="",
+                ),
+            )
+        },
+        datetime.now(),
+    )
+
+    page = _Page()
+    calendar = CalendarView(page, schedule_cache=cache)
+    controller = SimpleNamespace(
+        calendar_btn=SimpleNamespace(icon_color=None),
+        grades_btn=SimpleNamespace(icon_color=None),
+    )
+    manager = ViewManager(
+        page=page,
+        dashboard=SimpleNamespace(visible=True),
+        detail_view=SimpleNamespace(visible=False),
+        settings_view=SimpleNamespace(visible=False),
+        calendar_view=calendar,
+        grade_overview_view=SimpleNamespace(visible=False),
+        controller=controller,
+    )
+
+    manager.show_calendar([])
+
+    assert page.update_count == 1
+    assert len(calendar._schedule_view.sessions_for_day(today)) == 1
+    assert len(calendar._day_list.controls) == 1
+

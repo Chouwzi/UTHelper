@@ -5,10 +5,17 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 SCHEMA_VERSION = 2
 
@@ -206,6 +213,12 @@ class DiagnosticContext(BaseModel):
     app_version: str
     release_channel: str
     install_type: str
+    distribution_channel: str | None = Field(
+        default=None, pattern=r"^[a-z0-9_-]{1,32}$"
+    )
+    package_format: str | None = Field(
+        default=None, pattern=r"^[a-z0-9_-]{1,32}$"
+    )
     os_family: str
     os_version: str
     os_build: str | None = None
@@ -245,6 +258,12 @@ class DiagnosticReport(BaseModel):
     app_version: str
     release_channel: str
     install_type: str
+    distribution_channel: str | None = Field(
+        default=None, pattern=r"^[a-z0-9_-]{1,32}$"
+    )
+    package_format: str | None = Field(
+        default=None, pattern=r"^[a-z0-9_-]{1,32}$"
+    )
     os_family: str
     os_version: str
     os_build: str | None = None
@@ -296,3 +315,15 @@ class DiagnosticReport(BaseModel):
         if (self.native_exception_code is None) != (self.faulting_module is None):
             raise ValueError("native crash evidence must be complete")
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_distribution_fields(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        data = handler(self)
+        if self.distribution_channel is None:
+            data.pop("distribution_channel", None)
+        if self.package_format is None:
+            data.pop("package_format", None)
+        return data

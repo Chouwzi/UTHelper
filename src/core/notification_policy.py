@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
 
+from core.activity_status import (
+    COMPLETED_SUBMISSION_STATUSES,
+    is_ws_verifiable_courses_module,
+    normalize_submission_status,
+)
 from core.notification_types import (
     ActivityNotification,
     NotificationCandidate,
@@ -54,7 +59,8 @@ class NotificationPolicyConfig:
 class ActivityNotificationPolicy:
     """Deterministic notification rules with no platform dependencies."""
 
-    _IGNORED_STATUSES = {"submitted", "graded", "đã nộp", "đã chấm"}
+    _IGNORED_STATUSES = COMPLETED_SUBMISSION_STATUSES
+    _COURSES_VERIFIABLE_TYPES = frozenset({"assignment", "assign", "quiz"})
 
     def __init__(self, policy_config: NotificationPolicyConfig):
         self.config = policy_config
@@ -78,11 +84,25 @@ class ActivityNotificationPolicy:
         }
         if activity.course_name.strip().casefold() in muted_courses:
             return False
-        if (
-            self.config.ignore_submitted
-            and activity.submission_status in self._IGNORED_STATUSES
-        ):
-            return False
+        if self.config.ignore_submitted:
+            status = normalize_submission_status(activity.submission_status)
+            if status in self._IGNORED_STATUSES:
+                return False
+            # On Courses (courses.ut.edu.vn), "unknown" on WS-verifiable
+            # modules (/mod/assign/, /mod/quiz/) means submission status has
+            # not been verified yet or WS failed -> block false alerts.
+            # Non-WS modules (/mod/scorm/, /mod/lesson/) and THNN calendar
+            # items remain "unknown" authoritatively -> must stay eligible.
+            if (
+                status == "unknown"
+                and activity.site_kind == "courses"
+                and activity.event_type.strip().casefold()
+                in self._COURSES_VERIFIABLE_TYPES
+                and is_ws_verifiable_courses_module(
+                    activity.url, activity.activity_id, activity.event_type
+                )
+            ):
+                return False
         if self.config.notify_types and activity.event_type:
             if activity.event_type not in self.config.notify_types:
                 return False

@@ -21,11 +21,14 @@ class ExpectedGradeDialog:
 
     @staticmethod
     def show(
-        page: ft.Page,
+        page: ft.Page | None,
         overall: OverallGpa | None,
         *,
         on_dismiss: Optional[Callable[[], Any]] = None,
-    ) -> None:
+        on_closing: Optional[Callable[[], Any]] = None,
+    ) -> Optional[Callable[[], None]]:
+        if page is None:
+            return None
         scale = {"value": "4"}
 
         def _field(label: str, value: str = "", hint: str = "") -> ft.TextField:
@@ -134,6 +137,11 @@ class ExpectedGradeDialog:
                     pass
 
         def _close(_=None):
+            if callable(on_closing):
+                try:
+                    on_closing()
+                except Exception:
+                    pass
             if not used_overlay:
                 try:
                     page.pop_dialog()
@@ -204,12 +212,14 @@ class ExpectedGradeDialog:
         try:
             page.show_dialog(dialog)
         except Exception:
-            used_overlay = True
             overlay = getattr(page, "overlay", None)
-            if overlay is not None:
-                overlay.append(dialog)
-                dialog.open = True
-                try:
-                    page.update()
-                except Exception:
-                    pass
+            if overlay is None:
+                return None
+            used_overlay = True
+            overlay.append(dialog)
+            dialog.open = True
+            try:
+                page.update()
+            except Exception:
+                pass
+        return _close

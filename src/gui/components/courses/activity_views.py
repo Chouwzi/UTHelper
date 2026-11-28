@@ -941,6 +941,7 @@ class QuizActivityView(_BasePaneActivityView):
         on_close: Callable[[], None],
         on_open_webview: Callable[[str, str], None],
         on_start_quiz: Optional[Callable[[], None]] = None,
+        on_status_changed: Optional[Callable[..., Any]] = None,
         is_expanded: bool = False,
         show_expand_toggle: bool = False,
         on_toggle_expand: Optional[Callable[[], None]] = None,
@@ -961,6 +962,7 @@ class QuizActivityView(_BasePaneActivityView):
         )
         self._course_id = course_id
         self._on_start_quiz = on_start_quiz
+        self._on_status_changed = on_status_changed
         self._summary: Optional[QuizActivitySummary] = None
         self._in_review: bool = False
         self._current_review: Optional[
@@ -1690,6 +1692,27 @@ class QuizActivityView(_BasePaneActivityView):
         self._in_review = False
         self._current_review = None
         self._title_text.value = summary.title
+        if callable(getattr(self, "_on_status_changed", None)) and summary.attempts:
+            from core.activity_status import (
+                COMPLETED_SUBMISSION_STATUSES,
+                normalize_submission_status,
+            )
+
+            if any(
+                normalize_submission_status(att.state)
+                in COMPLETED_SUBMISSION_STATUSES
+                for att in summary.attempts
+            ):
+                quiz_url = (
+                    summary.web_url
+                    or self._module.web_url
+                    or self._module.url
+                )
+                if quiz_url:
+                    try:
+                        self._on_status_changed(quiz_url, "submitted")
+                    except Exception:
+                        pass
         controls: list[ft.Control] = []
         if notice:
             controls.append(build_offline_banner(notice))

@@ -550,6 +550,37 @@ class CourseCacheStore:
                     self._put_mem_detail_locked(detail_path, post_sig, snap)
             return snap
 
+    def completed_module_cmids(self, source: CourseSource = "thnn") -> set[int]:
+        """Return known-completed module cmids from already-cached course trees without network I/O."""
+        valid_source = _validate_source(source)
+        completed: set[int] = set()
+        try:
+            catalog = self.load_catalog()
+        except Exception:
+            return completed
+
+        seen_course_ids: set[int] = set()
+        for course in catalog.courses:
+            if course.source != valid_source or course.id in seen_course_ids:
+                continue
+            seen_course_ids.add(course.id)
+            try:
+                detail_path = self._detail_path(valid_source, course.id)
+                if self._stat_sig(detail_path) is None:
+                    continue
+                detail = self.load_course_detail(valid_source, course.id)
+            except Exception:
+                continue
+            for section in detail.sections:
+                for mod in section.modules:
+                    if (
+                        mod.cmid > 0
+                        and mod.completion_mode > 0
+                        and mod.completion_state > 0
+                    ):
+                        completed.add(mod.cmid)
+        return completed
+
     def save_course_detail(
         self,
         source: CourseSource,
