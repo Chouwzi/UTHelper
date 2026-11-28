@@ -49,6 +49,56 @@ _CLEAN_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _POSTHOG_WEB_UI_HOSTS = frozenset(
     {"app.posthog.com", "us.posthog.com", "eu.posthog.com"}
 )
+_NAT64_WELL_KNOWN_NET = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL_USE_NET = ipaddress.IPv6Network("64:ff9b:1::/48")
+_IPV4_MAPPED_NET = ipaddress.IPv6Network("::ffff:0:0/96")
+_SIIT_IPV4_TRANSLATED_NET = ipaddress.IPv6Network("::ffff:0:0:0/96")
+_SIXTOFOUR_NET = ipaddress.IPv6Network("2002::/16")
+_TEREDO_NET = ipaddress.IPv6Network("2001::/32")
+_BENCHMARKING_IPV6_NET = ipaddress.IPv6Network("2001:2::/48")
+_DISCARD_ONLY_IPV6_NET = ipaddress.IPv6Network("100::/64")
+_NON_PUBLIC_IPV6_NETWORKS = (
+    _NAT64_WELL_KNOWN_NET,
+    _NAT64_LOCAL_USE_NET,
+    _IPV4_MAPPED_NET,
+    _SIIT_IPV4_TRANSLATED_NET,
+    _SIXTOFOUR_NET,
+    _TEREDO_NET,
+    _BENCHMARKING_IPV6_NET,
+    _DISCARD_ONLY_IPV6_NET,
+)
+
+
+def _has_dangling_empty_port(netloc_host_port: str, parsed_port: int | None) -> bool:
+    if parsed_port is not None:
+        return False
+    if netloc_host_port.startswith("["):
+        close_idx = netloc_host_port.find("]")
+        if close_idx < 0:
+            return True
+        return ":" in netloc_host_port[close_idx + 1 :]
+    return ":" in netloc_host_port
+
+
+def _unwrap_embedded_ipv4(
+    ip_addr: ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address, ...]:
+    embedded: list[ipaddress.IPv4Address] = []
+    if ip_addr.ipv4_mapped is not None:
+        embedded.append(ip_addr.ipv4_mapped)
+    if ip_addr.sixtofour is not None:
+        embedded.append(ip_addr.sixtofour)
+    if ip_addr.teredo is not None:
+        server_v4, client_v4 = ip_addr.teredo
+        embedded.append(server_v4)
+        embedded.append(client_v4)
+    if (
+        ip_addr in _NAT64_WELL_KNOWN_NET
+        or ip_addr in _NAT64_LOCAL_USE_NET
+        or ip_addr in _SIIT_IPV4_TRANSLATED_NET
+    ):
+        embedded.append(ipaddress.IPv4Address(ip_addr.packed[12:16]))
+    return tuple(embedded)
 _FORBIDDEN_TOKEN_MARKERS = (
     "auth_token",
     "authtoken",
@@ -113,7 +163,10 @@ def validate_public_sentry_dsn(value: str) -> str:
         raise PublicConfigError("Sentry DSN must not contain a password")
     if not parsed.hostname or parsed.hostname != parsed.hostname.casefold():
         raise PublicConfigError("Sentry DSN host must be canonical lowercase")
-    if port is not None and not 1 <= port <= 65535:
+    raw_host_port = parsed.netloc.rpartition("@")[2]
+    if _has_dangling_empty_port(raw_host_port, port) or (
+        port is not None and not 1 <= port <= 65535
+    ):
         raise PublicConfigError("Sentry DSN port is invalid")
     if not parsed.username or not _PUBLIC_KEY_RE.fullmatch(parsed.username):
         raise PublicConfigError("Sentry DSN must contain only a public ingestion key")
@@ -203,7 +256,9 @@ def validate_public_posthog_host(
     hostname = parsed.hostname
     if not hostname or parsed.netloc != parsed.netloc.casefold():
         raise PublicConfigError("PostHog host must be canonical lowercase")
-    if port is not None and not 1 <= port <= 65535:
+    if _has_dangling_empty_port(parsed.netloc, port) or (
+        port is not None and not 1 <= port <= 65535
+    ):
         raise PublicConfigError("PostHog host port is invalid")
     if "%" in hostname or hostname.startswith(".") or hostname.endswith(".") or ".." in hostname:
         raise PublicConfigError("PostHog host name is invalid")
@@ -220,8 +275,8 @@ def validate_public_posthog_host(
 
     if ip_addr is not None:
         effective_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip_addr]
-        if isinstance(ip_addr, ipaddress.IPv6Address) and ip_addr.ipv4_mapped is not None:
-            effective_ips.append(ip_addr.ipv4_mapped)
+        if isinstance(ip_addr, ipaddress.IPv6Address):
+            effective_ips.extend(_unwrap_embedded_ipv4(ip_addr))
         for candidate_ip in effective_ips:
             if candidate_ip.is_unspecified or candidate_ip.is_multicast:
                 raise PublicConfigError("PostHog host IP literal is invalid")
@@ -231,9 +286,15 @@ def validate_public_posthog_host(
                 or candidate_ip.is_link_local
                 or candidate_ip.is_reserved
                 or not candidate_ip.is_global
+                or (
+                    isinstance(candidate_ip, ipaddress.IPv6Address)
+                    and any(
+                        candidate_ip in net for net in _NON_PUBLIC_IPV6_NETWORKS
+                    )
+                )
             ):
                 raise PublicConfigError(
-                    "PostHog host must not use loopback, private, or link-local IP literals"
+                    "PostHog host must not use loopback, private, reserved, or non-global IP literals"
                 )
     else:
         if (
@@ -268,8 +329,15 @@ def validate_public_posthog_host(
         if not _CLEAN_PATH_SEGMENT_RE.fullmatch(segment):
             raise PublicConfigError("PostHog host path contains unsafe characters")
 
+    host_netloc = (
+        f"[{hostname}]"
+        if isinstance(ip_addr, ipaddress.IPv6Address)
+        else hostname
+    )
+    if port is not None:
+        host_netloc = f"{host_netloc}:{port}"
     clean_path = f"/{'/'.join(segments)}" if segments else ""
-    return f"https://{parsed.netloc}{clean_path}"
+    return f"https://{host_netloc}{clean_path}"
 
 
 def validate_public_config_bytes(
@@ -349,15 +417,16 @@ def validate_public_config_bytes(
         ):
             raise PublicConfigError("schema v3 diagnostics config fields are invalid")
         dsn = validate_public_sentry_dsn(raw_dsn) if raw_dsn else None
+        if bool(raw_ph_key) != bool(raw_ph_host):
+            raise PublicConfigError(
+                "posthog_project_api_key and posthog_host must both be set or both be empty"
+            )
         ph_key = validate_public_posthog_key(raw_ph_key) if raw_ph_key else None
         ph_host = (
             validate_public_posthog_host(raw_ph_host, allow_private_dev=False)
             if raw_ph_host
             else None
         )
-        if not (ph_key and ph_host):
-            ph_key = None
-            ph_host = None
         return PublicDiagnosticsConfig(
             dsn=dsn,
             build_environment="development" if development else build_env,
@@ -638,16 +707,20 @@ def generate_public_config(
                 raise PublicConfigError("PostHog project API key must be text")
             if not isinstance(raw_ph_host, str):
                 raise PublicConfigError("PostHog host must be text")
+            if require_posthog_configured and not (raw_ph_key and raw_ph_host):
+                raise PublicConfigError(
+                    "both PostHog project API key and PostHog host are required"
+                )
+            if bool(raw_ph_key) != bool(raw_ph_host):
+                raise PublicConfigError(
+                    "posthog_project_api_key and posthog_host must both be set or both be empty"
+                )
             ph_key = validate_public_posthog_key(raw_ph_key) if raw_ph_key else ""
             ph_host = (
                 validate_public_posthog_host(raw_ph_host, allow_private_dev=False)
                 if raw_ph_host
                 else ""
             )
-            if require_posthog_configured and not (ph_key and ph_host):
-                raise PublicConfigError(
-                    "both PostHog project API key and PostHog host are required"
-                )
             payload = {
                 "build_environment": build_environment,
                 "package_format": package_format,

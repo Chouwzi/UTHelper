@@ -113,7 +113,11 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
   `phs_` secret keys) and `POSTHOG_HOST` (`https://us.i.posthog.com`,
   `https://eu.i.posthog.com`, or an HTTPS reverse proxy — never web UI hosts
   `app.posthog.com`/`us.posthog.com`/`eu.posthog.com`), enable **Discard client
-  IP data = ON** under **PostHog Project Settings → Privacy**.
+  IP data = ON** under **PostHog Project Settings → Privacy**. Both
+  `POSTHOG_PROJECT_API_KEY` and `POSTHOG_HOST` must be configured together as a
+  pair (or both left unset/empty); asymmetric Schema v3 configs with only one of
+  the two variables set are rejected fail-closed by `generate_public_config` and
+  all release verifiers.
 - **Data Safety form**: use the flow inventory below; it is not a completed
   Play Console declaration. Provide local data, credential, and analytics
   `distinct_id` deletion instructions matching [docs/PRIVACY.md](../PRIVACY.md)
@@ -204,7 +208,7 @@ backend. The owner remains responsible for the final Console answers.
      $env:CL = "$($env:CL.Trim()) $clFlag"
    }
    python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-   python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --posthog-key "$env:POSTHOG_PROJECT_API_KEY" --posthog-host "$env:POSTHOG_HOST" --output src/assets/diagnostics-config.json
+   python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --posthog-key "$env:POSTHOG_PROJECT_API_KEY" --posthog-host "$env:POSTHOG_HOST" --build-environment release --package-format msix --output src/assets/diagnostics-config.json
    flet build windows --build-version <version> --build-number <build_number> --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
    python scripts/prepare_windows_bundle.py build/windows
    python scripts/verify_windows_bundle.py build/windows --expected-version <version>

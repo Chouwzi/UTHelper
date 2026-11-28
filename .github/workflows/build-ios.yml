@@ -68,7 +68,7 @@ jobs:
           find build/ios-simulator -type d -name '*.app' -prune -print | sort > "$RUNNER_TEMP/ios-apps.txt"
           test "$(wc -l < "$RUNNER_TEMP/ios-apps.txt" | tr -d ' ')" -eq 1
           APP=$(sed -n '1p' "$RUNNER_TEMP/ios-apps.txt")
-          python -c "import sys; from pathlib import Path; from scripts.package_unsigned_ipa import verify_ios_app_office_viewer_assets; verify_ios_app_office_viewer_assets(Path(sys.argv[1]), require=True)" "$APP"
+          python scripts/package_unsigned_ipa.py --verify-app "$APP" --require-office-viewer --require-diagnostics-config --expected-build-environment develop
           DIAGNOSTIC="UTHelper-${GITHUB_SHA}-ios-unsigned-diagnostic.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$DIAGNOSTIC"
 

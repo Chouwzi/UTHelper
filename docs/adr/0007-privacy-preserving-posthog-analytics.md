@@ -6,7 +6,7 @@
 
 ## Context
 
-UTHelper ships across Google Play (`chplay`), Microsoft Store (`msstore`), and GitHub Releases LTS (`apk_lts`, `exe_lts`, `ios_sideload`) with sanitized Sentry crash diagnostics (`src/diagnostics/`), but previously had zero visibility into:
+UTHelper ships across Google Play (`chplay`), Microsoft Store (`msstore`), and GitHub Releases LTS (`apk_lts`, `exe_lts`, `ipa_lts`) with sanitized Sentry crash diagnostics (`src/diagnostics/`), but previously had zero visibility into:
 
 1. **Real interactive active users (DAU/WAU/MAU, Stickiness, and Retention)** separated from Windows StartupTask tray launches, Android WorkManager/AlarmManager background checks, and automated store review crawlers (`uthelper_demo`).
 2. **Interactive session duration** across foreground workflows without fragmenting sessions during brief file-picker/Alt-Tab minimizes or spilling midnight DAUs from idle tray processes.
@@ -31,8 +31,8 @@ Adding analytics directly via the `posthog` PyPI SDK or inside `core`/`diagnosti
 
 2. **Public Runtime Config Schema v3 (`diagnostics-config.json`)**:
    - Extend `src/diagnostics/release_config.py` with Schema v3 (`schema_version: 3`, `sentry_dsn`, `build_environment`, `package_format`, `posthog_project_api_key`, `posthog_host`) while keeping v1 and v2 loaders backward-compatible.
-   - Fail-closed validation rejects non-`phc_` tokens (`phx_` Personal API Keys, `phs_` secret keys, `sntrys_`, credentials), non-HTTPS origins, loopback/private literals in release mode, and PostHog web dashboard hosts (`app.posthog.com`, `us.posthog.com`, `eu.posthog.com`) that return HTTP redirects refused by `_RejectAnalyticsRedirects`.
-   - Runtime activates PostHog **only** when both `posthog_project_api_key` and `posthog_host` are valid non-empty strings; unconfigured builds are a 100% memory and disk no-op (`0` `analytics/` files created).
+   - Fail-closed validation rejects non-`phc_` tokens (`phx_` Personal API Keys, `phs_` secret keys, `sntrys_`, credentials), asymmetric Schema v3 PostHog configs (`bool(posthog_project_api_key) != bool(posthog_host)`), non-HTTPS origins, empty/invalid ports, loopback/private/reserved/transition IP literals in release mode, and PostHog web dashboard hosts (`app.posthog.com`, `us.posthog.com`, `eu.posthog.com`) that return HTTP redirects refused by `_RejectAnalyticsRedirects`.
+   - Runtime activates PostHog **only** when both `posthog_project_api_key` and `posthog_host` are valid non-empty strings; unconfigured builds (both empty) are a 100% memory and disk no-op (`0` `analytics/` files created).
 
 ### 2. Privacy, Session Integrity & Threat Mitigations
 
@@ -53,17 +53,17 @@ Adding analytics directly via the `posthog` PyPI SDK or inside `core`/`diagnosti
 
 5. **Deferred 30-Minute Session Expiry & RFC 9562 Monotonic `UUIDv7` `$session_id`**:
    - Pure-Python `uuid7_from_ms(unix_ms)` generates RFC 9562 UUIDv7 `$session_id` values compatible with Python 3.11–3.14 (clamping `<= 5s` backward clock drift monotonically and rotating on `> 5s` jumps).
-   - Minimizing to tray or backgrounding pauses the `300s` foreground heartbeat, flushes RAM events to the local spool (`< 2ms`), and records `last_foreground_active_utc`. Resuming within `< 30m` (`< 23h` total age) continues the same session seamlessly; expiring (`>= 30m`), switching accounts, opting out, or exiting stamps `uth_session_ended` at **`last_foreground_active_utc`** (never `now()`), eliminating midnight DAU spillover.
+   - Minimizing to tray or backgrounding pauses the `300s` foreground heartbeat, flushes RAM events to the local spool (`< 2ms`), and records `last_foreground_active_utc`. Resuming within `< 30m` (`< 23h` total age) continues the same session seamlessly; expiring (`>= 30m`), switching accounts, or exiting stamps `uth_session_ended` at **`last_foreground_active_utc`** (never `now()`), eliminating midnight DAU spillover, whereas opting out immediately drops the active session with `0` events emitted.
 
 6. **Allow-Listed 12-Event Schema, Spool Safety & Captive-Portal Defense**:
    - All 12 `uth_*` events enforce Pydantic `ConfigDict(extra="forbid")` with fixed `Literal`/`StrEnum` values and coarse duration/count buckets — zero free-form strings, URLs, course names, file names, or grades.
-   - Local spool (`<_APPDATA_DIR>/analytics/pending/`) enforces `FILE_FLAG_OPEN_REPARSE_POINT` / `O_NOFOLLOW` + handle volume/file-index verification, bounded to `20` batches (`<= 25` events / `<= 64 KiB` each), `512 KiB` total, and `48h` max age, with client rate caps (`<= 120` events/session, `<= 300` events/24h).
+   - Local spool (`<_APPDATA_DIR>/analytics/pending/`) enforces `FILE_FLAG_OPEN_REPARSE_POINT` / `O_NOFOLLOW` + handle volume/file-index verification, bounded to `20` batches (`<= 25` events / `<= 64 KiB` each), `512 KiB` total, and `48h` max age, with in-memory client rate caps (`<= 120` events/session, `<= 300` events per-process rolling 24h).
    - Batch payloads (`POST <posthog_host>/batch/`) omit top-level `sent_at` to preserve ClickHouse `(toDate(timestamp), event, distinct_id, uuid)` retry deduplication, and confirm delivery **only** on HTTP `200` `application/json` with `status in (1, "Ok", "ok")` (`<= 4 KiB`), treating campus Wi-Fi `200 text/html` captive portals as retryable failures.
 
 7. **Independent Consent (`ANALYTICS_CONSENT`), Upgrade Inheritance & Zero-Stall Purge**:
    - `SETTINGS_SCHEMA_VERSION = 6` introduces `ANALYTICS_CONSENT: Literal["not_asked", "enabled", "disabled"] = "enabled"`. Upgrading from v5 without `ANALYTICS_CONSENT` inherits `"disabled"` if `CRASH_REPORTING_CONSENT == "disabled"`, respecting prior privacy opt-outs.
    - Pre-login transparency is surfaced via a compact *Điều khoản & Quyền riêng tư* link directly on `login_dialog.py`.
-   - `AnalyticsConsentEpochGate` increments a monotonic epoch under a fast lock, clears RAM queues + `$session_id` + `_distinct_id`, and unlinks `analytics/pending/*` and `analytics/installation.json` in `0ms` without waiting on in-flight socket I/O. Sign-out, account switch, and settings reset likewise rotate/delete `installation.json`.
+   - `AnalyticsConsentEpochGate` increments a monotonic epoch under a fast lock, clears RAM queues + `$session_id` + `_distinct_id`, and unlinks `analytics/pending/*` and `analytics/installation.json` without waiting on in-flight socket I/O. Sign-out, account switch, and the stored-settings Debug `"Reset Settings"` action (*Công cụ gỡ lỗi nâng cao → Reset Settings*, unlike the form-only *Đặt lại mặc định* button) likewise rotate/delete `installation.json`.
    - `AnalyticsRuntime.close()` writes any active `uth_session_ended` to the local spool synchronously (`< 2ms`) and invokes `executor.shutdown(wait=False, cancel_futures=True)` so Windows teardown never hangs or corrupts files.
 
 ### 3. 1:1 Portability to `crates/uthelper-core` ([ADR 0006](0006-rust-core-tauri-native-migration.md))

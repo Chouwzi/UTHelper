@@ -97,15 +97,19 @@ events (`uth_session_started`, `uth_session_heartbeat`, `uth_session_ended`,
 - **Bounded `48h` / `512 KiB` local spool & rate caps**: Pending batches under
   `<appdata_dir>/analytics/pending/` are capped at **20 batches** (`<= 25`
   events / `<= 64 KiB` per batch), **512 KiB** total, and **48h** (`48 hours`)
-  max age, with client caps of `<= 120` events/session and `<= 300` events per
-  rolling 24h.
+  max age, with in-memory client caps of `<= 120` events/session and `<= 300`
+  events per-process rolling 24h (reset on process restart without persisting
+  event-rate timestamps to disk).
 - **Instant opt-out, sign-out & account-switch deletion**: Disabling **Phân tích
   sử dụng ẩn danh** in **Settings → Privacy** immediately increments the consent
   epoch, halts delivery, clears in-memory queues and `$session_id`, and deletes
   `analytics/pending/*` and `analytics/installation.json` (re-enabling later
-  mints a brand-new `UUIDv4`). Signing out, switching UTH accounts, or resetting
-  settings also deletes/rotates `analytics/installation.json` so shared lab or
-  dormitory PCs never link two students under one installation stream. Upgrading
+  mints a brand-new `UUIDv4`). Signing out, switching UTH accounts, or running
+  the stored-settings Debug `"Reset Settings"` action (*Công cụ gỡ lỗi nâng cao →
+  Reset Settings*, which deletes `settings.json` and persisted credentials; unlike
+  the form-only *Đặt lại mặc định* button) also deletes/rotates
+  `analytics/installation.json` so shared lab or dormitory PCs never link two
+  students under one installation stream. Upgrading
   from schema v5 without `ANALYTICS_CONSENT` automatically inherits `"disabled"`
   whenever `CRASH_REPORTING_CONSENT` was set to `"disabled"`.
 
@@ -188,17 +192,30 @@ channel-specific update behavior:
   the random installation UUIDv4 are stored in sibling paths
   `%APPDATA%\UTHelper\analytics\pending` and
   `%APPDATA%\UTHelper\analytics\installation.json`.
-- **Android (`chplay` and `apk_lts`)**: application data is stored in Android
-  app-private storage resolved from `FLET_APP_STORAGE_DATA` (with fallback to
-  `FLET_APP_DATA` or `~/.uthelper` when unset), with crash diagnostics under
-  `telemetry/pending` and usage analytics under `analytics/pending` and
-  `analytics/installation.json`. Sensitive credentials and integration tokens
+- **Android (`chplay` and `apk_lts`) and iOS (`ipa_lts`)**: operational logs and
+  telemetry roots (`<appdata_dir>` in `src/main.py`) are stored in app-private
+  storage resolved from `FLET_APP_STORAGE_DATA` (with fallback to `FLET_APP_DATA`
+  or `~/.uthelper` when unset), placing operational logs under
+  `<appdata_dir>/logs/app.log`, crash diagnostics under
+  `<appdata_dir>/telemetry/pending`, and usage analytics under
+  `<appdata_dir>/analytics/pending` and
+  `<appdata_dir>/analytics/installation.json`. Application settings and local
+  caches (`src/config.py`) live under `<FLET_APP_STORAGE_DATA>/UTHelper` (or
+  `<appdata_dir>/flet/data/UTHelper` when `FLET_APP_STORAGE_DATA` was initially
+  unset and seeded by `src/main.py`, falling back to `<FLET_APP_DATA>/UTHelper`
+  or `~/.uthelper`). Sensitive credentials and integration tokens
   (`UTH_PASSWORD`, `MOODLE_SESSION`, `MOODLE_WS_TOKEN`,
   `MOODLE_WS_TOKEN_ORIGIN`, `GMAIL_APP_PASSWORD`, `DISCORD_WEBHOOK_URL`, and
   `TELEGRAM_BOT_TOKEN`) are encrypted via `AndroidKeyStore` AES-GCM inside
   `context.noBackupFilesDir` (`CredentialVault` for native background sync and
-  `AppSecretVault` for app settings secrets), and are never persisted in
+  `AppSecretVault` for app settings secrets on Android, or the app-scoped iOS
+  Keychain service `com.uthelper.app_secrets` on iOS), and are never persisted in
   plaintext `settings.json`.
+- **macOS and Linux (source checkouts)**: `settings.json` and local caches are
+  stored under `~/Library/Application Support/UTHelper` on macOS and
+  `${XDG_DATA_HOME:-~/.local/share}/UTHelper` on Linux, while operational logs,
+  `telemetry/pending`, `analytics/pending`, and `analytics/installation.json`
+  resolve under `FLET_APP_STORAGE_DATA`, `FLET_APP_DATA`, or `~/.uthelper`.
 
 The crash diagnostics queue retains at most **20 reports**, **1 MiB** total, and
 **7 days**. The usage analytics spool retains at most **20 batches**, **512 KiB**
