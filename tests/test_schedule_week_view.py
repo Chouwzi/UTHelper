@@ -24,6 +24,7 @@ def _session(
     course_code: str = "ECE-ENGR-302-2026",
     room: str = "Phòng thực hành Cơ điện tử 03",
     cancelled: bool = False,
+    note: str | None = None,
 ) -> ClassSession:
     return ClassSession(
         session_id=f"session-{day.isoformat()}-{start.isoformat()}",
@@ -36,7 +37,7 @@ def _session(
         period_start=1,
         period_end=3,
         cancelled=cancelled,
-        note="Phòng thực hành tầng 3" if cancelled else "",
+        note=("Phòng thực hành tầng 3" if cancelled else "") if note is None else note,
         link="https://portal.invalid/course",
         meeting_url="https://zoom.invalid/class",
         subject_code="CS-301",
@@ -423,6 +424,7 @@ def test_schedule_theme_update_rebuilds_nav_button_styles():
         view.update_theme()
         assert view._prev_btn.icon_color == C.TEXT_PRIMARY
         assert view._next_btn.icon_color == C.TEXT_PRIMARY
+        assert view._picker_chevron_icon.color == C.TEXT_SECONDARY
         assert view._refresh_btn.icon_color == C.TEXT_SECONDARY
         assert view._refresh_action_box.bgcolor == C.SURFACE
         assert view._stepper_box.bgcolor == C.SURFACE
@@ -853,13 +855,30 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     assert card_long.height == 172
     assert card_narrow.height is None
     assert card_short.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
-    assert card_long.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    assert card_short.bgcolor == C.SURFACE
+    assert card_long.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
 
-    summary_col = card_long.content.controls[0]
+    assert isinstance(card_long.content, ft.Stack)
+    watermark = card_long.content.controls[0]
+    card_body = card_long.content.controls[1]
+    assert watermark.width == 120
+    assert watermark.height == 24
+    assert watermark.left is None
+    assert watermark.top is None
+    assert watermark.bgcolor is None
+    assert watermark.rotate.angle == -0.785
+    assert "Tạm ngưng" in _text_values(watermark)
+    watermark_text = watermark.content
+    assert watermark_text.size == 16
+    assert watermark_text.weight == ft.FontWeight.W_800
+    assert watermark_text.color == ft.Colors.with_opacity(0.70, C.CRITICAL)
+
+    assert card_body.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    summary_col = card_body.controls[0]
     top_row = summary_col.controls[0]
     assert isinstance(top_row, ft.Row)
     assert "07:00 – 09:30" in _text_values(top_row)
-    assert "Tạm ngưng" in _text_values(top_row)
+    assert "Tạm ngưng" not in _text_values(top_row)
 
     title_txt, class_txt, room_txt = (
         summary_col.controls[1],
@@ -1019,4 +1038,212 @@ def test_schedule_week_view_duck_typed_maintenance_preserves_cache_and_notifies_
         assert view.sessions_for_day(TODAY) == (cached_sess,)
 
     asyncio.run(scenario())
+
+
+def test_clicking_week_range_label_opens_month_date_picker_and_jumps_to_selected_day():
+    dialogs: list[ft.AlertDialog] = []
+    pops: list[bool] = []
+    requested_mondays: list[date] = []
+
+    selected = date(2026, 11, 25)
+    selected_monday = _monday(selected)  # 2026-11-23
+    class_day = date(2026, 11, 24)
+
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        window=SimpleNamespace(width=1120),
+        dialogs=dialogs,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: pops.append(True),
+        run_task=MagicMock(),
+        update=MagicMock(),
+    )
+
+    def _fetch_week(monday_date: date):
+        requested_mondays.append(monday_date)
+        return {}
+
+    view = ScheduleWeekView(page=page, fetch_week=_fetch_week)
+    view._weeks[selected_monday] = {class_day: (_session(class_day),)}
+    view._live_at[selected_monday] = datetime.now()
+    view._selected = selected
+    view.visible = True
+    view._render()
+
+    assert view._week_label.value == "23/11 – 29/11/2026"
+    assert callable(view._week_label_box.on_click)
+
+    view._week_label_box.on_click(None)
+    assert len(dialogs) == 1
+    dialog = dialogs[-1]
+    assert dialog.modal is True
+    assert dialog.semantics_label == "Chọn ngày trong tháng"
+    assert "Tháng 11, 2026" in _text_values(dialog)
+
+    nov_cells = {
+        c.data["picker_date"]: c
+        for c in _walk(dialog)
+        if isinstance(c, ft.Container)
+        and isinstance(c.data, dict)
+        and "picker_date" in c.data
+    }
+    assert nov_cells["2026-11-25"].data["is_selected"] is True
+    assert nov_cells["2026-11-23"].data["in_selected_week"] is True
+    assert nov_cells["2026-11-29"].data["in_selected_week"] is True
+    assert nov_cells["2026-11-24"].data["has_classes"] is True
+    assert nov_cells["2026-11-26"].data["has_classes"] is False
+
+    next_month_btn = next(
+        c.content
+        for c in _walk(dialog)
+        if isinstance(c, ft.Semantics)
+        and c.label == "Tháng sau"
+        and isinstance(c.content, ft.IconButton)
+    )
+    prev_month_btn = next(
+        c.content
+        for c in _walk(dialog)
+        if isinstance(c, ft.Semantics)
+        and c.label == "Tháng trước"
+        and isinstance(c.content, ft.IconButton)
+    )
+
+    # Verify month switching and year rollover (Nov 2026 -> Dec 2026 -> Jan 2027 -> Dec 2026)
+    next_month_btn.on_click(None)
+    assert "Tháng 12, 2026" in _text_values(dialog)
+    next_month_btn.on_click(None)
+    assert "Tháng 1, 2027" in _text_values(dialog)
+    prev_month_btn.on_click(None)
+    assert "Tháng 12, 2026" in _text_values(dialog)
+
+    dec_cells = {
+        c.data["picker_date"]: c
+        for c in _walk(dialog)
+        if isinstance(c, ft.Container)
+        and isinstance(c.data, dict)
+        and "picker_date" in c.data
+    }
+    target_day = date(2026, 12, 16)
+    dec_cells[target_day.isoformat()].on_click(None)
+
+    assert pops == [True]
+    assert view._selected == target_day
+    assert view._week_label.value == "14/12 – 20/12/2026"
+    assert page.run_task.called
+    assert page.run_task.call_args.args[1] == date(2026, 12, 14)
+
+
+def test_month_date_picker_today_button_and_escape_key():
+    dialogs: list[ft.AlertDialog] = []
+    pops: list[bool] = []
+    focused: list[bool] = []
+
+    page = SimpleNamespace(
+        width=390,
+        height=844,
+        window=SimpleNamespace(width=390),
+        dialogs=dialogs,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: pops.append(True),
+        run_task=MagicMock(),
+        update=MagicMock(),
+    )
+
+    class _Trigger:
+        async def focus(self):
+            focused.append(True)
+
+    far_date = date(2027, 1, 15)
+    view = ScheduleWeekView(page=page, fetch_week=lambda _d: {})
+    view._selected = far_date
+    view.visible = True
+    view._render()
+
+    view._show_month_date_picker(return_focus=_Trigger())
+    assert len(dialogs) == 1
+    dialog = dialogs[-1]
+
+    # Escape dismisses without changing _selected and restores focus on dismiss
+    dialog.content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops == [True]
+    assert view._selected == far_date
+    asyncio.run(dialog.on_dismiss(None))
+    assert focused == [True]
+
+    # Re-open via real _week_label_box click, pick "Hôm nay", and run real Flet on_dismiss lifecycle
+    pops.clear()
+    assert hasattr(view._week_label_box, "focus") and callable(view._week_label_box.focus)
+    view._week_label_box.on_click(None)
+    dialog2 = dialogs[-1]
+    today_btn = next(
+        c
+        for c in _walk(dialog2)
+        if isinstance(c, ft.TextButton) and c.content == "Hôm nay"
+    )
+    today_btn.on_click(None)
+    asyncio.run(dialog2.on_dismiss(None))
+    assert pops == [True]
+    assert view._selected == date.today()
+
+    # Also verify defensive focus guard when a non-focusable Container is passed to return_focus
+    view._show_month_date_picker(return_focus=ft.Container())
+    asyncio.run(dialogs[-1].on_dismiss(None))
+
+
+def test_session_summary_card_uses_loose_stack_fit_when_narrow_and_renders_makeup_watermark():
+    view = _view(760)
+    s_cancelled = _session(
+        TODAY,
+        subject="Lập trình mạng",
+        room="A201",
+        cancelled=True,
+        note="GV bận công tác",
+    )
+    s_makeup = _session(
+        TODAY,
+        subject="Trí tuệ nhân tạo",
+        room="B304",
+        cancelled=False,
+        note="Học bù buổi nghỉ lễ",
+    )
+    s_both = _session(
+        TODAY,
+        subject="An toàn thông tin",
+        room="C102",
+        cancelled=True,
+        note="Tạm ngưng buổi học bù",
+    )
+
+    narrow_cancelled = view._session_summary_card(s_cancelled, narrow=True)
+    narrow_makeup = view._session_summary_card(s_makeup, narrow=True)
+    wide_makeup = view._session_summary_card(s_makeup, narrow=False)
+    wide_both = view._session_summary_card(s_both, narrow=False)
+
+    assert narrow_cancelled.height is None
+    assert isinstance(narrow_cancelled.content, ft.Stack)
+    assert narrow_cancelled.content.fit == ft.StackFit.LOOSE
+
+    assert narrow_makeup.height is None
+    assert isinstance(narrow_makeup.content, ft.Stack)
+    assert narrow_makeup.content.fit == ft.StackFit.LOOSE
+
+    assert wide_makeup.height == 172
+    assert wide_makeup.bgcolor == ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
+    assert isinstance(wide_makeup.content, ft.Stack)
+    assert wide_makeup.content.fit == ft.StackFit.EXPAND
+    makeup_wm = wide_makeup.content.controls[0]
+    assert makeup_wm.width == 148
+    assert makeup_wm.height == 24
+    assert makeup_wm.ignore_interactions is True
+    assert makeup_wm.content.value == "Học bù"
+    assert makeup_wm.content.size == 18
+    assert makeup_wm.content.color == ft.Colors.with_opacity(0.70, C.MAKEUP_TEXT)
+
+    # Cancelled takes precedence over makeup note
+    assert wide_both.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
+    assert wide_both.content.controls[0].content.value == "Tạm ngưng"
+
+
+
 

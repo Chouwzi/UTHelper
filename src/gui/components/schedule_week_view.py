@@ -10,6 +10,7 @@ background.
 from __future__ import annotations
 
 import asyncio
+import calendar
 from collections.abc import Sequence
 import inspect
 import logging
@@ -41,6 +42,7 @@ OpenUrlCallback = Callable[[str, str], None]
 OpenExternalCallback = Callable[[str], None]
 
 _WEEKDAYS_LONG = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"]
+_PICKER_WEEKDAYS = ("T2", "T3", "T4", "T5", "T6", "T7", "CN")
 _HTTPS_URL_RE = re.compile(r"https://[^\s<>()\"']+")
 _ONLINE_KEYWORDS = ("zoom", "online", "e-learning", "elearning", "trực tuyến", "meet", "teams")
 _NARROW_BREAKPOINT = 920
@@ -75,6 +77,16 @@ def _today_pill_style() -> ft.ButtonStyle:
         shape=ft.RoundedRectangleBorder(radius=10),
         side=ft.BorderSide(1, ft.Colors.with_opacity(0.28, C.ACCENT)),
         text_style=ft.TextStyle(size=12, weight=ft.FontWeight.W_600),
+    )
+
+
+def _week_picker_button_style() -> ft.ButtonStyle:
+    return ft.ButtonStyle(
+        color=C.TEXT_PRIMARY,
+        bgcolor=ft.Colors.TRANSPARENT,
+        overlay_color=ft.Colors.with_opacity(0.10, C.ACCENT),
+        padding=ft.Padding.symmetric(horizontal=6, vertical=0),
+        shape=ft.RoundedRectangleBorder(radius=8),
     )
 
 
@@ -228,16 +240,36 @@ class ScheduleWeekView(ft.Container):
             button=True,
             content=self._next_btn,
         )
-        self._week_label_box = ft.Container(
-            content=self._week_label,
-            padding=ft.Padding.symmetric(horizontal=6),
-            alignment=ft.Alignment(0, 0),
+        self._picker_chevron_icon = ft.Icon(
+            ft.Icons.KEYBOARD_ARROW_DOWN_ROUNDED,
+            size=16,
+            color=C.TEXT_SECONDARY,
+        )
+        self._week_label_box = ft.TextButton(
+            content=ft.Row(
+                [self._week_label, self._picker_chevron_icon],
+                spacing=2,
+                tight=True,
+                alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            height=44,
+            tooltip="Chọn ngày trong tháng",
+            style=_week_picker_button_style(),
+            on_click=lambda _e: self._show_month_date_picker(
+                return_focus=self._week_label_box
+            ),
+        )
+        self._week_label_semantics = ft.Semantics(
+            label="Chọn ngày trong tháng",
+            button=True,
+            content=self._week_label_box,
         )
         self._stepper_box = ft.Container(
             content=ft.Row(
                 [
                     self._prev_semantics,
-                    self._week_label_box,
+                    self._week_label_semantics,
                     self._next_semantics,
                 ],
                 spacing=0,
@@ -579,6 +611,8 @@ class ScheduleWeekView(ft.Container):
     def update_theme(self) -> None:
         self.bgcolor = C.BG
         self._week_label.color = C.TEXT_PRIMARY
+        self._picker_chevron_icon.color = C.TEXT_SECONDARY
+        self._week_label_box.style = _week_picker_button_style()
         self._prev_btn.icon_color = C.TEXT_PRIMARY
         self._next_btn.icon_color = C.TEXT_PRIMARY
         self._stepper_box.bgcolor = C.SURFACE
@@ -601,6 +635,309 @@ class ScheduleWeekView(ft.Container):
         self._selected = target
         self._render()
         self._ensure_loaded(_monday(target))
+
+    def _show_month_date_picker(
+        self, *, return_focus: ft.Control | None = None
+    ) -> None:
+        """Open a Monday-first month calendar dialog to jump directly to any date."""
+        self._hydrate()
+        width = max(280.0, min(344.0, self._layout_width - 32))
+        today = date.today()
+        selected_monday = _monday(self._selected)
+        selected_sunday = selected_monday + timedelta(days=6)
+        picker_state = {
+            "year": self._selected.year,
+            "month": self._selected.month,
+        }
+        skip_focus_restore = {"skip": False}
+
+        def _on_key_down(event) -> None:
+            if getattr(event, "key", "") == "Escape":
+                self._safe_pop_dialog()
+
+        async def _restore_focus(_event=None) -> None:
+            if not skip_focus_restore["skip"]:
+                await self._restore_control_focus(return_focus)
+
+        def _pick_date(target: date) -> None:
+            self._safe_pop_dialog()
+            self._go(target)
+
+        month_title = ft.Text(
+            "",
+            size=14,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            text_align=ft.TextAlign.CENTER,
+            expand=True,
+        )
+        grid_col = ft.Column(spacing=4, tight=True)
+
+        def _rebuild_grid() -> None:
+            year = picker_state["year"]
+            month = picker_state["month"]
+            month_title.value = f"Tháng {month}, {year}"
+            weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(
+                year, month
+            )
+            rows: list[ft.Control] = []
+            for week in weeks:
+                cells: list[ft.Control] = []
+                for col_idx, cell_date in enumerate(week):
+                    in_month = cell_date.month == month
+                    is_selected = cell_date == self._selected
+                    is_today = cell_date == today
+                    in_selected_week = (
+                        selected_monday <= cell_date <= selected_sunday
+                    )
+                    has_classes = bool(self._sessions_on(cell_date))
+
+                    if is_selected:
+                        bg = C.ACCENT
+                        border = None
+                        fg = C.ON_ACCENT
+                        weight = ft.FontWeight.W_700
+                    else:
+                        bg = (
+                            ft.Colors.with_opacity(0.11, C.ACCENT)
+                            if in_selected_week
+                            else None
+                        )
+                        border = (
+                            ft.Border.all(1.5, C.ACCENT) if is_today else None
+                        )
+                        if not in_month:
+                            fg = ft.Colors.with_opacity(0.38, C.TEXT_SECONDARY)
+                            weight = ft.FontWeight.W_400
+                        elif is_today:
+                            fg = C.ACCENT
+                            weight = ft.FontWeight.W_700
+                        elif col_idx == 6:
+                            fg = C.CRITICAL
+                            weight = (
+                                ft.FontWeight.W_600
+                                if in_selected_week
+                                else ft.FontWeight.W_500
+                            )
+                        else:
+                            fg = C.TEXT_PRIMARY
+                            weight = (
+                                ft.FontWeight.W_600
+                                if in_selected_week
+                                else ft.FontWeight.W_500
+                            )
+
+                    dot_color = (
+                        C.ON_ACCENT
+                        if is_selected
+                        else (
+                            ft.Colors.with_opacity(0.45, C.ACCENT)
+                            if not in_month
+                            else C.ACCENT
+                        )
+                    )
+                    cells.append(
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.Text(
+                                        str(cell_date.day),
+                                        size=12,
+                                        weight=weight,
+                                        color=fg,
+                                        text_align=ft.TextAlign.CENTER,
+                                    ),
+                                    ft.Container(
+                                        width=4,
+                                        height=4,
+                                        border_radius=2,
+                                        bgcolor=dot_color if has_classes else None,
+                                    ),
+                                ],
+                                spacing=2,
+                                tight=True,
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            expand=True,
+                            height=40,
+                            bgcolor=bg,
+                            border=border,
+                            border_radius=8,
+                            alignment=ft.Alignment(0, 0),
+                            ink=True,
+                            data={
+                                "picker_date": cell_date.isoformat(),
+                                "in_month": in_month,
+                                "is_selected": is_selected,
+                                "is_today": is_today,
+                                "in_selected_week": in_selected_week,
+                                "has_classes": has_classes,
+                            },
+                            on_click=lambda _e, d=cell_date: _pick_date(d),
+                        )
+                    )
+                rows.append(ft.Row(cells, spacing=4))
+            grid_col.controls = rows
+
+        def _shift_picker_month(delta: int) -> None:
+            month = picker_state["month"] + delta
+            year = picker_state["year"]
+            if month < 1:
+                month = 12
+                year -= 1
+            elif month > 12:
+                month = 1
+                year += 1
+            picker_state["year"] = year
+            picker_state["month"] = month
+            _rebuild_grid()
+            for ctrl in (month_title, grid_col):
+                try:
+                    ctrl.update()
+                except Exception:
+                    pass
+
+        _rebuild_grid()
+
+        btn_constraints = ft.BoxConstraints(
+            min_width=44, max_width=44, min_height=44, max_height=44
+        )
+        header_row = ft.Row(
+            [
+                ft.Text(
+                    "CHỌN NGÀY TRONG THÁNG",
+                    size=11,
+                    weight=ft.FontWeight.W_700,
+                    color=C.TEXT_SECONDARY,
+                    expand=True,
+                ),
+                ft.Semantics(
+                    label="Đóng",
+                    button=True,
+                    content=ft.IconButton(
+                        icon=ft.Icons.CLOSE_ROUNDED,
+                        icon_color=C.TEXT_SECONDARY,
+                        icon_size=20,
+                        tooltip="Đóng",
+                        padding=0,
+                        size_constraints=btn_constraints,
+                        on_click=lambda _e: self._safe_pop_dialog(),
+                    ),
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        month_nav = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Semantics(
+                        label="Tháng trước",
+                        button=True,
+                        content=ft.IconButton(
+                            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
+                            icon_color=C.TEXT_PRIMARY,
+                            icon_size=20,
+                            tooltip="Tháng trước",
+                            padding=0,
+                            size_constraints=btn_constraints,
+                            on_click=lambda _e: _shift_picker_month(-1),
+                        ),
+                    ),
+                    month_title,
+                    ft.Semantics(
+                        label="Tháng sau",
+                        button=True,
+                        content=ft.IconButton(
+                            icon=ft.Icons.CHEVRON_RIGHT_ROUNDED,
+                            icon_color=C.TEXT_PRIMARY,
+                            icon_size=20,
+                            tooltip="Tháng sau",
+                            padding=0,
+                            size_constraints=btn_constraints,
+                            on_click=lambda _e: _shift_picker_month(1),
+                        ),
+                    ),
+                ],
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE,
+            border=ft.Border.all(1, C.BORDER),
+            border_radius=10,
+        )
+        weekday_header = ft.Row(
+            [
+                ft.Container(
+                    content=ft.Text(
+                        wd,
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=C.CRITICAL if wd == "CN" else C.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    expand=True,
+                    alignment=ft.Alignment(0, 0),
+                )
+                for wd in _PICKER_WEEKDAYS
+            ],
+            spacing=4,
+        )
+        footer_row = ft.Row(
+            [
+                ft.TextButton(
+                    "Hôm nay",
+                    height=40,
+                    tooltip="Về hôm nay",
+                    style=_today_pill_style(),
+                    on_click=lambda _e: _pick_date(date.today()),
+                ),
+                ft.TextButton(
+                    "Đóng",
+                    height=40,
+                    style=_text_action_style(C.TEXT_SECONDARY),
+                    on_click=lambda _e: self._safe_pop_dialog(),
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            scrollable=True,
+            semantics_label="Chọn ngày trong tháng",
+            content_padding=0,
+            inset_padding=ft.Padding.symmetric(horizontal=16, vertical=24),
+            content=ft.KeyboardListener(
+                autofocus=True,
+                on_key_down=_on_key_down,
+                content=ft.Container(
+                    width=width,
+                    padding=ft.Padding.only(left=14, right=14, top=8, bottom=12),
+                    content=ft.Column(
+                        [
+                            header_row,
+                            month_nav,
+                            weekday_header,
+                            grid_col,
+                            ft.Divider(height=6, color=C.BORDER),
+                            footer_row,
+                        ],
+                        spacing=8,
+                        tight=True,
+                    ),
+                ),
+            ),
+            bgcolor=C.BG,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            on_dismiss=_restore_focus,
+        )
+        try:
+            self._page_ref.show_dialog(dialog)
+        except Exception:
+            logger.debug("Could not show month date picker", exc_info=True)
 
     def _reload(self) -> None:
         monday = _monday(self._selected)
@@ -1074,6 +1411,24 @@ class ScheduleWeekView(ft.Container):
             except Exception:
                 logger.debug("Could not pop active schedule dialog", exc_info=True)
 
+    @staticmethod
+    async def _restore_control_focus(control: Any) -> None:
+        if (
+            control is None
+            or not getattr(control, "visible", True)
+            or getattr(control, "disabled", False)
+        ):
+            return
+        focus_fn = getattr(control, "focus", None)
+        if not callable(focus_fn):
+            return
+        try:
+            result = focus_fn()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Focus restore skipped", exc_info=True)
+
     def _build_action_link_row(
         self,
         *,
@@ -1460,29 +1815,17 @@ class ScheduleWeekView(ft.Container):
                     color=C.ACCENT,
                 ),
             ]
-            if session.cancelled:
-                time_header_controls.append(
-                    ft.Container(
-                        content=ft.Text(
-                            "Tạm ngưng",
-                            size=9.5,
-                            weight=ft.FontWeight.W_600,
-                            color=C.CRITICAL,
-                        ),
-                        bgcolor=ft.Colors.with_opacity(0.12, C.CRITICAL),
-                        border_radius=999,
-                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
-                    )
-                )
             time_header = ft.Row(
                 time_header_controls,
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
+                wrap=True,
+                run_spacing=0,
             )
             summary = ft.Column(
                 [time_header, title, class_label, room_label],
-                spacing=3,
+                spacing=2,
                 tight=True,
             )
 
@@ -1496,21 +1839,64 @@ class ScheduleWeekView(ft.Container):
                 item, return_focus=details_button
             ),
         )
+        card_content: ft.Control = ft.Column(
+            [summary, details_button],
+            alignment=(
+                ft.MainAxisAlignment.START
+                if narrow
+                else ft.MainAxisAlignment.SPACE_BETWEEN
+            ),
+            spacing=4,
+        )
+        note_text = session.note.casefold()
+        is_makeup_session = not session.cancelled and "học bù" in note_text
+        if session.cancelled or is_makeup_session:
+            status_label, status_color = (
+                ("Tạm ngưng", C.CRITICAL)
+                if session.cancelled
+                else ("Học bù", C.MAKEUP_TEXT)
+            )
+            status_watermark = ft.Container(
+                content=ft.Text(
+                    status_label,
+                    size=18 if is_makeup_session else 16,
+                    weight=ft.FontWeight.W_800,
+                    color=ft.Colors.with_opacity(0.70, status_color),
+                    text_align=ft.TextAlign.CENTER,
+                    no_wrap=True,
+                ),
+                width=148 if is_makeup_session else 120,
+                height=24,
+                alignment=ft.Alignment.CENTER,
+                rotate=ft.Rotate(
+                    angle=-0.785,
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ignore_interactions=True,
+            )
+            card_content = ft.Stack(
+                controls=[
+                    status_watermark,
+                    card_content,
+                ],
+                alignment=ft.Alignment.CENTER,
+                fit=ft.StackFit.LOOSE if narrow else ft.StackFit.EXPAND,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            )
         return ft.Container(
             height=None if narrow else 172,
-            content=ft.Column(
-                [summary, details_button],
-                alignment=(
-                    ft.MainAxisAlignment.START
-                    if narrow
-                    else ft.MainAxisAlignment.SPACE_BETWEEN
-                ),
-                spacing=4,
-            ),
+            content=card_content,
             padding=ft.Padding.all(8 if not narrow else 10),
-            bgcolor=C.SURFACE,
+            bgcolor=(
+                ft.Colors.with_opacity(0.16, C.CRITICAL)
+                if session.cancelled
+                else ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
+                if is_makeup_session
+                else C.SURFACE
+            ),
             border=ft.Border.all(1, C.BORDER),
             border_radius=8,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
 
     def _show_session_details(
@@ -1539,8 +1925,8 @@ class ScheduleWeekView(ft.Container):
                 self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if not skip_focus_restore["skip"] and return_focus is not None:
-                await return_focus.focus()
+            if not skip_focus_restore["skip"]:
+                await self._restore_control_focus(return_focus)
 
         close_btn = ft.Semantics(
             label="Đóng",
@@ -1635,8 +2021,8 @@ class ScheduleWeekView(ft.Container):
                 self._safe_pop_dialog()
 
         async def _restore_focus(_event=None) -> None:
-            if not skip_focus_restore["skip"] and return_focus is not None:
-                await return_focus.focus()
+            if not skip_focus_restore["skip"]:
+                await self._restore_control_focus(return_focus)
 
         def _handle_back_to_detail(_e=None) -> None:
             if callable(on_back):

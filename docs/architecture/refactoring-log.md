@@ -2760,6 +2760,37 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - After syncing `develop` on 2026-11-28, the calendar-focused suite passed again:
   **52 passed**; `ruff check src tests`: **All checks passed**.
 
+## Calendar Week-First Default & Schedule Month Date-Picker Popup (2026-11-28)
+
+- **Branch & Scope**: `feature/schedule-month-date-picker` — `src/gui/components/{calendar_view,schedule_week_view}.py`, `tests/{test_calendar_week_view,test_schedule_week_view,test_theme_propagation}.py`, `docs/releases/2.7.0.md`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - **Week-First Mode Toggle & Default `Tuần` on Opening `Lịch` (`CalendarView`)**: Reordered `CalendarView._mode_toggle` pills to `[Tuần, Tháng]` on Mobile and `[Tuần, Tháng, Lịch học]` on Desktop, changed `CalendarView.__init__` default `_view_mode` to `"week"` (pre-seeding lightweight 88px 7-day week strips on startup), and updated `CalendarView.show()` so clicking `Lịch` always opens on `Tuần` anchored to `date.today()` while preserving active mode across `DetailView` back navigation and background `update_data()` refreshes.
+  - **Month Date-Picker Dialog on `ScheduleWeekView` (`_show_month_date_picker` & `_restore_control_focus`)**: Upgraded `ScheduleWeekView._week_label_box` to a focusable `ft.TextButton` (`44px` touch target, `Semantics` button, subtle chevron indicator refreshed in `update_theme()`) that opens a Monday-first Vietnamese month calendar `AlertDialog` (`Tháng M, YYYY`, `<`/`>` month navigation with year rollover, active week band highlight, selected day + today highlight, cached class dots, `"Hôm nay"` shortcut, and `Escape` dismiss) to jump directly to any chosen date/week on 1 click (`self._go(target)`), with defensive `_restore_control_focus` across all schedule dialogs so `on_dismiss` never fails on non-focusable or unmounted controls.
+- **Verification**:
+  - `ruff check src tests`: **All checks passed!**.
+  - Full `pytest` suite (`tests/`): **3540 passed, 26 skipped, 0 failed** (3,609 passed across root + extension test suites).
+
+## Fix Semester & Graduation GPA Planner Input Desync (`Prop.__set__`) & Remove Grades Header `Môn học` Action (2026-11-28)
+
+- **Branch & Scope**: `fix/gpa-target-planner-and-grades-header` — `src/gui/components/academic_radar/{gpa_target_card,graduation_gpa_card,radar_card,overall_gpa_card}.py`, `src/gui/components/grade_overview_view.py`, `src/gui/app_controller.py`, `tests/{test_grade_overview_view,test_courses_app_integration}.py`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - **Root-Cause Fix for Unresponsive Semester/Graduation GPA Planner Inputs (`GpaTargetCard`, `GraduationGpaCard`)**: In Flet `0.86.5`, `@control` uses `@dataclass(eq=True)` and `Prop.__set__` short-circuits when `old == value`. Calling `_build_ui()` in `__init__` and again in `set_semester()` / `set_data()` while `_target_text == ""` produced a second `ft.Column` structurally equal (`==`) to the first, causing `Prop.__set__` to keep the first `Column` (and first `TextField` + `_result_col`) mounted on `self.content` while overwriting `self._target_field` and `self._result_col` with detached instances. Refactored both `GpaTargetCard` (with active semester indicator in hint text) and `GraduationGpaCard` to initialize their control trees once and mutate text/result controls in place across `set_semester()`, `set_data()`, `rebuild()`, and `_on_target_change()` (supporting both `e.data` and `e.control.value`), and guarded `AcademicRadarCard` / `OverallGpaCard` against `Prop.__set__` equality skips.
+  - **Clean Up `GradeOverviewView` Header**: Removed the legacy `"Môn học"` header text button (`_courses_btn`) from `GradeOverviewView._header` and `AppController` wiring, leaving only `[Quay lại, Bảng điểm, Tính GPA mong muốn, Làm mới]`.
+- **Verification**:
+  - `ruff check src tests`: **All checks passed!**.
+  - Targeted & integration suites (`test_grade_overview_view.py`, `test_courses_app_integration.py`, `test_academic_radar_*.py`, `test_theme_propagation.py`, `test_architecture_boundaries.py`, `test_repository_governance.py`): **All passed** (including live Flet `Session` + `msgpack` wire-level planner input test).
+
+## PR #153 Calendar Suspended & Makeup Labels, Tab Today Reset & Differential-Review Fixes (2026-11-28)
+
+- **Branch & Scope**: `codex/fix-schedule-suspended-label-overflow` — `src/gui/components/{calendar_view,schedule_week_view}.py`, `src/gui/core/{theme,theme_presets}.py`, `tests/{test_calendar_week_view,test_schedule_week_view,test_theme_accessibility}.py`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - **Diagonal `"Tạm ngưng"` / `"Học bù"` Watermarks & Compact `"Học bù"` Chip**: Replaced cramped inline suspended pills in `ScheduleWeekView._session_summary_card` with centered diagonal watermarks (`ignore_interactions=True`) and subtle card tints (`0.16` `CRITICAL` / `0.25` `MAKEUP_BG`), added a `"Học bù"` chip in `CalendarView._make_compact_session_row`, and switched narrow `<920px` cards (`height=None` inside scrollable `Column`) to `ft.StackFit.LOOSE` so Flutter `RenderStack` never forces infinite height.
+  - **WCAG AA Theme-Aware `MAKEUP_BG` & `MAKEUP_TEXT` Tokens**: Added mode-appropriate makeup palette tokens (`#FDE68A` / `#854D0E` on light presets `steel_light` and `rose_light`; `#CA8A04` / `#FEF08A` on dark presets) and wired `apply_theme()` so all 9 themes meet `>= 4.5:1` contrast and live theme switching remaps mounted controls via `refresh_semantic_control_colors()`.
+  - **Reset Calendar Tabs to Today (`_toggle_view_mode`)**: Selecting `Tuần`, `Tháng`, or `Lịch học` (including clicking the already-active tab) resets `CalendarView` date/week/month anchors and `_detail_filter_mode` (`"day"`), clears in-flight period swipe state when entering `"schedule"`, and anchors `ScheduleWeekView` to `date.today()`.
+- **Verification**:
+  - `ruff check src tests`: **All checks passed!**.
+  - Full `pytest tests -q --tb=short` + calendar/schedule/theme regression suites: **All passed**.
+
 ## Privacy-Preserving Anonymous PostHog Product Analytics (2026-11-28)
 
 - **Branch & Scope**:
@@ -2786,6 +2817,5 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - **Mobile `_APPDATA_DIR` Fallback & Documentation Alignment (`VERDICT-M08`, `VERDICT-L04`)**: Added `FLET_APP_DATA` fallback after `FLET_APP_STORAGE_DATA` in `src/main.py:_resolve_appdata_dir()`, aligned exact platform storage paths, `"per-process rolling 24h"` rate-cap semantics, and stored-settings Debug `"Reset Settings"` behavior across `docs/PRIVACY.md`, `docs/adr/0007-privacy-preserving-posthog-analytics.md` (`ipa_lts`, zero-event opt-out), and `docs/guides/store-distribution-submission.md` (`--build-environment release --package-format msix` and paired `POSTHOG_*` variables).
 - **Verification**:
   - `pytest tests/test_diagnostic_release_config.py tests/test_public_config_packaging.py tests/test_release_hardening.py tests/test_main_single_instance.py -q --tb=short`, `ruff check`, and PowerShell AST parser check (`pwsh` + `powershell.exe`): **All checks passed!**.
-
 
 
