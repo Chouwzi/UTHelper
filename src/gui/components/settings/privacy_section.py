@@ -5,9 +5,7 @@ from gui.core.theme import C
 from gui.components.terms_dialog import show_terms_dialog
 
 
-def init_privacy_controls(view) -> None:
-    """Create the cross-platform crash-reporting consent control."""
-    current = getattr(settings, "CRASH_REPORTING_CONSENT", "enabled")
+def _build_consent_dropdown(view, current: object, label: str) -> ft.Dropdown:
     options = [
         ft.dropdown.Option("enabled", "Bật (mặc định)"),
         ft.dropdown.Option("disabled", "Tắt"),
@@ -20,9 +18,9 @@ def init_privacy_controls(view) -> None:
         value = "not_asked"
     else:
         value = "disabled" if current == "disabled" else "enabled"
-    view._dd_crash_reporting_consent = ft.Dropdown(
+    return ft.Dropdown(
         value=value,
-        label="Gửi chẩn đoán sự cố",
+        label=label,
         options=options,
         border_color=C.BORDER,
         focused_border_color=C.ACCENT,
@@ -30,6 +28,18 @@ def init_privacy_controls(view) -> None:
         bgcolor=C.BG,
         border_radius=10,
         on_select=lambda e: getattr(view, "_on_form_field_change", lambda: None)(),
+    )
+
+
+def init_privacy_controls(view) -> None:
+    """Create the cross-platform crash-reporting and usage-analytics consent controls."""
+    crash_current = getattr(settings, "CRASH_REPORTING_CONSENT", "enabled")
+    analytics_current = getattr(settings, "ANALYTICS_CONSENT", "enabled")
+    view._dd_crash_reporting_consent = _build_consent_dropdown(
+        view, crash_current, "Gửi chẩn đoán sự cố"
+    )
+    view._dd_analytics_consent = _build_consent_dropdown(
+        view, analytics_current, "Phân tích sử dụng ẩn danh"
     )
 
 
@@ -82,11 +92,17 @@ def build_privacy_section(view) -> ft.Control:
 
     return view._build_setting_group(
         "Quyền riêng tư",
-        "Chẩn đoán và chính sách dữ liệu",
+        "Chẩn đoán, phân tích ẩn danh và chính sách dữ liệu",
         [
             view._make_themed_label("Chẩn đoán sự cố"),
             view._dd_crash_reporting_consent,
             view._build_hint("Chẩn đoán ẩn danh được bật mặc định; bạn có thể tắt bất cứ lúc nào."),
+            ft.Divider(height=16, color=C.BORDER),
+            view._make_themed_label("Phân tích sử dụng"),
+            view._dd_analytics_consent,
+            view._build_hint(
+                "Thống kê ẩn danh tính năng và phiên dùng (không gắn MSSV hay lưu IP); tắt sẽ xóa ngay mã cài đặt cục bộ."
+            ),
             ft.Divider(height=16, color=C.BORDER),
             view._make_themed_label("Chính sách & Pháp lý"),
             terms_entry,

@@ -1,4 +1,4 @@
-"""In-app terms and privacy notice shown from Settings."""
+"""In-app terms and privacy notice shown from Settings and the sign-in dialog."""
 
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ TERMS_SECTIONS: tuple[tuple[str, str], ...] = (
     ),
     (
         "3. Chẩn đoán sự cố",
-        "Chẩn đoán ẩn danh được bật mặc định và có thể tắt bất cứ lúc nào trong Cài đặt. Payload chỉ gồm phiên bản ứng dụng, hệ điều hành/build, kiến trúc, nhóm thiết bị, số lõi CPU, nhóm RAM/màn hình và stack frame đã rút gọn. Ứng dụng không đưa MSSV, mật khẩu, token, cookie, URL Moodle/Portal, tên môn, nội dung bài, hostname, MAC, serial, vị trí hay IP vào payload. Endpoint Sentry vẫn có thể xử lý IP kết nối ở tầng mạng; dự án phải cấu hình Sentry không lưu IP.",
+        "Chẩn đoán sự cố ẩn danh (Sentry) và phân tích sử dụng ẩn danh (PostHog) được bật mặc định và có thể tắt độc lập bất cứ lúc nào trong Cài đặt → Riêng tư. Chẩn đoán sự cố không tạo mã định danh thiết bị cố định; payload chỉ gồm phiên bản ứng dụng, hệ điều hành/build, kiến trúc, nhóm thiết bị, số lõi CPU, nhóm RAM/màn hình và stack frame đã rút gọn. Phân tích sử dụng ẩn danh chỉ hoạt động sau khi đăng nhập tài khoản thật (bỏ qua tài khoản xem thử), dùng mã cài đặt ngẫu nhiên cục bộ (UUIDv4) tách biệt hoàn toàn với Sentry kèm mã phiên ngắn hạn (UUIDv7) ở chế độ không tạo hồ sơ cá nhân ($process_person_profile: false), và xóa ngay mã cài đặt cùng hàng đợi cục bộ khi tắt hoặc đăng xuất. Ứng dụng không đưa MSSV, mật khẩu, token, cookie, URL Moodle/Portal, tên môn, nội dung bài, điểm số, hostname, MAC, serial, vị trí hay IP vào payload. Endpoint Sentry và PostHog vẫn có thể xử lý IP kết nối ở tầng mạng; dự án phải cấu hình Sentry và PostHog không lưu IP.",
     ),
     (
         "4. Dịch vụ bên thứ ba",
-        "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, GitHub để kiểm tra bản phát hành và Sentry để nhận chẩn đoán sự cố. Việc xử lý tại các dịch vụ này còn chịu chính sách của đơn vị cung cấp tương ứng.",
+        "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, GitHub để kiểm tra bản phát hành, Sentry để nhận chẩn đoán sự cố và PostHog để thống kê mức độ sử dụng tính năng ẩn danh (khi được bật). Việc xử lý tại các dịch vụ này còn chịu chính sách của đơn vị cung cấp tương ứng.",
     ),
     (
         "5. Sử dụng chấp nhận được",
@@ -52,14 +52,16 @@ def get_terms_sections(
     if active.supports_github_self_update:
         third_party_body = (
             "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, "
-            "GitHub để kiểm tra bản phát hành, Sentry để nhận chẩn đoán sự cố (khi được bật) "
+            "GitHub để kiểm tra bản phát hành, Sentry để nhận chẩn đoán sự cố (khi được bật), "
+            "PostHog để thống kê mức độ sử dụng tính năng ẩn danh (khi được bật) "
             "và các kênh thông báo do người dùng tự cấu hình (Gmail, Discord, Telegram). "
             "Việc xử lý tại các dịch vụ này còn chịu chính sách của đơn vị cung cấp tương ứng."
         )
     elif active.channel is DistributionChannel.CHPLAY:
         third_party_body = (
             "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, "
-            "Sentry để nhận chẩn đoán sự cố ẩn danh (khi được bật) và các kênh thông báo "
+            "Sentry để nhận chẩn đoán sự cố ẩn danh (khi được bật), "
+            "PostHog để thống kê mức độ sử dụng tính năng ẩn danh (khi được bật) và các kênh thông báo "
             "do người dùng tự cấu hình (Gmail, Discord, Telegram). Việc cập nhật phiên bản "
             "trên kênh phân phối này được quản lý hoàn toàn bởi Google Play. Việc xử lý tại "
             "các dịch vụ bên thứ ba còn chịu chính sách của đơn vị cung cấp tương ứng."
@@ -68,7 +70,8 @@ def get_terms_sections(
         store_name = active.store_display_name or "Microsoft Store"
         third_party_body = (
             "Ứng dụng có thể kết nối Moodle/Portal UTH để cung cấp tính năng học tập, "
-            "Sentry để nhận chẩn đoán sự cố ẩn danh (khi được bật) và các kênh thông báo "
+            "Sentry để nhận chẩn đoán sự cố ẩn danh (khi được bật), "
+            "PostHog để thống kê mức độ sử dụng tính năng ẩn danh (khi được bật) và các kênh thông báo "
             "do người dùng tự cấu hình (Gmail, Discord, Telegram). Việc cập nhật phiên bản "
             f"trên kênh phân phối này được quản lý hoàn toàn bởi {store_name}. Việc xử lý tại "
             "các dịch vụ bên thứ ba còn chịu chính sách của đơn vị cung cấp tương ứng."
@@ -116,7 +119,7 @@ def build_terms_dialog(
     content = ft.Column(
         [
             ft.Text(
-                "Cập nhật: 12/08/2026",
+                "Cập nhật: 28/11/2026",
                 size=11,
                 color=C.TEXT_SECONDARY,
             ),

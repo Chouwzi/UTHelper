@@ -10,6 +10,7 @@ from typing import Literal, Mapping, Protocol
 
 
 CrashReportingConsent = Literal["not_asked", "enabled", "disabled"]
+AnalyticsConsent = Literal["not_asked", "enabled", "disabled"]
 
 
 class SettingsLike(Protocol):
@@ -199,6 +200,17 @@ def _parse_crash_reporting_consent(value: object) -> CrashReportingConsent:
     raise SettingsFormValidationError("crash_reporting_consent is invalid")
 
 
+def _parse_analytics_consent(value: object) -> AnalyticsConsent:
+    consent = _text(value, "enabled")
+    if consent == "not_asked":
+        return "not_asked"
+    if consent == "enabled":
+        return "enabled"
+    if consent == "disabled":
+        return "disabled"
+    raise SettingsFormValidationError("analytics_consent is invalid")
+
+
 def _text(value: object, default: str = "", *, strip: bool = True) -> str:
     if value is None:
         return default
@@ -228,6 +240,7 @@ class SettingsFormSnapshot:
     minimize_to_tray: bool
     auto_update_enabled: bool
     crash_reporting_consent: CrashReportingConsent
+    analytics_consent: AnalyticsConsent
     background_check_android: bool
     enable_gmail: bool
     gmail_address: str
@@ -279,6 +292,7 @@ class SettingsFormSnapshot:
                 "minimize_to_tray": getattr(value, "MINIMIZE_TO_TRAY", True),
                 "auto_update_enabled": getattr(value, "AUTO_UPDATE_ENABLED", True),
                 "crash_reporting_consent": getattr(value, "CRASH_REPORTING_CONSENT", "enabled"),
+                "analytics_consent": getattr(value, "ANALYTICS_CONSENT", "enabled"),
                 "background_check_android": getattr(value, "BACKGROUND_CHECK_ANDROID", True),
                 "enable_gmail": getattr(value, "ENABLE_GMAIL", False),
                 "gmail_address": getattr(value, "GMAIL_ADDRESS", ""),
@@ -339,6 +353,9 @@ class SettingsFormSnapshot:
             auto_update_enabled=_parse_bool("auto_update_enabled", values.get("auto_update_enabled"), True),
             crash_reporting_consent=_parse_crash_reporting_consent(
                 values.get("crash_reporting_consent")
+            ),
+            analytics_consent=_parse_analytics_consent(
+                values.get("analytics_consent")
             ),
             background_check_android=_parse_bool("background_check_android", values.get("background_check_android"), True),
             enable_gmail=_parse_bool("enable_gmail", values.get("enable_gmail"), False),
@@ -403,6 +420,7 @@ class SettingsFormSnapshot:
             "MINIMIZE_TO_TRAY": self.minimize_to_tray,
             "AUTO_UPDATE_ENABLED": self.auto_update_enabled,
             "CRASH_REPORTING_CONSENT": self.crash_reporting_consent,
+            "ANALYTICS_CONSENT": self.analytics_consent,
             "BACKGROUND_CHECK_ANDROID": self.background_check_android,
             "ENABLE_GMAIL": self.enable_gmail,
             "GMAIL_ADDRESS": self.gmail_address,
