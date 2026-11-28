@@ -68,6 +68,14 @@ def _is_gui_module(module: str) -> bool:
     return module == "gui" or module.startswith("gui.")
 
 
+def _is_analytics_module(module: str) -> bool:
+    return module == "analytics" or module.startswith("analytics.")
+
+
+def _is_diagnostics_module(module: str) -> bool:
+    return module == "diagnostics" or module.startswith("diagnostics.")
+
+
 def test_core_does_not_import_gui():
     violations = {
         module: sorted(
@@ -201,3 +209,58 @@ def test_no_new_core_to_config_or_platform_utils_imports():
     assert unexpected_platform == [], (
         f"New core -> platform_utils coupling introduced: {unexpected_platform}"
     )
+
+
+def test_core_does_not_import_analytics_or_diagnostics():
+    violations = {
+        module: sorted(
+            import_name
+            for import_name in _imports_for(path)
+            if _is_analytics_module(import_name) or _is_diagnostics_module(import_name)
+        )
+        for module, path in _python_modules().items()
+        if _is_core_module(module)
+    }
+    violations = {module: imports for module, imports in violations.items() if imports}
+
+    assert violations == {}
+
+
+def test_diagnostics_does_not_import_analytics_or_gui():
+    violations = {
+        module: sorted(
+            import_name
+            for import_name in _imports_for(path)
+            if _is_analytics_module(import_name) or _is_gui_module(import_name)
+        )
+        for module, path in _python_modules().items()
+        if _is_diagnostics_module(module)
+    }
+    violations = {module: imports for module, imports in violations.items() if imports}
+
+    assert violations == {}
+
+
+def test_analytics_does_not_import_gui_core_or_diagnostics():
+    modules = _python_modules()
+    analytics_modules = {
+        module: path
+        for module, path in modules.items()
+        if _is_analytics_module(module)
+    }
+    assert analytics_modules, "Expected src/analytics package modules to exist"
+
+    violations = {
+        module: sorted(
+            import_name
+            for import_name in _imports_for(path)
+            if _is_gui_module(import_name)
+            or _is_core_module(import_name)
+            or _is_diagnostics_module(import_name)
+        )
+        for module, path in analytics_modules.items()
+    }
+    violations = {module: imports for module, imports in violations.items() if imports}
+
+    assert violations == {}
+
