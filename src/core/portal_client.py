@@ -921,3 +921,203 @@ class PortalClient:
 
         first_ten = str(ordered[0].get("tenDot") or "").strip()
         return (first_ten, [])
+
+    # ------------------------------------------------------------------
+    # Learning Roadmap endpoints
+    # ------------------------------------------------------------------
+    _ROADMAP_ENDPOINTS: tuple[tuple[str, str], ...] = (
+        ("curriculum", "hoctap/chuongtrinhkhung"),
+        ("exemptions", "hoctap/diemMien"),
+        ("certificates", "hoctap/getChungChi"),
+        ("graduation_certificates", "xetTotNghiep/getChungChi"),
+        ("graduation_info", "xetTotNghiep/xetTotNghiepInfo"),
+        ("credit_progress", "hoctap/tiendo"),
+    )
+
+    def _authed_get(
+        self,
+        path: str,
+        username: str,
+        password: str,
+        *,
+        query: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """GET with the account's cached token; authentication rejection aborts the bundle."""
+        generation = self._current_generation()
+        token = self._cached_token(username) or self._login(
+            username, password, generation
+        )
+        try:
+            payload = self._request_json("GET", path, token=token, query=query)
+        except _PortalHttpError as exc:
+            if exc.status in (401, 403):
+                self._discard_token(generation)
+                raise PortalAuthenticationError(
+                    "Portal session expired or was rejected", status=exc.status
+                ) from exc
+            raise
+        self._store_refreshed_token(payload, username, generation)
+        return payload
+
+    def _collect_body(
+        self,
+        key: str,
+        path: str,
+        username: str,
+        password: str,
+        bodies: dict[str, Any],
+        errors: dict[str, str],
+    ) -> None:
+        """Fetch one endpoint, aborting the full bundle on authentication errors."""
+        try:
+            payload = self._authed_get(path, username, password)
+        except PortalAuthenticationError:
+            raise
+        except _PortalHttpError as exc:
+            errors[key] = f"HTTP {exc.status}"
+            return
+        except PortalProtocolError as exc:
+            errors[key] = str(exc)
+            return
+        if payload.get("success") is False:
+            errors[key] = str(
+                payload.get("message") or f"status {payload.get('status')}"
+            )
+            return
+        bodies[key] = payload.get("body")
+
+    def fetch_roadmap_bundle(self, username: str, password: str) -> dict[str, Any]:
+        """Fetch raw Portal data used to build the Learning Roadmap."""
+        if not username or not password:
+            raise PortalAuthenticationError("Portal credentials are unavailable")
+        if is_demo_account(username):
+            self._verify_demo_credentials(username, password)
+            transcript = get_demo_full_transcript()
+            semester_name, current_courses = get_demo_current_semester_courses()
+            semesters = list(reversed(transcript))
+            curriculum: list[dict[str, Any]] = []
+            seen_codes: set[str] = set()
+            for semester_no, semester in enumerate(semesters, start=1):
+                rows = semester.get("danhSachMonHoc", [])
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("maHocPhan") or "").strip()
+                    if not code or code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    curriculum.append({**row, "hocKy": semester_no, "batBuoc": True})
+            for row in current_courses:
+                code = str(row.get("maHocPhan") or "").strip()
+                if code and code not in seen_codes:
+                    seen_codes.add(code)
+                    curriculum.append(
+                        {**row, "hocKy": len(semesters) + 1, "batBuoc": True}
+                    )
+            current = transcript[0] if transcript else {}
+            return {
+                "bodies": {
+                    "curriculum": curriculum,
+                    "exemptions": [],
+                    "certificates": [],
+                    "graduation_info": {},
+                    "credit_progress": get_demo_credit_progress(),
+                },
+                "current_semester": {
+                    "id": current.get("id"),
+                    "name": semester_name or current.get("tenDot") or "",
+                    "courses": current_courses,
+                },
+                "transcript": transcript,
+                "errors": {},
+            }
+
+        generation = self._current_generation()
+        if not self._cached_token(username):
+            self._login(username, password, generation)
+
+        bodies: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for key, path in self._ROADMAP_ENDPOINTS:
+            self._collect_body(key, path, username, password, bodies, errors)
+        semester_bodies: dict[str, Any] = {}
+        self._collect_body(
+            "semesters", "hoctap/hocky", username, password,
+            semester_bodies, errors,
+        )
+        current_semester: dict[str, Any] = {}
+
+        def semester_order(item: dict[str, Any]) -> int:
+            try:
+                return int(item.get("id") or item.get("idDot") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        semesters = semester_bodies.get("semesters")
+        if isinstance(semesters, list):
+            candidates = [
+                item for item in semesters
+                if isinstance(item, dict) and (item.get("id") or item.get("idDot"))
+            ]
+            if candidates:
+                latest = max(
+                    candidates,
+                    key=semester_order,
+                )
+                semester_id = latest.get("id") or latest.get("idDot")
+                course_bodies: dict[str, Any] = {}
+                self._collect_body(
+                    "current_semester",
+                    f"hoctap/montheoky/{semester_id}",
+                    username,
+                    password,
+                    course_bodies,
+                    errors,
+                )
+                if "current_semester" in course_bodies:
+                    current_semester = {
+                        "id": semester_id,
+                        "name": latest.get("tenDot") or latest.get("name") or "",
+                        "courses": course_bodies["current_semester"],
+                    }
+
+        transcript_body: dict[str, Any] = {}
+        self._collect_body(
+            "transcript", "hoctap/bangdiem2", username, password,
+            transcript_body, errors,
+        )
+        raw_transcript = transcript_body.get("transcript")
+        if isinstance(raw_transcript, list):
+            transcript = raw_transcript
+        elif isinstance(raw_transcript, dict):
+            transcript = next(
+                (
+                    raw_transcript[key]
+                    for key in (
+                        "semesters", "bangDiem", "dsDiemHocKy", "kqHocTap",
+                        "dsHocKy", "data", "list",
+                    )
+                    if isinstance(raw_transcript.get(key), list)
+                ),
+                [raw_transcript]
+                if any(
+                    key in raw_transcript
+                    for key in ("diems", "danhSachMonHoc", "dsDiem", "courses")
+                )
+                else [],
+            )
+        else:
+            transcript = []
+        if not transcript:
+            errors.setdefault("transcript", "Không có dữ liệu")
+
+        if not transcript and not any(value is not None for value in bodies.values()):
+            raise PortalProtocolError("Portal returned no roadmap data")
+        return {
+            "bodies": bodies,
+            "current_semester": current_semester,
+            "transcript": transcript,
+            "errors": errors,
+        }

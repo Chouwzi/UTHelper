@@ -160,6 +160,8 @@ def test_no_new_core_to_config_or_platform_utils_imports():
         "core.data_cache",
         "core.data_orchestrator",
         "core.grade_monitor",
+        "core.learning_roadmap.plan_store",
+        "core.learning_roadmap.service",
         "core.notification_history",
         "core.quiz_web_session",
         "core.today_schedule",

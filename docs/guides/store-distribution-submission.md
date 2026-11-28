@@ -121,7 +121,7 @@ and grades, Google Play Console **Policy → App content → App access** must
 declare **"All or some functionality in my app is restricted"** and provide the
 built-in offline Reviewer Demo credentials below:
 
-- **Instruction name**: `Reviewer Demo Account (All 5 Tabs)`
+- **Instruction name**: `Reviewer Demo Account (All 6 Tabs)`
 - **Username (`Mã số sinh viên (MSSV)`)**: `uthelper_demo`
 - **Password (`Mật khẩu`)**: `UTH-Review-2026!`
 - **2-step verification / OTP / VPN / location restrictions**: None required.
@@ -133,12 +133,13 @@ UTHelper is an independent student study companion for Ho Chi Minh City Universi
 
 1. Launch UTHelper. The app opens directly to the "Đăng nhập UTH" sign-in dialog (dismiss any standard Android OS notification permission prompt if shown).
 2. In the "Đăng nhập UTH" sign-in dialog, enter Username `uthelper_demo` in the first field ("Mã số sinh viên (MSSV)") and Password `UTH-Review-2026!` in the second field ("Mật khẩu"), then tap "Đăng nhập" (Sign in).
-3. All 5 primary navigation tabs unlock immediately using realistic, date-relative sample university data through the exact same UI, filtering, search, document reader, and GPA calculation code paths as a live student account:
+3. All 6 primary navigation tabs unlock immediately using realistic, date-relative sample university data through the exact same UI, filtering, search, document reader, and GPA calculation code paths as a live student account:
    - Tab 1 ("Tổng quan"): Upcoming assignments, quizzes, attendance, detail sheets, and today's class schedule.
    - Tab 2 ("Môn học"): Enrolled courses, weekly sections, quiz review breakdown, and built-in offline PDF / Markdown / ZIP lecture viewers.
    - Tab 3 ("Lịch"): Monthly assignment calendar and interactive weekly class timetable with session details and course syllabi.
    - Tab 4 ("Bảng điểm"): Multi-semester transcript, 6-axis Academic Radar chart, credit progress, and target GPA planner.
-   - Tab 5 ("Cài đặt"): Theme presets, notification preferences, privacy controls, and account switching.
+   - Tab 5 ("Lộ trình"): Multi-semester learning roadmap with credit progress, curriculum coverage, and saved study plans.
+   - Tab 6 ("Cài đặt"): Theme presets, notification preferences, privacy controls, and account switching.
 4. Note: File submission mutations and live external `*.ut.edu.vn` LMS WebView/Quiz launches are intentionally read-only in Demo Mode and display a clear informational notice so reviewers and automated crawlers never modify live university records. No 2FA, VPN, or geographic IP allowlisting is required.
 ```
 

@@ -160,6 +160,10 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 [dependency-groups]
 dev = [
     "flet-webview==0.86.5",
+    # flet-web 0.86.5 builds FastAPI(openapi_prefix=...); FastAPI removed that
+    # keyword in 0.116, which breaks `--web` mode with
+    # "FastAPI.__init__() got an unexpected keyword argument 'openapi_prefix'".
+    "fastapi>=0.115.12,<0.116",
     "filelock>=3.25.0",
     "pytest>=9.0.3",
     "pytest-timeout>=2.3,<3",

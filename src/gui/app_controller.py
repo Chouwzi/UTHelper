@@ -74,6 +74,8 @@ from gui.components.quiz_player_view import QuizPlayerView
 from gui.components.settings_view import SettingsView
 from gui.components.calendar_view import CalendarView
 from gui.components.grade_overview_view import GradeOverviewView
+from core.learning_roadmap.plan_store import PlanStore
+from gui.components.learning_roadmap_view import LearningRoadmapView
 from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
 from gui.components.sync_status_indicator import SyncStatusIndicator
@@ -2383,6 +2385,8 @@ class AppController:
             return "settings"
         if getattr(getattr(self, "calendar_view", None), "visible", False):
             return "calendar"
+        if getattr(getattr(self, "roadmap_view", None), "visible", False):
+            return "roadmap"
         if getattr(getattr(self, "grade_overview_view", None), "visible", False) or getattr(
             getattr(self, "course_grades_view", None), "visible", False
         ):
@@ -2461,12 +2465,16 @@ class AppController:
             await self._close_grades()
         elif current == "courses":
             await self._close_courses()
+        elif current == "roadmap":
+            await self._close_roadmap()
         if target == "calendar":
             await self._show_calendar()
         elif target == "grades":
             await self._show_grades()
         elif target == "courses":
             await self._show_courses()
+        elif target == "roadmap":
+            await self._show_roadmap()
         elif target == "settings":
             await self._show_settings()
         self._sync_rail_active()
@@ -2652,6 +2660,9 @@ class AppController:
             handled = True
         elif courses_view is not None and getattr(courses_view, "visible", False):
             await self._close_courses()
+            handled = True
+        elif getattr(getattr(self, "roadmap_view", None), "visible", False):
+            await self._close_roadmap()
             handled = True
         self._sweep_closed_modal_dialogs()
         self._sync_rail_active()
@@ -3519,10 +3530,17 @@ class AppController:
             moodle_courses_provider=self._get_moodle_course_grades,
             course_grades_lookup=self._lookup_moodle_course_grades_cached,
             course_grades_async_lookup=self._fetch_moodle_course_grades_async,
+            on_open_roadmap=lambda: self._safe_run_task(self._show_roadmap),
         )
         self.course_grades_view = CoursesView(
             on_close=lambda: self._safe_run_task(self._close_course_grades),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_course_grades(force_refresh=True)),
+        )
+        self.roadmap_view = LearningRoadmapView(
+            on_close=lambda: self._safe_run_task(self._close_roadmap),
+            on_refresh=lambda: self._safe_run_task(lambda: self._show_roadmap(force_refresh=True)),
+            page=self.page,
+            plan_store=PlanStore(),
         )
 
         from core.courses.activity_service import CourseActivityService
@@ -3624,6 +3642,7 @@ class AppController:
             self.grade_overview_view,
             self.courses_view,
             self.course_grades_view,
+            self.roadmap_view,
         ):
             _view.offset = ft.Offset(0, 0)
             _view.opacity = 0.0
@@ -3739,6 +3758,7 @@ class AppController:
             detail_switcher=self.detail_switcher,
             empty_detail=self._empty_detail,
             on_destination_change=self._nav_shell.set_active,
+            roadmap_view=self.roadmap_view,
         )
         body_with_rail = ft.Row(
             controls=[self._nav_shell.rail_slot, main_stack],
@@ -3902,6 +3922,7 @@ class AppController:
             getattr(self, "calendar_view", None),
             courses_view,
             getattr(self, "course_grades_view", None),
+            getattr(self, "roadmap_view", None),
         ):
             if view is not None and getattr(view, "margin", None) != zero_margin:
                 view.margin = zero_margin
@@ -4091,6 +4112,8 @@ class AppController:
             await self._show_calendar()
         elif key == "grades":
             await self._show_grades()
+        elif key == "roadmap":
+            await self._show_roadmap()
         elif key == "settings":
             await self._show_settings()
 
@@ -6883,6 +6906,83 @@ class AppController:
         self._diag_screen("home")
         self._sync_rail_active()
 
+    async def _toggle_roadmap(self):
+        """Toggle the Learning Roadmap panel."""
+        if getattr(getattr(self, "roadmap_view", None), "visible", False):
+            await self._close_roadmap()
+        else:
+            await self._show_roadmap()
+
+    async def _show_roadmap(self, force_refresh: bool = False):
+        """Open the Learning Roadmap. Offline-first: fresh cache, else Portal,
+        else the last saved copy (clearly flagged as offline in the view)."""
+        import hashlib
+
+        from config import get_data_dir
+        from core.learning_roadmap.service import (
+            CACHE_FILE_NAME,
+            SOURCE_NONE,
+            LearningRoadmapService,
+            RoadmapLoadResult,
+        )
+
+        username = str(settings.UTH_USERNAME or settings.MOODLE_USERNAME or "").strip()
+        password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD or ""
+        # Cache per account so switching users never shows another account's plan.
+        account_key = hashlib.sha256(
+            username.casefold().encode("utf-8")
+        ).hexdigest()[:20]
+        cache_file = Path(get_data_dir()) / (
+            f"{Path(CACHE_FILE_NAME).stem}_{account_key}{Path(CACHE_FILE_NAME).suffix}"
+        )
+        account_epoch = getattr(self, "_account_epoch", 0)
+
+        self._diag_screen("roadmap")
+        self._diag_breadcrumb("navigation", "succeeded", "user", screen="roadmap")
+        self.view_manager.show_roadmap_loading()
+        self._sync_rail_active()
+        service = None
+        try:
+            service = getattr(self, "_roadmap_service", None)
+            if (
+                service is None
+                or getattr(self, "_roadmap_service_account_key", None) != account_key
+            ):
+                # Drop the previous account's in-memory copy before rebuilding.
+                clear_cache = getattr(service, "clear_cache", None)
+                if callable(clear_cache):
+                    clear_cache()
+                # Reuse the shared PortalClient so the cached token is not
+                # re-negotiated and account switches clear it in one place.
+                service = LearningRoadmapService(
+                    cache_file,
+                    portal_client=getattr(self, "_portal_client", None),
+                )
+                self._roadmap_service = service
+                self._roadmap_service_account_key = account_key
+            result = await asyncio.to_thread(
+                service.load,
+                username=username,
+                password=password,
+                force_refresh=force_refresh,
+            )
+        except Exception as e:
+            logger.error("Learning roadmap load failed: %s", e, exc_info=True)
+            result = RoadmapLoadResult(None, SOURCE_NONE, None, "Lỗi không xác định")
+        if account_epoch != getattr(self, "_account_epoch", 0):
+            # The account changed while the request was in flight: discard it.
+            if service is not None:
+                service.clear_cache()
+            return
+        self.roadmap_view.set_plan_owner(username)
+        self.view_manager.show_roadmap_result(result)
+
+    async def _close_roadmap(self):
+        """Close the Learning Roadmap and return to the dashboard."""
+        await self.view_manager.close_roadmap()
+        self._diag_screen("home")
+        self._sync_rail_active()
+
     def _rebuild_colors(self, *, sync_nav: bool = True, update_page: bool = True):
         """Repaint ALL existing controls with current C values for live theme switching.
 
@@ -7134,6 +7234,7 @@ class AppController:
             "grade_overview_view",
             "courses_view",
             "course_grades_view",
+            "roadmap_view",
             "quiz_player_view",
         ):
             view_obj = getattr(self, view_attr, None)
