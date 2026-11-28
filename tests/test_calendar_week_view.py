@@ -248,6 +248,7 @@ def test_missing_dismiss_event_is_rearmed_by_bounded_recovery():
 
 def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
     view = CalendarView(_page_stub())
+    today = date.today()
     view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
@@ -271,7 +272,7 @@ def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
             )
         )
     )
-    assert (view._year, view._month) == (2026, 8)
+    assert (view._year, view._month) == (today.year, today.month)
     assert view._period_dismissible is current_source
 
     event = SimpleNamespace(
@@ -283,7 +284,10 @@ def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
         asyncio.run(view._on_desktop_period_confirm(event))
     confirm_dismiss.assert_awaited_once_with(True)
     asyncio.run(view._on_desktop_period_dismiss(event))
-    assert (view._year, view._month) == (2026, 9)
+    expected_next_month = (
+        (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+    )
+    assert (view._year, view._month) == expected_next_month
 
 
 def test_current_swipe_heals_orphaned_pending_control():
@@ -1027,6 +1031,7 @@ def test_shift_bars_and_compact_room_badge_handle_cancelled_only_vs_mixed_shifts
 
     # Switch to week mode and inspect shift_bars (morning=active, afternoon=mixed->ACCENT, evening=cancelled-only->CRITICAL 0.45)
     cal._toggle_view_mode("week")
+    cal._on_absolute_date_click(monday)
     mon_week_cell = cal._period_pages[1].week_cells[0]
     wed_week_cell = cal._period_pages[1].week_cells[2]
     assert set(mon_week_cell.data.keys()) >= {
@@ -1368,6 +1373,121 @@ def test_calendar_defaults_to_week_mode_places_week_before_month_and_resets_to_w
     assert cal._detail_panel.visible is True
     assert cal._mode_week_btn.bgcolor == active_bg
     assert cal._mode_schedule_btn.bgcolor == "transparent"
+
+
+def test_compact_session_row_renders_makeup_chip_and_prioritizes_cancelled():
+    from datetime import datetime
+    from core.today_schedule import ClassSession
+    from gui.core.theme import C
+
+    cal = CalendarView(_page_stub())
+    start = datetime(2026, 11, 28, 7, 0)
+    end = datetime(2026, 11, 28, 9, 30)
+
+    makeup_session = ClassSession(
+        session_id="s-makeup",
+        subject="Cơ sở dữ liệu",
+        course_code="0101123456",
+        start_at=start,
+        end_at=end,
+        room="B202",
+        campus="CS1",
+        period_start=1,
+        period_end=3,
+        cancelled=False,
+        note="Lịch HỌC BÙ tuần 5",
+    )
+    cancelled_makeup = ClassSession(
+        session_id="s-cancel-makeup",
+        subject="Cơ sở dữ liệu",
+        course_code="0101123456",
+        start_at=start,
+        end_at=end,
+        room="B202",
+        campus="CS1",
+        period_start=1,
+        period_end=3,
+        cancelled=True,
+        note="Tạm ngưng buổi học bù",
+    )
+
+    def _walk_controls(root):
+        yield root
+        for attr in ("content", "controls"):
+            child = getattr(root, attr, None)
+            if isinstance(child, ft.BaseControl):
+                yield from _walk_controls(child)
+            elif isinstance(child, (list, tuple)):
+                for item in child:
+                    if isinstance(item, ft.BaseControl):
+                        yield from _walk_controls(item)
+
+    row_makeup = cal._make_compact_session_row(makeup_session)
+    texts_makeup = [
+        c for c in _walk_controls(row_makeup) if isinstance(c, ft.Text)
+    ]
+    makeup_label = next((t for t in texts_makeup if t.value == "Học bù"), None)
+    assert makeup_label is not None
+    assert makeup_label.color == C.MAKEUP_TEXT
+
+    row_cancelled = cal._make_compact_session_row(cancelled_makeup)
+    values_cancelled = [
+        c.value for c in _walk_controls(row_cancelled) if isinstance(c, ft.Text)
+    ]
+    assert "Tạm ngưng" in values_cancelled
+    assert "Học bù" not in values_cancelled
+
+
+def test_clicking_active_or_other_calendar_tabs_resets_date_filter_and_pager_to_today():
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        window=SimpleNamespace(width=1120, height=760),
+        update=lambda: None,
+        run_task=lambda *_a, **_k: None,
+    )
+    cal = CalendarView(page)
+    today = date.today()
+    today_monday = today - timedelta(days=today.weekday())
+    far_date = date(2027, 4, 15)
+
+    # 1. Same-tab click on "week" resets date, week_start, and _detail_filter_mode
+    cal._on_absolute_date_click(far_date)
+    cal._detail_filter_mode = "week_classes"
+    cal._toggle_view_mode("week")
+    assert cal._selected_date == today
+    assert cal._week_start == today_monday
+    assert (cal._year, cal._month, cal._selected_day) == (
+        today.year,
+        today.month,
+        today.day,
+    )
+    assert cal._detail_filter_mode == "day"
+
+    # 2. Same-tab click on "month" resets year/month/day and _detail_filter_mode
+    cal._toggle_view_mode("month")
+    cal._change_month(3)
+    cal._detail_filter_mode = "tasks"
+    cal._toggle_view_mode("month")
+    assert (cal._year, cal._month, cal._selected_day) == (
+        today.year,
+        today.month,
+        today.day,
+    )
+    assert cal._selected_date == today
+    assert cal._detail_filter_mode == "day"
+
+    # 3. Switching to "schedule" clears in-flight _period_transition_active, and
+    # clicking "schedule" again resets ScheduleWeekView._selected back to today
+    cal._period_transition_active = True
+    cal._toggle_view_mode("schedule")
+    assert cal._period_transition_active is False
+    assert cal._schedule_view._selected == today
+
+    cal._schedule_view._selected = far_date
+    cal._toggle_view_mode("schedule")
+    assert cal._schedule_view._selected == today
+
 
 
 if __name__ == "__main__":
