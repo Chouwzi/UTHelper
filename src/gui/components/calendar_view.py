@@ -2093,8 +2093,13 @@ class CalendarView(ft.Container):
 
     def _toggle_view_mode(self, mode: str):
         """Switch between month, week, and schedule view."""
-        if self._view_mode == mode:
-            return
+        today = date.today()
+        self._year = today.year
+        self._month = today.month
+        self._selected_day = today.day
+        self._selected_date = today
+        self._week_start = today - timedelta(days=today.weekday())
+
         previous_mode = self._view_mode
         self._view_mode = mode
         if mode == "schedule":
