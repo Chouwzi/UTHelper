@@ -25,9 +25,10 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from core.data_orchestrator import DataOrchestrator
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
+from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.moodle_service import MoodleService
 from core.moodle_sites import moodle_site_from_origin
-from core.portal_client import PortalClient
+from core.portal_client import PortalClient, PortalMaintenanceError
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
@@ -93,10 +94,17 @@ from gui.controllers.startup_visibility import (
     should_hide_startup_window,
 )
 from gui.controllers.autostart_settings import apply_initial_autostart_default
+from core.activity_status import (
+    COMPLETED_SUBMISSION_STATUSES,
+    extract_canonical_submission_status,
+)
 from gui.controllers.refresh_coordinator import (
+    apply_cached_thnn_completions,
+    apply_pre_dispatch_status_hydration,
     build_prefetched_dataset,
     build_refresh_dataset,
     card_detail_prefetch_candidates,
+    notification_status_hydration_candidates,
     status_hydration_candidates,
 )
 from gui.controllers.window_activator import WindowActivator
@@ -173,6 +181,123 @@ def _set_webview_occlusion(
         set_global_webview_occlusion(reason, bool(occluded))
     except Exception:
         logger.debug("WebView occlusion update failed", exc_info=True)
+
+
+def _clear_modal_and_filter_webview_occlusion() -> None:
+    """Release active modal_dialog and desktop_filter occlusions while preserving detail_view/quiz_player."""
+    _set_webview_occlusion("desktop_filter", False)
+    tokens: list[str] = []
+    remaining_count = 0
+    try:
+        import gui.components.courses.embedded_webview_host as _wv_host
+
+        lock = getattr(_wv_host, "_OCCLUSION_LOCK", None)
+        active_tokens = getattr(_wv_host, "_ACTIVE_OCCLUSION_TOKENS", None)
+        active_reasons = getattr(_wv_host, "_ACTIVE_OCCLUSION_REASONS", None)
+        if lock is not None:
+            with lock:
+                if isinstance(active_tokens, set):
+                    tokens = [
+                        tok
+                        for reason, tok in list(active_tokens)
+                        if reason == "modal_dialog" and tok
+                    ]
+                if isinstance(active_reasons, dict):
+                    remaining_count = int(active_reasons.get("modal_dialog", 0) or 0)
+    except Exception:
+        pass
+    for tok in tokens:
+        _call_modal_occlusion("modal_dialog", False, token=tok)
+    for _ in range(max(1, remaining_count)):
+        _call_modal_occlusion("modal_dialog", False)
+
+
+class _ControllerWindowActivator(WindowActivator):
+    """WindowActivator subclass notifying AppController once the window restores."""
+
+    def __init__(self, page: ft.Page, on_shown=None) -> None:
+        super().__init__(page)
+        self._on_shown = on_shown
+
+    async def show(self) -> None:
+        await super().show()
+        if callable(self._on_shown):
+            self._on_shown()
+
+
+class _LoginDialogClientProxy:
+    """Forwards `MoodleClient.login` and notifies `AppController` on UTH maintenance."""
+
+    def __init__(self, client, on_maintenance) -> None:
+        self._client = client
+        self._on_maintenance = on_maintenance
+
+    def login(self, *args, **kwargs):
+        ok = self._client.login(*args, **kwargs)
+        if not ok:
+            notice = getattr(self._client, "last_maintenance_notice", None)
+            if isinstance(notice, MaintenanceNotice) and callable(self._on_maintenance):
+                self._on_maintenance(notice)
+        return ok
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+
+class _LoginDialogOrchestratorProxy:
+    """Thin proxy around `DataOrchestrator` for `show_login_dialog` maintenance hooks."""
+
+    def __init__(self, orchestrator, on_maintenance) -> None:
+        self._orchestrator = orchestrator
+        client_obj = getattr(orchestrator, "client", None)
+        if client_obj is not None:
+            self.client = _LoginDialogClientProxy(client_obj, on_maintenance)
+
+    @property
+    def is_logged_in(self) -> bool:
+        return bool(getattr(self._orchestrator, "is_logged_in", False))
+
+    @is_logged_in.setter
+    def is_logged_in(self, value: bool) -> None:
+        self._orchestrator.is_logged_in = bool(value)
+
+    def __getattr__(self, name: str):
+        return getattr(self._orchestrator, name)
+
+
+class _MaintenanceAwareSubmissionWorkflow(SubmissionWorkflow):
+    """Surfaces active UTH maintenance immediately when a user triggers submission mutations."""
+
+    def __init__(self, *args, on_maintenance=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_maintenance = on_maintenance
+
+    def _notify_if_maintenance(self, exc: BaseException | None = None) -> None:
+        notice = getattr(exc, "notice", None) if exc is not None else None
+        if not isinstance(notice, MaintenanceNotice):
+            notice = getattr(self.client, "last_maintenance_notice", None)
+        if isinstance(notice, MaintenanceNotice) and callable(self._on_maintenance):
+            self._on_maintenance(notice)
+
+    def _mutate_files(self, *args, **kwargs):
+        try:
+            res = super()._mutate_files(*args, **kwargs)
+        except UthMaintenanceError as exc:
+            self._notify_if_maintenance(exc)
+            raise
+        if not getattr(res, "ok", True):
+            self._notify_if_maintenance()
+        return res
+
+    def finalize_submission(self, *args, **kwargs):
+        try:
+            res = super().finalize_submission(*args, **kwargs)
+        except UthMaintenanceError as exc:
+            self._notify_if_maintenance(exc)
+            raise
+        if not getattr(res, "ok", True):
+            self._notify_if_maintenance()
+        return res
 
 
 def _build_account_data_cache(username: str | None):
@@ -394,6 +519,11 @@ class AppController:
         self._portal_week_client = PortalClient(settings.PORTAL_WEB_API_BASE)
         self._portal_week_lock = threading.Lock()
         self._week_schedule_cache = WeekScheduleCache(namespace=schedule_namespace)
+        self._seen_maintenance_keys: set[str] = set()
+        self._active_maintenance_notice: MaintenanceNotice | None = None
+        self._maintenance_dialog: ft.AlertDialog | None = None
+        self._manual_sync_requested: bool = False
+        self._manual_today_schedule_requested: bool = False
         self._today_schedule_coordinator = TodayScheduleCoordinator(
             fetch_day=self._portal_client.fetch_day,
             cache=TodayScheduleCache(namespace=schedule_namespace),
@@ -402,6 +532,10 @@ class AppController:
                 settings.UTH_PASSWORD,
             ),
             state_sink=self._on_today_schedule_state,
+            on_maintenance=lambda notice: self._handle_uth_maintenance(
+                notice,
+                user_initiated=self._consume_manual_today_schedule_flag(),
+            ),
         )
         self._today_schedule_state = self._today_schedule_coordinator.cached_state()
         self._settings_identity = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
@@ -545,6 +679,325 @@ class AppController:
         except Exception:
             logger.debug("Diagnostic breadcrumb failed", exc_info=True)
 
+    def _sweep_closed_modal_dialogs(self) -> None:
+        """Release occlusion tokens for observed-open modal dialogs whose .open transitioned to False."""
+        observed = getattr(self, "_observed_open_dialogs", None)
+        if not isinstance(observed, list) or not observed:
+            return
+        tracked_tokens = getattr(self, "_tracked_modal_dialog_tokens", None)
+        remaining: list[tuple[str, object]] = []
+        for tok, dlg_obj in list(observed):
+            if bool(getattr(dlg_obj, "open", False)):
+                remaining.append((tok, dlg_obj))
+                continue
+            active_list = getattr(dlg_obj, "_uth_modal_active_tokens", None)
+            if isinstance(active_list, list) and tok in active_list:
+                active_list.remove(tok)
+                stale_list = getattr(dlg_obj, "_uth_modal_stale_dismiss_tokens", None)
+                if isinstance(stale_list, list):
+                    stale_list.append(tok)
+            if getattr(dlg_obj, "_uth_modal_occlusion_token", None) == tok:
+                next_tok = (
+                    active_list[-1]
+                    if isinstance(active_list, list) and active_list
+                    else None
+                )
+                try:
+                    dlg_obj._uth_modal_occlusion_token = next_tok
+                except Exception:
+                    pass
+            if isinstance(tracked_tokens, set):
+                tracked_tokens.discard(tok)
+            _call_modal_occlusion("modal_dialog", False, token=tok)
+        observed[:] = remaining
+
+    def _install_page_dialog_occlusion_bridge(self) -> None:
+        """Wrap page.show_dialog / page.pop_dialog / page.update so modal dialogs occlude native WebViews."""
+        page = getattr(self, "page", None)
+        if page is None or getattr(page, "_uth_dialog_occlusion_wrapped", False):
+            return
+        orig_show = getattr(page, "show_dialog", None)
+        orig_pop = getattr(page, "pop_dialog", None)
+        orig_page_update = getattr(page, "update", None)
+        if not callable(orig_show):
+            return
+        tracked_tokens = getattr(self, "_tracked_modal_dialog_tokens", None)
+        if not isinstance(tracked_tokens, set):
+            tracked_tokens = set()
+            self._tracked_modal_dialog_tokens = tracked_tokens
+        observed_open = getattr(self, "_observed_open_dialogs", None)
+        if not isinstance(observed_open, list):
+            observed_open = []
+            self._observed_open_dialogs = observed_open
+
+        def _remove_observed_token(dlg_obj, tok: str) -> None:
+            observed_open[:] = [
+                pair
+                for pair in observed_open
+                if not (pair[0] == tok and pair[1] is dlg_obj)
+            ]
+
+        def _sync_current_attr(dlg_obj, active_list: list[str] | None) -> None:
+            next_tok = active_list[-1] if active_list else None
+            try:
+                dlg_obj._uth_modal_occlusion_token = next_tok
+            except Exception:
+                pass
+
+        def _release_dialog_open(
+            dlg_obj,
+            *,
+            from_dismiss: bool,
+            record_stale_dismiss: bool = False,
+            fallback_tok: str | None = None,
+        ) -> None:
+            active_list = getattr(dlg_obj, "_uth_modal_active_tokens", None)
+            stale_list = getattr(dlg_obj, "_uth_modal_stale_dismiss_tokens", None)
+            if from_dismiss:
+                if (
+                    isinstance(stale_list, list)
+                    and stale_list
+                    and (bool(getattr(dlg_obj, "open", False)) or not active_list)
+                ):
+                    stale_tok = stale_list.pop(0)
+                    tracked_tokens.discard(stale_tok)
+                    _call_modal_occlusion("modal_dialog", False, token=stale_tok)
+                    return
+                if isinstance(stale_list, list) and stale_list:
+                    for st in list(stale_list):
+                        tracked_tokens.discard(st)
+                        _call_modal_occlusion("modal_dialog", False, token=st)
+                    stale_list.clear()
+                if isinstance(active_list, list) and active_list:
+                    tok = active_list.pop(0)
+                else:
+                    tok = (
+                        getattr(dlg_obj, "_uth_modal_occlusion_token", None)
+                        or fallback_tok
+                    )
+                if not tok:
+                    return
+                _remove_observed_token(dlg_obj, tok)
+                _sync_current_attr(
+                    dlg_obj, active_list if isinstance(active_list, list) else None
+                )
+                tracked_tokens.discard(tok)
+                _call_modal_occlusion("modal_dialog", False, token=tok)
+                return
+
+            if isinstance(active_list, list) and active_list:
+                tok = active_list.pop()
+            else:
+                tok = (
+                    getattr(dlg_obj, "_uth_modal_occlusion_token", None)
+                    or fallback_tok
+                )
+            if not tok:
+                return
+            _remove_observed_token(dlg_obj, tok)
+            if record_stale_dismiss and isinstance(stale_list, list):
+                stale_list.append(tok)
+            _sync_current_attr(
+                dlg_obj, active_list if isinstance(active_list, list) else None
+            )
+            tracked_tokens.discard(tok)
+            _call_modal_occlusion("modal_dialog", False, token=tok)
+
+        def _wrap_dialog_update_if_needed(dialog) -> None:
+            if getattr(dialog, "_uth_modal_update_wrapped", False):
+                return
+            orig_dlg_upd = getattr(dialog, "update", None)
+            if not callable(orig_dlg_upd):
+                return
+            if hasattr(orig_dlg_upd, "assert_called") and hasattr(
+                orig_dlg_upd, "side_effect"
+            ):
+                if orig_dlg_upd.side_effect is None:
+                    ret_val = orig_dlg_upd.return_value
+                    orig_dlg_upd.side_effect = lambda *a, _d=dialog, **kw: (
+                        self._sweep_closed_modal_dialogs()
+                        if not bool(getattr(_d, "open", False))
+                        else None,
+                        ret_val,
+                    )[1]
+                try:
+                    dialog._uth_modal_update_wrapped = True
+                except Exception:
+                    pass
+                return
+
+            def _wrapped_dlg_update(*u_args, _d=dialog, _orig=orig_dlg_upd, **u_kwargs):
+                try:
+                    return _orig(*u_args, **u_kwargs)
+                finally:
+                    if not bool(getattr(_d, "open", False)):
+                        self._sweep_closed_modal_dialogs()
+
+            try:
+                dialog.update = _wrapped_dlg_update
+                dialog._uth_modal_update_wrapped = True
+            except Exception:
+                pass
+
+        def _wrapped_show_dialog(dialog):
+            if dialog is None or isinstance(dialog, ft.SnackBar):
+                return orig_show(dialog)
+            pre_acquired = bool(
+                getattr(dialog, "_uth_modal_occlusion_pre_acquired", False)
+            )
+            if pre_acquired:
+                try:
+                    dialog._uth_modal_occlusion_pre_acquired = False
+                except Exception:
+                    pass
+                tok = (
+                    getattr(dialog, "_uth_modal_occlusion_token", None)
+                    or _new_modal_occlusion_token()
+                )
+            else:
+                tok = _new_modal_occlusion_token()
+            active_list = getattr(dialog, "_uth_modal_active_tokens", None)
+            if not isinstance(active_list, list):
+                active_list = []
+                try:
+                    dialog._uth_modal_active_tokens = active_list
+                except Exception:
+                    pass
+            stale_list = getattr(dialog, "_uth_modal_stale_dismiss_tokens", None)
+            if not isinstance(stale_list, list):
+                stale_list = []
+                try:
+                    dialog._uth_modal_stale_dismiss_tokens = stale_list
+                except Exception:
+                    pass
+            active_list.append(tok)
+            try:
+                dialog._uth_modal_occlusion_token = tok
+            except Exception:
+                pass
+            tracked_tokens.add(tok)
+            _wrap_dialog_update_if_needed(dialog)
+            if not getattr(dialog, "_uth_modal_dismiss_wrapped", False):
+                prev_dismiss = getattr(dialog, "on_dismiss", None)
+                if inspect.iscoroutinefunction(prev_dismiss):
+
+                    async def _on_dismiss_async(
+                        event=None, _d=dialog, _t=tok, _p=prev_dismiss
+                    ):
+                        try:
+                            await _p(event)
+                        finally:
+                            _release_dialog_open(
+                                _d, from_dismiss=True, fallback_tok=_t
+                            )
+
+                    on_dismiss_wrapper = _on_dismiss_async
+                else:
+
+                    def _on_dismiss_sync(
+                        event=None, _d=dialog, _t=tok, _p=prev_dismiss
+                    ):
+                        res = None
+                        try:
+                            if callable(_p):
+                                res = _p(event)
+                                if inspect.isawaitable(res):
+
+                                    async def _await_and_release(awaitable):
+                                        try:
+                                            return await awaitable
+                                        finally:
+                                            _release_dialog_open(
+                                                _d,
+                                                from_dismiss=True,
+                                                fallback_tok=_t,
+                                            )
+
+                                    return _await_and_release(res)
+                            return res
+                        finally:
+                            if not inspect.isawaitable(res):
+                                _release_dialog_open(
+                                    _d, from_dismiss=True, fallback_tok=_t
+                                )
+
+                    on_dismiss_wrapper = _on_dismiss_sync
+                try:
+                    dialog.on_dismiss = on_dismiss_wrapper
+                    dialog._uth_modal_dismiss_wrapped = True
+                except Exception:
+                    pass
+            if not pre_acquired:
+                _call_modal_occlusion("modal_dialog", True, token=tok)
+            try:
+                result = orig_show(dialog)
+            except Exception:
+                _release_dialog_open(
+                    dialog,
+                    from_dismiss=False,
+                    record_stale_dismiss=False,
+                    fallback_tok=tok,
+                )
+                raise
+            if bool(getattr(dialog, "open", False)):
+                observed_open.append((tok, dialog))
+            return result
+
+        def _wrapped_pop_dialog():
+            top_open = None
+            dialogs_ctrl = getattr(page, "_dialogs", None)
+            controls = getattr(dialogs_ctrl, "controls", None)
+            if controls:
+                top_open = next(
+                    (d for d in reversed(controls) if getattr(d, "open", False)),
+                    None,
+                )
+            popped = orig_pop() if callable(orig_pop) else None
+            target_dlg = popped if popped is not None else top_open
+            if target_dlg is not None and not isinstance(target_dlg, ft.SnackBar):
+                _release_dialog_open(
+                    target_dlg,
+                    from_dismiss=False,
+                    record_stale_dismiss=True,
+                )
+            return popped
+
+        try:
+            page.show_dialog = _wrapped_show_dialog
+            if callable(orig_pop):
+                page.pop_dialog = _wrapped_pop_dialog
+            if callable(orig_page_update):
+                if hasattr(orig_page_update, "assert_called") and hasattr(
+                    orig_page_update, "side_effect"
+                ):
+                    if orig_page_update.side_effect is None:
+                        upd_ret = orig_page_update.return_value
+                        orig_page_update.side_effect = lambda *a, **kw: (
+                            self._sweep_closed_modal_dialogs(),
+                            upd_ret,
+                        )[1]
+                else:
+
+                    def _wrapped_page_update(*u_args, **u_kwargs):
+                        self._sweep_closed_modal_dialogs()
+                        return orig_page_update(*u_args, **u_kwargs)
+
+                    page.update = _wrapped_page_update
+            page._uth_dialog_occlusion_wrapped = True
+        except Exception:
+            logger.debug("Page dialog occlusion bridge skipped", exc_info=True)
+
+    def _release_tracked_modal_dialog_tokens(self) -> None:
+        observed = getattr(self, "_observed_open_dialogs", None)
+        if isinstance(observed, list):
+            observed.clear()
+        tracked = getattr(self, "_tracked_modal_dialog_tokens", None)
+        if not isinstance(tracked, set) or not tracked:
+            return
+        for tok in list(tracked):
+            _call_modal_occlusion("modal_dialog", False, token=tok)
+        tracked.clear()
+
     def _attach_modal_occlusion_release(
         self, *, occlusion_token: str | None = None
     ) -> bool:
@@ -614,7 +1067,18 @@ class AppController:
             await self._complete_login_success()
 
         try:
-            await show_login_dialog(self.page, self.orchestrator, _on_login_success)
+            orch = getattr(self, "orchestrator", None)
+            login_orch = (
+                _LoginDialogOrchestratorProxy(
+                    orch,
+                    lambda notice: self._notify_maintenance_from_worker(
+                        notice, user_initiated=True
+                    ),
+                )
+                if getattr(orch, "client", None) is not None
+                else orch
+            )
+            await show_login_dialog(self.page, login_orch, _on_login_success)
         except Exception:
             _call_modal_occlusion("modal_dialog", False, token=modal_token)
             raise
@@ -623,6 +1087,10 @@ class AppController:
 
     async def _show_quiz_auth_dialog(self, retry_callback):
         """Reuse the app credential dialog, then retry Moodle session setup."""
+        active_maint = self._resolve_active_maintenance_notice("uth")
+        if active_maint is not None:
+            self._handle_uth_maintenance(active_maint, user_initiated=True)
+            return
         from gui.components.login_dialog import show_login_dialog
 
         self._invalidate_active_webviews_before_credential_mutation()
@@ -642,9 +1110,20 @@ class AppController:
                     await result
 
         try:
+            orch = getattr(self, "orchestrator", None)
+            login_orch = (
+                _LoginDialogOrchestratorProxy(
+                    orch,
+                    lambda notice: self._notify_maintenance_from_worker(
+                        notice, user_initiated=True
+                    ),
+                )
+                if getattr(orch, "client", None) is not None
+                else orch
+            )
             await show_login_dialog(
                 self.page,
-                self.orchestrator,
+                login_orch,
                 _on_login_success,
                 allow_cancel=True,
             )
@@ -873,6 +1352,11 @@ class AppController:
 
         # 5. Clear Moodle caches, sessions, grade monitors, notification state & WebViews.
         if reset_moodle_and_caches:
+            self._clear_uth_maintenance_banner(update_page=False)
+            if mark_logged_out and isinstance(
+                getattr(self, "_seen_maintenance_keys", None), set
+            ):
+                self._seen_maintenance_keys.clear()
             orchestrator = getattr(self, "orchestrator", None)
             if orchestrator is not None:
                 try:
@@ -1314,7 +1798,27 @@ class AppController:
 
     async def _apply_initial_windows_autostart_default(self) -> None:
         """Register the new-install Windows default exactly once."""
-        from platform_utils.autostart import create_autostart_service
+        from dataclasses import replace as _dc_replace
+        from pathlib import PureWindowsPath
+        from platform_utils.autostart import (
+            create_autostart_service,
+            get_current_process_executable,
+            has_package_identity,
+        )
+
+        if os.environ.get("UTH_TEST_MODE") == "1":
+            return
+        try:
+            if not has_package_identity():
+                exe = get_current_process_executable()
+                if PureWindowsPath(str(exe)).stem.casefold() in {"python", "pythonw"}:
+                    return
+        except Exception:
+            logger.debug(
+                "Skipping initial Windows autostart probe; executable unavailable",
+                exc_info=True,
+            )
+            return
 
         try:
             result = await apply_initial_autostart_default(
@@ -1327,6 +1831,17 @@ class AppController:
             return
         if result is not None and not result.success:
             logger.warning("Windows did not accept the autostart default: %s", result.message)
+        elif result is not None and result.confirmed:
+            sv = getattr(self, "settings_view", None)
+            baseline = getattr(sv, "_baseline_snapshot", None)
+            if sv is not None and baseline is not None:
+                try:
+                    sv._baseline_snapshot = _dc_replace(
+                        baseline, start_with_windows=result.enabled
+                    )
+                    sv._apply_autostart_ui(result)
+                except Exception:
+                    logger.debug("Settings autostart UI sync skipped", exc_info=True)
 
     def _safe_run_task(self, handler, *args, **kwargs):
         if not hasattr(self.page, "session") or self.page.session is None:
@@ -1594,10 +2109,13 @@ class AppController:
             or not callable(call_ws_api)
         ):
             return None
-        return SubmissionWorkflow(
+        return _MaintenanceAwareSubmissionWorkflow(
             client,
             MoodleService(call_ws_api),
             site_origin=site,
+            on_maintenance=lambda notice: self._notify_maintenance_from_worker(
+                notice, user_initiated=True
+            ),
         )
 
     def _native_background_credentials(self) -> tuple[str, str]:
@@ -1624,7 +2142,10 @@ class AppController:
         return "", ""
 
     def _init_window(self):
-        self.window_activator = WindowActivator(self.page)
+        self.window_activator = _ControllerWindowActivator(
+            self.page, on_shown=getattr(self, "_on_window_restored", None)
+        )
+        self._install_page_dialog_occlusion_bridge()
         # Resolve the presentation profile without mutating native capabilities.
         detect_platform(self.page)
         # Read the immutable runtime capabilities after resolving the UI profile.
@@ -1676,6 +2197,11 @@ class AppController:
                 self.page, on_show=self.window_activator.request_show
             )
             tray_ready = self.tray.setup()
+            if not tray_ready and is_autostart_launch():
+                for _ in range(2):
+                    tray_ready = self.tray.setup()
+                    if tray_ready:
+                        break
             self.notifier = notification_manager_cls(self.tray)
         else:
             self.tray = None
@@ -1721,33 +2247,127 @@ class AppController:
         if self.force_visible and not _is_mobile:
             self.window_activator.request_show()
 
+    def _is_tray_available(self) -> bool:
+        tray = getattr(self, "tray", None)
+        if tray is None:
+            return False
+        ready = getattr(tray, "is_ready", None)
+        if isinstance(ready, bool):
+            return ready
+        return bool(
+            getattr(tray, "_icon", None) is not None
+            or callable(getattr(tray, "notify", None))
+        )
+
+    def _suspend_app_webview_for_window_hide(self) -> None:
+        pane = getattr(self, "_app_webview_pane", None)
+        host = getattr(self, "_app_webview_host", None)
+        if pane is None or host is None or not getattr(host, "visible", False):
+            return
+        self._app_webview_suspended_for_window = True
+        suspend_fn = getattr(pane, "suspend", None)
+        if callable(suspend_fn):
+            try:
+                suspend_fn()
+            except Exception:
+                logger.debug("App WebView suspend skipped", exc_info=True)
+
+    def _on_window_restored(self) -> None:
+        if self._is_window_hidden_or_minimized():
+            return
+        pane = getattr(self, "_app_webview_pane", None)
+        host = getattr(self, "_app_webview_host", None)
+        if pane is None or host is None or not getattr(host, "visible", False):
+            self._app_webview_suspended_for_window = False
+            return
+        if getattr(self, "_app_webview_suspended_for_window", False):
+            self._app_webview_suspended_for_window = False
+            resume_fn = getattr(pane, "resume", None)
+            if callable(resume_fn):
+                try:
+                    resume_fn()
+                except Exception:
+                    logger.debug("App WebView resume skipped", exc_info=True)
+        self._sync_app_webview_bounds()
+
+    async def _handle_window_close_request(self) -> None:
+        """Hide to system tray when enabled and ready; otherwise exit safely."""
+        if settings.MINIMIZE_TO_TRAY and self._is_tray_available():
+            dismiss_filter = getattr(self, "_dismiss_desktop_filter_menu", None)
+            if callable(dismiss_filter):
+                try:
+                    dismiss_filter()
+                except Exception:
+                    pass
+            self._suspend_app_webview_for_window_hide()
+            self.page.window.visible = False
+            self.page.update()
+            # H-01: Show tray balloon the first time so user knows app is still running
+            if not getattr(self, "_tray_balloon_shown", False):
+                self._tray_balloon_shown = True
+                try:
+                    from gui.tray import TrayApp
+
+                    notify_fn = getattr(self.tray, "notify", None)
+                    icon_obj = getattr(self.tray, "_icon", None)
+                    if isinstance(self.tray, TrayApp) or (
+                        icon_obj is None and callable(notify_fn)
+                    ):
+                        notify_fn(
+                            "UTHelper",
+                            "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
+                        )
+                    elif icon_obj is not None:
+                        icon_obj.notify(
+                            "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
+                            "UTHelper",
+                        )
+                except Exception:
+                    logger.debug("Ignored exception", exc_info=True)
+            return
+        await self._request_window_exit()
+
     async def _on_window_event(self, e):
         # Desktop-only: Flet bản mới thì sự kiện đóng cửa sổ nằm ở e.type hoặc e.data
         if platform_utils.IS_MOBILE:
             return
-        if getattr(e, "type", getattr(e, "data", "")) == ft.WindowEventType.CLOSE or e.data == "close":
-            if settings.MINIMIZE_TO_TRAY:
-                self.page.window.visible = False
-                self.page.update()
-                # H-01: Show tray balloon the first time so user knows app is still running
-                if not self._tray_balloon_shown:
-                    self._tray_balloon_shown = True
-                    try:
-                        if self.tray:
-                            self.tray._icon.notify(
-                                "UTHelper đang chạy ở khay hệ thống.\nNhấp đúp để mở lại.",
-                                "UTHelper",
-                            )
-                    except Exception:
-                        import logging as _fb_log
-                        _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            else:
-                await self._request_window_exit()
-
-    def _toggle_maximize_window(self, _event=None) -> None:
-        """Phóng to / khôi phục cửa sổ từ thanh tiêu đề tuỳ chỉnh."""
-        self.page.window.maximized = not self.page.window.maximized
-        self.page.update()
+        ev_type = getattr(e, "type", None)
+        ev_data = str(getattr(e, "data", "") or "").lower()
+        if ev_type == ft.WindowEventType.CLOSE or ev_data == "close":
+            await self._handle_window_close_request()
+            return
+        win_ev_cls = getattr(ft, "WindowEventType", None)
+        hide_types = {
+            t
+            for t in (
+                getattr(win_ev_cls, "MINIMIZE", None),
+                getattr(win_ev_cls, "HIDE", None),
+            )
+            if t is not None
+        }
+        restore_types = {
+            t
+            for t in (
+                getattr(win_ev_cls, "RESTORE", None),
+                getattr(win_ev_cls, "SHOW", None),
+                getattr(win_ev_cls, "FOCUS", None),
+                getattr(win_ev_cls, "RESIZE", None),
+                getattr(win_ev_cls, "MAXIMIZE", None),
+                getattr(win_ev_cls, "UNMAXIMIZE", None),
+            )
+            if t is not None
+        }
+        if ev_type in hide_types or ev_data in {"minimize", "hide"}:
+            self._suspend_app_webview_for_window_hide()
+        elif ev_type in restore_types or ev_data in {
+            "restore",
+            "show",
+            "focus",
+            "resize",
+            "maximize",
+            "unmaximize",
+        }:
+            self._on_window_restored()
 
     # ------------------------------------------------------------------
     # Responsive desktop layout
@@ -1794,6 +2414,8 @@ class AppController:
     async def _rail_navigate(self, target: str) -> None:
         """Chuyển mục từ thanh điều hướng: đóng view đang mở rồi mở view đích."""
         self._dismiss_desktop_filter_menu()
+        close_wv = getattr(self, "_close_app_webview", None)
+        closed_wv = bool(close_wv(update_page=False)) if callable(close_wv) else False
         if getattr(getattr(self, "detail_view", None), "visible", False):
             await self._close_detail()
         if getattr(getattr(self, "course_grades_view", None), "visible", False):
@@ -1802,10 +2424,26 @@ class AppController:
         if target == current:
             # Bấm lại đúng mục đang mở: giữ nguyên, không quay về Tổng quan.
             self._sync_rail_active()
+            if closed_wv:
+                page = getattr(self, "page", None)
+                upd = getattr(page, "update", None)
+                if callable(upd):
+                    try:
+                        upd()
+                    except Exception:
+                        pass
             return
         if current == "settings":
             if self.settings_view.has_changes():
                 self._sync_rail_active()
+                if closed_wv:
+                    page = getattr(self, "page", None)
+                    upd = getattr(page, "update", None)
+                    if callable(upd):
+                        try:
+                            upd()
+                        except Exception:
+                            pass
                 request_close = getattr(self.settings_view, "request_close", None)
                 if callable(request_close):
                     await request_close(
@@ -1839,10 +2477,12 @@ class AppController:
         if window is None:
             return
         window.maximized = not bool(getattr(window, "maximized", False))
+        self._sync_app_webview_bounds()
         self.page.update()
 
     def _minimize_window(self, _event=None) -> None:
         """Minimize from the custom desktop header without hiding to tray."""
+        self._suspend_app_webview_for_window_hide()
         self.page.window.minimized = True
         self.page.update()
 
@@ -1874,23 +2514,29 @@ class AppController:
         await self._destroy_window()
 
     async def _exit_from_window_header(self, _event=None) -> None:
-        """The custom close button follows the same safe exit path."""
-        await self._request_window_exit()
+        """The custom close button respects minimize-to-tray just like OS close."""
+        await self._handle_window_close_request()
 
     async def _on_keyboard_event(self, e):
         """Handle Escape back navigation and Ctrl+K / search focus shortcuts."""
         key = str(getattr(e, "key", "") or "")
         courses_view = getattr(self, "courses_view", None)
         detail_open = bool(getattr(getattr(self, "detail_view", None), "visible", False))
+        app_wv_open = bool(
+            getattr(getattr(self, "_app_webview_host", None), "visible", False)
+            or getattr(self, "_app_webview_pane", None) is not None
+        )
         if (
             courses_view is not None
             and getattr(courses_view, "visible", False)
             and not detail_open
+            and not app_wv_open
         ):
             overlays = getattr(courses_view, "_overlays", None)
             if overlays:
                 key_handler = getattr(overlays[-1], "handle_key_event", None)
                 if callable(key_handler) and key_handler(e):
+                    self._sweep_closed_modal_dialogs()
                     return
         if key == "Escape":
             await self._navigate_back()
@@ -1899,6 +2545,7 @@ class AppController:
             courses_view is not None
             and getattr(courses_view, "visible", False)
             and not detail_open
+            and not app_wv_open
         ):
             ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
             if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not getattr(e, "alt", False)):
@@ -1952,13 +2599,19 @@ class AppController:
             return True
         app_wv_host = getattr(self, "_app_webview_host", None)
         app_wv_pane = getattr(self, "_app_webview_pane", None)
-        if app_wv_host is not None and getattr(app_wv_host, "visible", False):
+        if (
+            app_wv_host is not None and getattr(app_wv_host, "visible", False)
+        ) or app_wv_pane is not None:
             if app_wv_pane is not None and app_wv_pane.handle_back():
                 return True
             self._close_app_webview()
             return True
+        if getattr(self, "_active_desktop_filter_menu", None) is not None:
+            self._dismiss_desktop_filter_menu()
+            return True
         schedule_component = getattr(self, "_today_schedule_component", None)
         if schedule_component is not None and schedule_component.handle_back():
+            self._sweep_closed_modal_dialogs()
             return True
         courses_view = getattr(self, "courses_view", None)
         detail_over_courses = (
@@ -1974,6 +2627,7 @@ class AppController:
             and callable(courses_handle_back)
             and courses_handle_back()
         ):
+            self._sweep_closed_modal_dialogs()
             return True
         handled = False
         course_grades_view = getattr(self, "course_grades_view", None)
@@ -1992,12 +2646,14 @@ class AppController:
         elif self.grade_overview_view.visible:
             grade_handle_back = getattr(self.grade_overview_view, "handle_back", None)
             if callable(grade_handle_back) and grade_handle_back():
+                self._sweep_closed_modal_dialogs()
                 return True
             await self._close_grades()
             handled = True
         elif courses_view is not None and getattr(courses_view, "visible", False):
             await self._close_courses()
             handled = True
+        self._sweep_closed_modal_dialogs()
         self._sync_rail_active()
         return handled
 
@@ -2162,7 +2818,376 @@ class AppController:
         self._dismiss_desktop_filter_menu()
         self._safe_run_task(handler)
 
+    def _init_maintenance_banner(self) -> None:
+        if not isinstance(getattr(self, "_seen_maintenance_keys", None), set):
+            self._seen_maintenance_keys = set()
+        if not hasattr(self, "_active_maintenance_notice"):
+            self._active_maintenance_notice = None
+        if not hasattr(self, "_maintenance_dialog"):
+            self._maintenance_dialog = None
+        self._maintenance_icon = ft.Icon(
+            ft.Icons.BUILD_CIRCLE_OUTLINED,
+            size=18,
+            color=C.WARNING,
+        )
+        self._maintenance_text = ft.Text(
+            "Hệ thống UTH đang bảo trì · Đang xem dữ liệu đã lưu",
+            size=12,
+            color=C.TEXT_PRIMARY,
+            weight=ft.FontWeight.W_500,
+            expand=True,
+        )
+        self._maintenance_detail_btn = ft.TextButton(
+            "Chi tiết",
+            style=ft.ButtonStyle(
+                color=C.TEXT_PRIMARY,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=self._on_maintenance_detail_click,
+        )
+        self._maintenance_retry_btn = ft.TextButton(
+            "Thử lại",
+            style=ft.ButtonStyle(
+                color=C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=self._on_maintenance_retry_click,
+        )
+        self._maintenance_banner = ft.Container(
+            content=ft.Row(
+                [
+                    self._maintenance_icon,
+                    self._maintenance_text,
+                    self._maintenance_detail_btn,
+                    self._maintenance_retry_btn,
+                ],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.10, C.WARNING),
+            border=ft.Border.all(1, C.WARNING),
+            border_radius=10,
+            padding=ft.Padding(left=12, right=8, top=8, bottom=8),
+            margin=ft.Margin(left=14, right=14, top=0, bottom=8),
+            visible=False,
+        )
+
+    def _consume_manual_today_schedule_flag(self) -> bool:
+        flagged = bool(getattr(self, "_manual_today_schedule_requested", False))
+        self._manual_today_schedule_requested = False
+        return flagged
+
+    def _on_maintenance_detail_click(self, _event=None) -> None:
+        notice = self._resolve_active_maintenance_notice()
+        if notice is not None:
+            self._show_maintenance_dialog(notice, force=True)
+
+    def _on_maintenance_retry_click(self, _event=None) -> None:
+        today_coord = getattr(self, "_today_schedule_coordinator", None)
+        if today_coord is not None and getattr(
+            getattr(today_coord, "state", None), "error_code", ""
+        ) == "maintenance":
+            self._safe_run_task(today_coord.refresh, "retry")
+        self._safe_run_task(self._load_data_async, "manual")
+
+    def _resolve_active_maintenance_notice(
+        self, site_kind: str = "uth"
+    ) -> MaintenanceNotice | None:
+        orch = getattr(self, "orchestrator", None)
+        kind = str(site_kind or "uth").strip().lower()
+        candidates = []
+        if kind == "courses":
+            candidates.append(getattr(orch, "client", None))
+        elif kind == "thnn":
+            candidates.append(getattr(orch, "thnn_client", None))
+        elif kind == "portal":
+            candidates.extend(
+                (
+                    getattr(self, "_portal_client", None),
+                    getattr(self, "_portal_week_client", None),
+                    getattr(self, "_academic_grade_service", None),
+                )
+            )
+        else:
+            candidates.extend(
+                (
+                    getattr(orch, "client", None),
+                    getattr(orch, "thnn_client", None),
+                    getattr(self, "_portal_client", None),
+                    getattr(self, "_portal_week_client", None),
+                    getattr(self, "_academic_grade_service", None),
+                )
+            )
+        for obj in candidates:
+            notice = getattr(obj, "last_maintenance_notice", None)
+            if isinstance(notice, MaintenanceNotice):
+                return notice
+        active = getattr(self, "_active_maintenance_notice", None)
+        return active if isinstance(active, MaintenanceNotice) else None
+
+    def _notify_maintenance_from_worker(
+        self, notice: MaintenanceNotice, *, user_initiated: bool = False
+    ) -> None:
+        async def _deliver() -> None:
+            self._handle_uth_maintenance(notice, user_initiated=user_initiated)
+
+        safe_run = getattr(self, "_safe_run_task", None)
+        if callable(safe_run):
+            scheduled = safe_run(_deliver)
+            if scheduled is not None:
+                return
+        self._handle_uth_maintenance(notice, user_initiated=user_initiated)
+
+    def _handle_uth_maintenance(
+        self,
+        notice: MaintenanceNotice | None,
+        user_initiated: bool = False,
+        *,
+        force: bool | None = None,
+    ) -> None:
+        if notice is None:
+            return
+        effective_force = bool(user_initiated or force)
+        self._active_maintenance_notice = notice
+        banner = getattr(self, "_maintenance_banner", None)
+        text_ctrl = getattr(self, "_maintenance_text", None)
+        if text_ctrl is not None:
+            fmt = getattr(notice, "format_banner_text", None)
+            text_ctrl.value = (
+                fmt()
+                if callable(fmt)
+                else "Hệ thống UTH đang bảo trì · Đang xem dữ liệu đã lưu"
+            )
+        if banner is not None:
+            banner.visible = True
+        self._show_maintenance_dialog(notice, force=effective_force)
+        page = getattr(self, "page", None)
+        upd = getattr(page, "update", None)
+        if callable(upd):
+            try:
+                upd()
+            except Exception:
+                logger.debug("Maintenance banner page update skipped", exc_info=True)
+
+    def _clear_uth_maintenance_banner(self, *, update_page: bool = True) -> None:
+        self._active_maintenance_notice = None
+        orch = getattr(self, "orchestrator", None)
+        for client_obj in (
+            getattr(orch, "client", None),
+            getattr(orch, "thnn_client", None),
+            getattr(self, "_portal_client", None),
+            getattr(self, "_portal_week_client", None),
+            getattr(self, "_academic_grade_service", None),
+        ):
+            if (
+                client_obj is not None
+                and getattr(client_obj, "last_maintenance_notice", None) is not None
+            ):
+                try:
+                    client_obj.last_maintenance_notice = None
+                except Exception:
+                    pass
+        banner = getattr(self, "_maintenance_banner", None)
+        was_visible = bool(banner is not None and getattr(banner, "visible", False))
+        if banner is not None:
+            banner.visible = False
+        if was_visible and update_page:
+            page = getattr(self, "page", None)
+            upd = getattr(page, "update", None)
+            if callable(upd):
+                try:
+                    upd()
+                except Exception:
+                    pass
+
+    def _show_maintenance_dialog(
+        self, notice: MaintenanceNotice, *, force: bool = False
+    ) -> None:
+        page = getattr(self, "page", None)
+        if page is None:
+            return
+        seen = getattr(self, "_seen_maintenance_keys", None)
+        if not isinstance(seen, set):
+            seen = set()
+            self._seen_maintenance_keys = seen
+        dedupe_key = str(getattr(notice, "dedupe_key", "") or "uth-maintenance")
+        if not force and dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+
+        existing = getattr(self, "_maintenance_dialog", None)
+        if existing is not None and bool(getattr(existing, "open", False)):
+            return
+
+        install_bridge = getattr(self, "_install_page_dialog_occlusion_bridge", None)
+        if callable(install_bridge):
+            install_bridge()
+
+        window_text = str(getattr(notice, "window_text", "") or "").strip()
+        reopen_text = str(getattr(notice, "reopen_text", "") or "").strip()
+
+        info_rows: list[ft.Control] = []
+        if window_text:
+            info_rows.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.SCHEDULE_ROUNDED, size=16, color=C.WARNING),
+                        ft.Text(
+                            f"Thời gian tạm ngưng: {window_text}",
+                            size=13,
+                            color=C.TEXT_PRIMARY,
+                            weight=ft.FontWeight.W_600,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        if reopen_text:
+            info_rows.append(
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.RESTORE_ROUNDED, size=16, color=C.ACCENT),
+                        ft.Text(
+                            f"Dự kiến mở lại: {reopen_text}",
+                            size=13,
+                            color=C.TEXT_PRIMARY,
+                            weight=ft.FontWeight.W_600,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+
+        reassurance_box = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.VERIFIED_USER_OUTLINED, size=16, color=C.SAFE),
+                    ft.Text(
+                        "Tài khoản và phiên đăng nhập của bạn hoàn toàn an toàn. "
+                        "Bạn vẫn có thể xem bình thường toàn bộ bài tập, lịch học, "
+                        "bảng điểm và tài liệu đã lưu trên máy.",
+                        size=12,
+                        color=C.TEXT_SECONDARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.08, C.SAFE),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.25, C.SAFE)),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+        )
+
+        body_controls: list[ft.Control] = [
+            ft.Text(
+                "Hệ thống máy chủ UTH hiện đang tạm ngưng hoạt động để bảo trì định kỳ.",
+                size=13,
+                color=C.TEXT_SECONDARY,
+            ),
+            *info_rows,
+            reassurance_box,
+        ]
+
+        def _close_dialog(_event=None) -> None:
+            pop_fn = getattr(page, "pop_dialog", None)
+            if callable(pop_fn):
+                try:
+                    pop_fn()
+                except Exception:
+                    dialog.open = False
+            else:
+                dialog.open = False
+            upd = getattr(page, "update", None)
+            if callable(upd):
+                try:
+                    upd()
+                except Exception:
+                    pass
+
+        def _retry_from_dialog(event=None) -> None:
+            _close_dialog(event)
+            self._on_maintenance_retry_click(event)
+
+        page_w = getattr(page, "width", None)
+        dlg_width = (
+            min(400, int(page_w) - 32)
+            if isinstance(page_w, (int, float)) and page_w > 240
+            else 400
+        )
+
+        dialog = ft.AlertDialog(
+            modal=False,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            bgcolor=C.BG,
+            title=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.BUILD_CIRCLE_OUTLINED, size=22, color=C.WARNING
+                    ),
+                    ft.Text(
+                        "Hệ thống UTH đang bảo trì",
+                        size=17,
+                        weight=ft.FontWeight.W_700,
+                        color=C.TEXT_PRIMARY,
+                        expand=True,
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            content=ft.Container(
+                width=dlg_width,
+                content=ft.Column(body_controls, tight=True, spacing=10),
+            ),
+            actions=[
+                ft.TextButton(
+                    "Thử kiểm tra lại",
+                    on_click=_retry_from_dialog,
+                    style=ft.ButtonStyle(
+                        color=C.TEXT_SECONDARY,
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+                ft.TextButton(
+                    "Đã hiểu",
+                    on_click=_close_dialog,
+                    style=ft.ButtonStyle(
+                        color=C.ACCENT,
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self._maintenance_dialog = dialog
+        show_fn = getattr(page, "show_dialog", None)
+        if callable(show_fn):
+            show_fn(dialog)
+        else:
+            overlay = getattr(page, "overlay", None)
+            if isinstance(overlay, list):
+                overlay.append(dialog)
+                dialog.open = True
+            else:
+                page.dialog = dialog
+                dialog.open = True
+        upd = getattr(page, "update", None)
+        if callable(upd):
+            try:
+                upd()
+            except Exception:
+                pass
+
     def _init_banner_and_states(self):
+        self._init_maintenance_banner()
         self._update_text = ft.Text(
             "Có phiên bản mới!",
             size=12,
@@ -2362,6 +3387,7 @@ class AppController:
         self._dashboard_main = ft.Column(
             controls=[
                 header,
+                self._maintenance_banner,
                 self._update_banner,
                 self._filter_container,
                 self._content_area,
@@ -2401,6 +3427,27 @@ class AppController:
             client_provider=self._quiz_client_for_site,
             on_auth_required=self._show_quiz_auth_dialog,
         )
+        orig_open_quiz_activity = getattr(self.quiz_player_view, "open_activity", None)
+        if callable(orig_open_quiz_activity):
+
+            def _guarded_open_quiz_activity(activity, *q_args, **q_kwargs):
+                quiz_url = (
+                    str(activity.get("url") or "")
+                    if isinstance(activity, dict)
+                    else ""
+                )
+                site_kind = _classify_uth_url(quiz_url) if quiz_url else "courses"
+                if site_kind not in {"courses", "thnn"}:
+                    site_kind = "courses"
+                active_maint = self._resolve_active_maintenance_notice(site_kind)
+                if active_maint is not None:
+                    self._handle_uth_maintenance(
+                        active_maint, user_initiated=True
+                    )
+                    return None
+                return orig_open_quiz_activity(activity, *q_args, **q_kwargs)
+
+            self.quiz_player_view.open_activity = _guarded_open_quiz_activity
         self._app_webview_pane = None
         self._app_webview_host = ft.Container(
             expand=True,
@@ -2432,6 +3479,12 @@ class AppController:
             on_open_url=self._open_url_in_app,
             on_open_external=self._open_url_external,
         )
+        schedule_view = getattr(self.calendar_view, "_schedule_view", None)
+        if schedule_view is not None:
+            try:
+                schedule_view.on_maintenance = self._handle_uth_maintenance
+            except Exception:
+                logger.debug("ScheduleWeekView maintenance hook skipped", exc_info=True)
         supports_self_update = self._get_distribution_profile().supports_github_self_update
         self.settings_view = SettingsView(
             self.page,
@@ -2501,7 +3554,11 @@ class AppController:
             u_pass = settings.UTH_PASSWORD
             if not u_name or not u_pass:
                 return ("", [])
-            return self._portal_client.fetch_current_semester_courses(u_name, u_pass)
+            try:
+                return self._portal_client.fetch_current_semester_courses(u_name, u_pass)
+            except PortalMaintenanceError as exc:
+                self._notify_maintenance_from_worker(exc.notice, user_initiated=False)
+                return ("", [])
 
         self._course_catalog_service = CourseCatalogService(
             cache_store=self._course_cache_store,
@@ -2794,6 +3851,11 @@ class AppController:
         grade_view = getattr(self, "grade_overview_view", None)
         if grade_view is not None and callable(getattr(grade_view, "set_width", None)):
             grade_view.set_width(content_width)
+        cal_view = getattr(self, "calendar_view", None)
+        if cal_view is not None and callable(
+            getattr(cal_view, "handle_viewport_resize", None)
+        ):
+            cal_view.handle_viewport_resize(resolved_width)
         self._sync_app_webview_bounds(resolved_width, resolved_height)
 
         content_area = getattr(self, "_content_area", None)
@@ -2822,6 +3884,11 @@ class AppController:
         self._filter_container.padding = ft.Padding.only(
             left=base_pad + gutter, right=base_pad + gutter, top=2, bottom=10
         )
+        maint_banner = getattr(self, "_maintenance_banner", None)
+        if maint_banner is not None:
+            maint_banner.margin = ft.Margin(
+                left=base_pad + gutter, right=base_pad + gutter, top=0, bottom=8
+            )
         update_banner = getattr(self, "_update_banner", None)
         if update_banner is not None:
             update_banner.margin = ft.Margin(
@@ -3072,6 +4139,17 @@ class AppController:
         host = getattr(self, "_app_webview_host", None)
         if pane is None or host is None or not getattr(host, "visible", False):
             return
+        if (
+            getattr(self, "_app_webview_suspended_for_window", False)
+            and not self._is_window_hidden_or_minimized()
+        ):
+            self._app_webview_suspended_for_window = False
+            resume_fn = getattr(pane, "resume", None)
+            if callable(resume_fn):
+                try:
+                    resume_fn()
+                except Exception:
+                    logger.debug("App WebView resume on resize skipped", exc_info=True)
         sync_fn = getattr(pane, "sync_bounds", None)
         if callable(sync_fn):
             left, top, pane_w, pane_h, bottom_inset = self._compute_app_webview_bounds(
@@ -3100,6 +4178,7 @@ class AppController:
         pane = getattr(self, "_app_webview_pane", None)
         was_visible = bool(host is not None and getattr(host, "visible", False))
         self._app_webview_pane = None
+        self._app_webview_suspended_for_window = False
         if pane is not None:
             try:
                 if clear_browser_storage:
@@ -3120,6 +4199,84 @@ class AppController:
             except Exception:
                 pass
         return was_visible or pane is not None
+
+    def _dismiss_overlays_before_app_webview(self) -> None:
+        """Close active desktop filter menus, schedule surfaces, and modal dialogs before mounting _app_webview_pane."""
+        dismiss_filter = getattr(self, "_dismiss_desktop_filter_menu", None)
+        if callable(dismiss_filter):
+            try:
+                dismiss_filter()
+            except Exception:
+                pass
+        schedule_comp = getattr(self, "_today_schedule_component", None)
+        if schedule_comp is not None and getattr(schedule_comp, "surface_open", False):
+            close_surface = getattr(schedule_comp, "close_surface", None)
+            if callable(close_surface):
+                try:
+                    close_surface()
+                except Exception:
+                    pass
+        page = getattr(self, "page", None)
+        pop_dialog = getattr(page, "pop_dialog", None)
+        dialogs_ctrl = getattr(page, "_dialogs", None)
+        controls = getattr(dialogs_ctrl, "controls", None)
+        if callable(pop_dialog):
+            if controls is not None:
+                open_modals = [
+                    d
+                    for d in controls
+                    if getattr(d, "open", False) and not isinstance(d, ft.SnackBar)
+                ]
+                pop_budget = max(1, len(open_modals))
+                for _ in range(min(8, pop_budget)):
+                    try:
+                        popped = pop_dialog()
+                    except Exception:
+                        break
+                    if not any(
+                        getattr(d, "open", False) and not isinstance(d, ft.SnackBar)
+                        for d in controls
+                    ):
+                        break
+                    if popped is None:
+                        break
+                for d in controls:
+                    if getattr(d, "open", False) and not isinstance(d, ft.SnackBar):
+                        try:
+                            d.open = False
+                        except Exception:
+                            pass
+            else:
+                try:
+                    pop_dialog()
+                except Exception:
+                    pass
+        overlay = getattr(page, "overlay", None)
+        if overlay:
+            for item in overlay:
+                if (
+                    not isinstance(item, ft.SnackBar)
+                    and getattr(item, "open", False)
+                    and hasattr(item, "on_dismiss")
+                ):
+                    try:
+                        item.open = False
+                    except Exception:
+                        pass
+        legacy_dlg = getattr(page, "dialog", None)
+        if (
+            legacy_dlg is not None
+            and not isinstance(legacy_dlg, ft.SnackBar)
+            and getattr(legacy_dlg, "open", False)
+        ):
+            try:
+                legacy_dlg.open = False
+            except Exception:
+                pass
+        release_tracked = getattr(self, "_release_tracked_modal_dialog_tokens", None)
+        if callable(release_tracked):
+            release_tracked()
+        _clear_modal_and_filter_webview_occlusion()
 
     def _build_webview_auth_service(
         self,
@@ -3193,6 +4350,11 @@ class AppController:
             return
 
         site_kind = _classify_uth_url(validated)
+        if site_kind in {"courses", "thnn", "portal"}:
+            active_maint = self._resolve_active_maintenance_notice(site_kind)
+            if active_maint is not None:
+                self._handle_uth_maintenance(active_maint, user_initiated=True)
+                return
         committed_user, committed_pass = self._committed_webview_credentials()
         has_creds = bool(
             not is_demo_account(committed_user)
@@ -3215,12 +4377,7 @@ class AppController:
         )
         if supports_embedded:
             self._close_app_webview(update_page=False)
-            pop_dialog = getattr(self.page, "pop_dialog", None)
-            if callable(pop_dialog):
-                try:
-                    pop_dialog()
-                except Exception:
-                    pass
+            self._dismiss_overlays_before_app_webview()
 
             source = "thnn" if site_kind == "thnn" else "courses"
             preview_server = None
@@ -3267,17 +4424,21 @@ class AppController:
             }
             try:
                 pane_params = inspect.signature(CoursesWebViewPane).parameters
-                if "account_epoch_getter" in pane_params or any(
+                has_var_kw = any(
                     p.kind == inspect.Parameter.VAR_KEYWORD
                     for p in pane_params.values()
-                ):
+                )
+                if "account_epoch_getter" in pane_params or has_var_kw:
                     pane_kwargs["account_epoch_getter"] = lambda: getattr(
                         self, "_account_epoch", 0
                     )
+                if "occlusion_layer" in pane_params or has_var_kw:
+                    pane_kwargs["occlusion_layer"] = "app_overlay"
             except (TypeError, ValueError):
                 pass
             pane = CoursesWebViewPane(**pane_kwargs)
             self._app_webview_pane = pane
+            self._app_webview_suspended_for_window = False
             host.content = pane
             host.visible = True
             pane.sync_bounds(
@@ -3447,6 +4608,7 @@ class AppController:
         popup_top = max(0.0, anchor_bottom - header_height)
 
         self._active_desktop_filter_menu = menu
+        _set_webview_occlusion("desktop_filter", True)
         menu._set_expanded(True)
         self._desktop_filter_popup_host.content = menu.popup_panel
         self._desktop_filter_popup_host.left = popup_left
@@ -3492,6 +4654,7 @@ class AppController:
         active = getattr(self, "_active_desktop_filter_menu", None)
         if menu is not None and active is not menu:
             return
+        _set_webview_occlusion("desktop_filter", False)
         if active is not None:
             active._set_expanded(False)
         self._active_desktop_filter_menu = None
@@ -3836,6 +4999,7 @@ class AppController:
     def _request_today_schedule(self) -> None:
         coordinator = self._today_schedule_coordinator
         if coordinator.state.status is ScheduleLoadStatus.ERROR:
+            self._manual_today_schedule_requested = True
             self._safe_run_task(coordinator.refresh, "retry")
         else:
             self._safe_run_task(coordinator.ensure_today)
@@ -4376,6 +5540,13 @@ class AppController:
                 or account_epoch != getattr(self, "_account_epoch", 0)
             ):
                 return
+            previously_completed = {
+                str(item.get("url") or "")
+                for item in self.all_data
+                if item.get("url")
+                and normalize_submission_status(item.get("submission_status"))
+                in COMPLETED_SUBMISSION_STATUSES
+            }
             pending_updates = getattr(self, "_pending_updates", None)
             data_copy = build_prefetched_dataset(
                 list(self.all_data),
@@ -4383,6 +5554,19 @@ class AppController:
                 pending_updates,
                 prefetch_start_time,
             )
+            newly_completed_urls = {
+                str(item.get("url") or "")
+                for item in data_copy
+                if item.get("url")
+                and normalize_submission_status(item.get("submission_status"))
+                in COMPLETED_SUBMISSION_STATUSES
+            } - previously_completed
+            newly_completed_ids = [
+                str(item.get("id") or "")
+                for item in data_copy
+                if str(item.get("url") or "") in newly_completed_urls
+                and item.get("id")
+            ]
             self.all_data = data_copy
         self._update_footer()
         if data_cache is not None and account_epoch == getattr(self, "_account_epoch", 0):
@@ -4391,6 +5575,10 @@ class AppController:
             )
             if not persisted:
                 logger.warning("Không thể lưu snapshot trạng thái activity đã enrich")
+        if newly_completed_urls and account_epoch == getattr(self, "_account_epoch", 0):
+            self._reconcile_activity_schedules_for_snapshot(
+                data_copy, changed_activity_ids=newly_completed_ids
+            )
         if account_epoch == getattr(self, "_account_epoch", 0):
             self._schedule_card_detail_warmup()
 
@@ -4622,6 +5810,8 @@ class AppController:
 
     async def _load_data_async(self, trigger: str = "manual"):
         """Refresh entry point; concurrent callers share one fetch."""
+        if trigger == "manual":
+            self._manual_sync_requested = True
         coordinator = getattr(self, "_sync_coordinator", None)
         if coordinator is None:
             return await self._perform_data_sync(trigger)
@@ -4754,9 +5944,73 @@ class AppController:
             orch_ref = getattr(self, "orchestrator", None)
             if orch_ref is not None and hasattr(orch_ref, "is_logged_in"):
                 orch_ref.is_logged_in = True
+            self._manual_sync_requested = False
+            self._clear_uth_maintenance_banner(update_page=False)
             result = list(outcome.activities or [])
 
+            course_store = getattr(self, "_course_cache_store", None)
+            if course_store is not None and callable(
+                getattr(course_store, "completed_module_cmids", None)
+            ):
+                try:
+                    thnn_done_cmids = await asyncio.to_thread(
+                        course_store.completed_module_cmids, "thnn"
+                    )
+                    if not _epoch_is_current():
+                        return
+                    if thnn_done_cmids:
+                        apply_cached_thnn_completions(result, thnn_done_cmids)
+                except Exception:
+                    logger.debug(
+                        "Non-critical THNN cached completion lookup skipped",
+                        exc_info=True,
+                    )
+
             cache = self.orchestrator.get_cached_details_snapshot()
+            prefetch_statuses_fn = getattr(
+                self.orchestrator, "prefetch_activity_statuses", None
+            )
+            if not is_demo_account(settings.UTH_USERNAME) and callable(
+                prefetch_statuses_fn
+            ):
+                with self._data_lock:
+                    pending_snap = dict(self._pending_updates)
+                pre_candidates = notification_status_hydration_candidates(
+                    result,
+                    cache,
+                    pending_snap,
+                    fetch_start_time,
+                )
+                if pre_candidates:
+                    worker_cap = 2 if platform_utils.IS_MOBILE else 4
+                    workers = max(1, min(settings.PREFETCH_WORKERS, worker_cap))
+                    cancel_ev = getattr(self, "_prefetch_cancel_event", None)
+                    is_cancelled = (
+                        cancel_ev.is_set
+                        if cancel_ev is not None
+                        else (lambda: False)
+                    )
+                    hydrated_map = await asyncio.to_thread(
+                        prefetch_statuses_fn,
+                        pre_candidates,
+                        workers,
+                        is_cancelled,
+                    )
+                    if not _epoch_is_current() or is_cancelled():
+                        return
+                    if isinstance(hydrated_map, dict):
+                        apply_pre_dispatch_status_hydration(
+                            result, pre_candidates, hydrated_map
+                        )
+                        if callable(
+                            getattr(
+                                self.orchestrator,
+                                "get_cached_details_snapshot",
+                                None,
+                            )
+                        ):
+                            cache = self.orchestrator.get_cached_details_snapshot()
+
             with self._data_lock:
                 if not _epoch_is_current():
                     return
@@ -4916,9 +6170,67 @@ class AppController:
             )
             # Moodle's unread-notification feed is intentionally not part of
             # the activity reminder pipeline. Activity data above is the source.
+        except UthMaintenanceError as maint_exc:
+            if not _epoch_is_current():
+                return
+            user_initiated = (trigger == "manual") or bool(
+                getattr(self, "_manual_sync_requested", False)
+            )
+            self._manual_sync_requested = False
+            self._diag_breadcrumb("refresh", "offline", "moodle")
+            logger.info(
+                "[Load] UTH maintenance detected (%s); preserving cached activities.",
+                maint_exc.notice.window_text or "maintenance",
+            )
+            if not self.all_data and data_cache is not None:
+                cached_data, _ = await asyncio.to_thread(data_cache.load)
+                if not _epoch_is_current():
+                    return
+                if cached_data:
+                    from core.time_utils import parse_datetime as _parse_dt
+
+                    for item in cached_data:
+                        dl = item.get("deadline", "")
+                        if dl and "_deadline_dt" not in item:
+                            item["_deadline_dt"] = _parse_dt(dl)
+                        if "_title_lower" not in item:
+                            item["_title_lower"] = str(item.get("title", "")).lower()
+                        if "_course_lower" not in item:
+                            item["_course_lower"] = str(item.get("course", "")).lower()
+                    with self._data_lock:
+                        if not _epoch_is_current():
+                            return
+                        self.all_data = cached_data
+            self._clear_skeletons()
+            if self.all_data:
+                self._set_sync_status(
+                    "error",
+                    "Hệ thống đang bảo trì · đang xem dữ liệu đã lưu",
+                )
+                self.error_state.visible = False
+                self._update_footer(update_page=False)
+            else:
+                if hasattr(self, "_error_title"):
+                    self._error_title.value = "Hệ thống UTH đang bảo trì"
+                reopen_hint = (
+                    f" · Mở lại dự kiến: {maint_exc.notice.reopen_text}"
+                    if maint_exc.notice.reopen_text
+                    else ""
+                )
+                self.error_text.value = (
+                    f"Khung giờ bảo trì: {maint_exc.notice.window_text or '01h00 - 04h00'}"
+                    f"{reopen_hint}"
+                )
+                self.empty_state.visible = False
+                self.error_state.visible = True
+                self._set_sync_status("error", "Hệ thống UTH đang bảo trì")
+            self._handle_uth_maintenance(
+                maint_exc.notice, user_initiated=user_initiated
+            )
         except Exception as exc:
             if not _epoch_is_current():
                 return
+            self._manual_sync_requested = False
             orch_ref = getattr(self, "orchestrator", None)
             if (
                 not is_demo_account(settings.UTH_USERNAME)
@@ -4952,6 +6264,8 @@ class AppController:
                 self.error_state.visible = False
                 self._update_footer()
             else:
+                if hasattr(self, "_error_title"):
+                    self._error_title.value = "Không thể tải dữ liệu"
                 self.error_text.value = "Không thể kết nối tới Moodle. Vui lòng kiểm tra mạng và thử lại."
                 self.error_state.visible = True
                 self._set_sync_status("error", "Lỗi kết nối server")
@@ -5078,6 +6392,10 @@ class AppController:
         if is_demo_account(settings.UTH_USERNAME):
             self._show_demo_lms_guard_snackbar()
             return
+        active_maint = self._resolve_active_maintenance_notice(course.source)
+        if active_maint is not None:
+            self._handle_uth_maintenance(active_maint, user_initiated=True)
+            return
         player_view = getattr(self, "quiz_player_view", None)
         activity = self._build_course_quiz_activity(course, mod)
         url = str(activity.get("url") or "")
@@ -5164,16 +6482,92 @@ class AppController:
         url = activity.get("url")
         if not isinstance(url, str) or not url:
             return
+        start_account_epoch = getattr(self, "_account_epoch", 0)
         try:
             # The following detail load must ask Moodle for the latest attempt
             # state; a player close does not prove that an attempt was submitted.
             self.orchestrator.invalidate_detail_cache(url)
+            detail_refreshed = False
             if (
                 getattr(self, "detail_view", None) is not None
                 and self.detail_view.visible
                 and self.detail_view._current_url == url
             ):
                 await self._show_detail_async(dict(activity))
+                detail_refreshed = True
+
+            from urllib.parse import urlsplit as _urlsplit
+
+            is_thnn = (
+                activity.get("site_identity") == "thnn"
+                or activity.get("source") == "thnn_sync"
+                or (_urlsplit(url).hostname or "").casefold()
+                == "thnn.ut.edu.vn"
+            )
+            if is_thnn:
+                act_svc = getattr(self, "_course_activity_service", None)
+                fetch_quiz_fn = getattr(act_svc, "fetch_quiz_activity", None)
+                if callable(fetch_quiz_fn):
+                    from core.courses.models import CourseModuleItem
+
+                    raw_cmid = activity.get("cmid")
+                    cmid_val = 0
+                    if raw_cmid is not None and not isinstance(raw_cmid, bool):
+                        try:
+                            cmid_val = int(raw_cmid)
+                        except (TypeError, ValueError):
+                            cmid_val = 0
+                    if cmid_val <= 0 and "id=" in url:
+                        try:
+                            cmid_val = int(url.split("id=")[-1].split("&")[0])
+                        except (ValueError, IndexError):
+                            cmid_val = 0
+                    mod_stub = CourseModuleItem(
+                        cmid=max(0, cmid_val),
+                        instance_id=int(activity.get("quiz_id") or 0),
+                        modname="quiz",
+                        name=str(activity.get("title") or "Bài kiểm tra"),
+                        section_id=0,
+                        url=url,
+                        web_url=url,
+                    )
+                    summary = await asyncio.to_thread(
+                        fetch_quiz_fn,
+                        "thnn",
+                        mod_stub,
+                        course_id=int(activity.get("course_id") or 0),
+                    )
+                    if any(
+                        normalize_submission_status(att.state)
+                        in COMPLETED_SUBMISSION_STATUSES
+                        for att in (getattr(summary, "attempts", None) or ())
+                    ):
+                        await self._sync_resolved_activity_status_async(
+                            url,
+                            "submitted",
+                            expected_epoch=start_account_epoch,
+                        )
+            elif not detail_refreshed and callable(
+                getattr(self.orchestrator, "fetch_full_details", None)
+            ):
+                refreshed = await asyncio.to_thread(
+                    self.orchestrator.fetch_full_details,
+                    dict(activity),
+                    True,
+                )
+                resolved_status = extract_canonical_submission_status(refreshed)
+                if resolved_status in COMPLETED_SUBMISSION_STATUSES:
+                    await self._sync_resolved_activity_status_async(
+                        url,
+                        resolved_status,
+                        details_patch=(
+                            refreshed.get("details")
+                            if isinstance(refreshed, dict)
+                            else None
+                        ),
+                        expected_epoch=start_account_epoch,
+                    )
+
             if getattr(getattr(self, "courses_view", None), "visible", False):
                 overlay = self._active_course_quiz_overlay(activity)
                 if overlay is not None:
@@ -5354,6 +6748,11 @@ class AppController:
                         self.view_manager.show_credit_progress(progress)
                 except Exception as exc:
                     logger.warning("Credit progress load failed: %s", exc)
+                svc_maint = getattr(service, "last_maintenance_notice", None)
+                if isinstance(svc_maint, MaintenanceNotice):
+                    self._handle_uth_maintenance(
+                        svc_maint, user_initiated=force_refresh
+                    )
             else:
                 # Fallback to Moodle grades if Portal returned no semesters
                 userid = await asyncio.to_thread(
@@ -5377,6 +6776,20 @@ class AppController:
                         self.view_manager.show_grades_data(courses_grades or [], grade_items or {})
                 else:
                     self.view_manager.show_academic_radar_data([], [])
+        except UthMaintenanceError as maint_exc:
+            if not _is_current():
+                return
+            reopen_part = (
+                f"\nDự kiến mở lại: {maint_exc.notice.reopen_text}."
+                if maint_exc.notice.reopen_text
+                else ""
+            )
+            self.view_manager.show_grades_error(
+                f"Hệ thống UTH đang bảo trì ({maint_exc.notice.window_text or '01h00 - 04h00'}).{reopen_part}"
+            )
+            self._handle_uth_maintenance(
+                maint_exc.notice, user_initiated=force_refresh
+            )
         except Exception as e:
             if not _is_current():
                 return
@@ -5419,6 +6832,18 @@ class AppController:
             self.view_manager.show_course_grades_data(courses)
             if changes and not is_demo_account(settings.UTH_USERNAME):
                 await self._notify_grade_changes(changes)
+        except UthMaintenanceError as maint_exc:
+            if not _is_current():
+                return
+            if cached:
+                self.view_manager.show_course_grades_stale_notice(
+                    "Hệ thống UTH đang bảo trì · đang hiển thị dữ liệu đã lưu."
+                )
+            else:
+                self.view_manager.show_course_grades_error()
+            self._handle_uth_maintenance(
+                maint_exc.notice, user_initiated=force_refresh
+            )
         except Exception as e:
             if not _is_current():
                 return
@@ -5648,6 +7073,32 @@ class AppController:
         sync_status = getattr(self, "_sync_status", None)
         if sync_status is not None:
             sync_status.refresh_theme()
+
+        # Maintenance banner uses semantic WARNING tint & border across light/dark themes.
+        maint_banner = getattr(self, "_maintenance_banner", None)
+        if maint_banner is not None:
+            maint_banner.bgcolor = ft.Colors.with_opacity(0.10, _C.WARNING)
+            maint_banner.border = ft.Border.all(1, _C.WARNING)
+        maint_icon = getattr(self, "_maintenance_icon", None)
+        if maint_icon is not None:
+            maint_icon.color = _C.WARNING
+        maint_text = getattr(self, "_maintenance_text", None)
+        if maint_text is not None:
+            maint_text.color = _C.TEXT_PRIMARY
+        maint_detail_btn = getattr(self, "_maintenance_detail_btn", None)
+        if maint_detail_btn is not None:
+            maint_detail_btn.style = ft.ButtonStyle(
+                color=_C.TEXT_PRIMARY,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
+        maint_retry_btn = getattr(self, "_maintenance_retry_btn", None)
+        if maint_retry_btn is not None:
+            maint_retry_btn.style = ft.ButtonStyle(
+                color=_C.ACCENT,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+                shape=ft.RoundedRectangleBorder(radius=8),
+            )
 
         # Update banner is a semantic elevated surface, not a fixed brown card.
         update_banner = getattr(self, "_update_banner", None)
@@ -6284,6 +7735,8 @@ class AppController:
                 "modal_dialog", False, token=modal_token
             ),
         )
+        dialog._uth_modal_occlusion_token = modal_token
+        dialog._uth_modal_occlusion_pre_acquired = True
         _call_modal_occlusion("modal_dialog", True, token=modal_token)
         self.page.show_dialog(dialog)
 
@@ -6407,6 +7860,7 @@ class AppController:
             return
         new_status = normalize_submission_status(new_status)
         updated = False
+        changed_ids: list[str] = []
         import time
         with self._data_lock:
             # Ghi nhận thay đổi thủ công của người dùng kèm timestamp
@@ -6426,6 +7880,8 @@ class AppController:
                         new_item["details"] = details
                         
                         new_data.append(new_item)
+                        if item.get("id"):
+                            changed_ids.append(str(item["id"]))
                         updated = True
                     else:
                         new_data.append(item)
@@ -6462,18 +7918,159 @@ class AppController:
 
             # A successful/manual submission must cancel every remaining local
             # deadline reminder immediately instead of waiting for the next sync.
-            if not is_demo_account(settings.UTH_USERNAME):
-                mobile_bridge = getattr(self, "_android_background", None)
-                if mobile_bridge is not None and mobile_bridge.available:
-                    self._safe_run_task(
-                        mobile_bridge.import_activities,
-                        data_copy,
-                        authoritative=True,
+            self._reconcile_activity_schedules_for_snapshot(
+                data_copy, changed_activity_ids=changed_ids
+            )
+
+    def _reconcile_activity_schedules_for_snapshot(
+        self,
+        data_copy: list[dict],
+        *,
+        changed_activity_ids: list[str] | None = None,
+    ) -> None:
+        """Immediately update native and local notification schedules for a new snapshot."""
+        if is_demo_account(settings.UTH_USERNAME):
+            return
+        run_task = getattr(self, "_safe_run_task", None)
+        if not callable(run_task):
+            return
+
+        mobile_bridge = getattr(self, "_android_background", None)
+        has_mobile_bridge = bool(
+            mobile_bridge is not None and getattr(mobile_bridge, "available", False)
+        )
+        if has_mobile_bridge:
+            run_task(
+                mobile_bridge.import_activities,
+                data_copy,
+                authoritative=True,
+            )
+
+        notifier = getattr(self, "notifier", None)
+        if notifier is None:
+            return
+        if not has_mobile_bridge:
+            reconcile_fn = getattr(notifier, "reconcile_schedules", None)
+            if callable(reconcile_fn):
+                run_task(reconcile_fn, data_copy)
+            return
+
+        # When both mobile_bridge and notifier exist: reconcile non-MobileNotifier
+        # schedulers (e.g. desktop/test schedulers), or cancel specific fallback
+        # MobileNotifier alarms without double-scheduling unsubmitted items.
+        registered = getattr(notifier, "notifiers", None)
+        has_mobile_channel = isinstance(registered, list) and any(
+            type(channel).__name__ == "MobileNotifier" for channel in registered
+        )
+        if not has_mobile_channel:
+            reconcile_fn = getattr(notifier, "reconcile_schedules", None)
+            if callable(reconcile_fn):
+                run_task(reconcile_fn, data_copy)
+        elif changed_activity_ids and callable(
+            getattr(notifier, "cancel_activity", None)
+        ):
+            for act_id in changed_activity_ids:
+                if act_id:
+                    run_task(notifier.cancel_activity, str(act_id))
+
+    async def _sync_resolved_activity_status_async(
+        self,
+        url: str,
+        new_status: str,
+        *,
+        details_patch: dict | None = None,
+        expected_epoch: int | None = None,
+    ) -> bool:
+        """Apply freshly discovered completed status to all_data, DataCache, and schedules."""
+        canonical = normalize_submission_status(new_status)
+        if canonical not in COMPLETED_SUBMISSION_STATUSES:
+            return False
+        if (
+            expected_epoch is not None
+            and expected_epoch != getattr(self, "_account_epoch", 0)
+        ):
+            return False
+        data_lock = getattr(self, "_data_lock", None)
+        current_items = getattr(self, "all_data", None)
+        if data_lock is None or not isinstance(current_items, list):
+            return False
+
+        import time as _time
+
+        updated = False
+        changed_ids: list[str] = []
+        with data_lock:
+            if (
+                expected_epoch is not None
+                and expected_epoch != getattr(self, "_account_epoch", 0)
+            ):
+                return False
+            pending = getattr(self, "_pending_updates", None)
+            if isinstance(pending, dict):
+                pending[url] = (_time.time(), canonical)
+
+            new_data = []
+            for item in self.all_data:
+                if item.get("url") == url:
+                    cur_norm = normalize_submission_status(
+                        item.get("submission_status")
                     )
-                elif getattr(self, "notifier", None) is not None:
-                    self._safe_run_task(
-                        self.notifier.reconcile_schedules, data_copy
-                    )
+                    if cur_norm != canonical:
+                        new_item = dict(item)
+                        new_item["submission_status"] = canonical
+                        merged_details = dict(new_item.get("details") or {})
+                        if isinstance(details_patch, dict):
+                            for k, v in details_patch.items():
+                                if k != "description_html":
+                                    merged_details[k] = v
+                        status_data = dict(merged_details.get("status_data") or {})
+                        status_data["Trạng thái nộp bài"] = canonical
+                        merged_details["status_data"] = status_data
+                        if new_item.get("type") == "quiz":
+                            merged_details["quiz_attempt_status"] = canonical
+                        new_item["details"] = merged_details
+                        new_data.append(new_item)
+                        if item.get("id"):
+                            changed_ids.append(str(item["id"]))
+                        updated = True
+                    else:
+                        new_data.append(item)
+                else:
+                    new_data.append(item)
+            if updated:
+                self.all_data = new_data
+            data_copy = list(self.all_data)
+
+        if not updated:
+            return False
+
+        update_footer = getattr(self, "_update_footer", None)
+        if callable(update_footer):
+            update_footer()
+
+        data_cache = getattr(self, "_data_cache", None)
+        if data_cache is not None and (
+            expected_epoch is None
+            or expected_epoch == getattr(self, "_account_epoch", 0)
+        ):
+            try:
+                await asyncio.to_thread(
+                    data_cache.save_local_activities, data_copy
+                )
+            except Exception:
+                logger.debug(
+                    "Ignored local activity persist error after status sync",
+                    exc_info=True,
+                )
+
+        if (
+            expected_epoch is None
+            or expected_epoch == getattr(self, "_account_epoch", 0)
+        ):
+            self._reconcile_activity_schedules_for_snapshot(
+                data_copy, changed_activity_ids=changed_ids
+            )
+        return True
 
     def _show_detail(self, data: dict):
         self._dismiss_desktop_filter_menu()
@@ -6482,6 +8079,7 @@ class AppController:
     async def _show_detail_async(self, data: dict):
         request_epoch = getattr(self, "_detail_request_epoch", 0) + 1
         self._detail_request_epoch = request_epoch
+        start_account_epoch = getattr(self, "_account_epoch", 0)
 
         def request_is_current() -> bool:
             return request_epoch == getattr(self, "_detail_request_epoch", 0)
@@ -6497,6 +8095,16 @@ class AppController:
         self.view_manager.show_detail_loading(data)
         try:
             full_data = await asyncio.to_thread(self.orchestrator.fetch_full_details, data)
+            if isinstance(full_data, dict):
+                resolved_status = extract_canonical_submission_status(full_data)
+                resolved_url = str(full_data.get("url") or data.get("url") or "")
+                if resolved_url and resolved_status in COMPLETED_SUBMISSION_STATUSES:
+                    await self._sync_resolved_activity_status_async(
+                        resolved_url,
+                        resolved_status,
+                        details_patch=full_data.get("details"),
+                        expected_epoch=start_account_epoch,
+                    )
             if not request_is_current():
                 return
             details_map = full_data.get("details") if isinstance(full_data, dict) else None
@@ -6665,6 +8273,13 @@ class AppController:
             self._run_shutdown_step(
                 "close_app_webview", lambda: close_wv(update_page=False)
             )
+        release_tracked = getattr(self, "_release_tracked_modal_dialog_tokens", None)
+        if callable(release_tracked):
+            self._run_shutdown_step("release_modal_dialog_tokens", release_tracked)
+        self._run_shutdown_step(
+            "clear_desktop_filter_occlusion",
+            lambda: _set_webview_occlusion("desktop_filter", False),
+        )
 
     def _shutdown_for_exit(self) -> None:
         lock = getattr(self, "_exit_cleanup_lock", None)
@@ -6749,6 +8364,13 @@ class AppController:
             self._run_shutdown_step(
                 "close_app_webview", lambda: close_wv(update_page=False)
             )
+        release_tracked = getattr(self, "_release_tracked_modal_dialog_tokens", None)
+        if callable(release_tracked):
+            self._run_shutdown_step("release_modal_dialog_tokens", release_tracked)
+        self._run_shutdown_step(
+            "clear_desktop_filter_occlusion",
+            lambda: _set_webview_occlusion("desktop_filter", False),
+        )
 
         courses_coord = getattr(self, "_courses_coordinator", None)
         if courses_coord is not None:

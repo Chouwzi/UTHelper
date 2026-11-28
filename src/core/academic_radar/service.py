@@ -18,6 +18,7 @@ from core.academic_radar.models import (
 )
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.demo_sandbox import is_demo_account, normalize_demo_username
+from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.portal_client import PortalAuthenticationError, PortalClient
 from core.safe_file_io import SafeFileIO
 
@@ -79,9 +80,11 @@ class AcademicGradeService:
         self._portal_client = portal_client or PortalClient(settings.PORTAL_API_BASE)
         self._cache_dir = cache_dir or get_data_dir()
         self._normalizer = normalizer or SemesterNormalizer()
+        self.last_maintenance_notice: MaintenanceNotice | None = None
 
     def clear_session(self) -> None:
         """Clear cached Portal authentication token/session on account switch or logout."""
+        self.last_maintenance_notice = None
         clear_token = getattr(self._portal_client, "clear_token", None)
         if callable(clear_token):
             clear_token()
@@ -159,10 +162,19 @@ class AcademicGradeService:
         try:
             logger.info("Fetching full academic transcript from Portal...")
             raw_transcript = self._portal_client.fetch_full_transcript(username, password)
+            self.last_maintenance_notice = None
             if raw_transcript:
                 logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
                 self._write_cache(raw_transcript, username)
                 return self._normalizer.normalize_transcript(raw_transcript)
+        except UthMaintenanceError as exc:
+            self.last_maintenance_notice = exc.notice
+            logger.info(
+                "Portal academic transcript unavailable due to UTH maintenance; checking cached transcript"
+            )
+            if cache and isinstance(cache.get("transcript"), list):
+                return self._normalizer.normalize_transcript(cache["transcript"])
+            raise
         except PortalAuthenticationError:
             self.clear_session()
             raise
@@ -209,6 +221,7 @@ class AcademicGradeService:
 
         try:
             body = self._portal_client.fetch_credit_progress(username, password)
+            self.last_maintenance_notice = None
             progress = parse_credit_progress(body)
             if progress:
                 try:
@@ -220,6 +233,9 @@ class AcademicGradeService:
                 except Exception as exc:
                     logger.warning("Failed to write credit progress cache: %s", exc)
                 return progress
+        except UthMaintenanceError as exc:
+            self.last_maintenance_notice = exc.notice
+            logger.info("Portal credit progress unavailable due to UTH maintenance")
         except PortalAuthenticationError:
             self.clear_session()
             raise

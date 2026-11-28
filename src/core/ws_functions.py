@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
+from core.activity_status import resolve_moodle_assign_submission_status
 
 logger = logging.getLogger(__name__)
 
@@ -405,10 +406,22 @@ def _get_assign_detail(
         sub_status = get_submission_status(call_api, assign_id)
         if sub_status:
             details['raw_submission_status'] = sub_status
+            resolved_status = resolve_moodle_assign_submission_status(sub_status)
+            if resolved_status != 'unknown':
+                details['submission_status'] = resolved_status
             la = sub_status.get('lastattempt', {})
-            if la:
-                submission = la.get('submission', {})
-                raw_status = submission.get('status', '')
+            if isinstance(la, dict) and la:
+                submission = la.get('submission')
+                submission = submission if isinstance(submission, dict) else {}
+                teamsubmission = la.get('teamsubmission')
+                teamsubmission = teamsubmission if isinstance(teamsubmission, dict) else {}
+                effective_sub = (
+                    teamsubmission
+                    if teamsubmission.get('status') in ('submitted', 'draft')
+                    and submission.get('status') not in ('submitted', 'graded')
+                    else submission
+                )
+                raw_status = effective_sub.get('status', '')
                 
                 # Map Moodle status → Vietnamese
                 status_map = {
@@ -431,7 +444,7 @@ def _get_assign_detail(
                     details['status_data']['Chấm điểm'] = grading_map.get(grading, grading)
                 
                 # Thời gian nộp
-                time_modified = submission.get('timemodified', 0)
+                time_modified = effective_sub.get('timemodified', 0) or submission.get('timemodified', 0)
                 if time_modified and time_modified > 0:
                     try:
                         dt = datetime.fromtimestamp(time_modified)
@@ -447,10 +460,16 @@ def _get_assign_detail(
             
             # Feedback / Grade
             fb = sub_status.get('feedback', {})
-            if fb:
+            if isinstance(fb, dict) and fb:
                 grade = fb.get('grade', {})
-                if grade and grade.get('grade') is not None:
-                    details['status_data']['Điểm'] = str(grade['grade'])
+                if isinstance(grade, dict) and grade.get('grade') is not None:
+                    raw_grade = str(grade['grade']).strip()
+                    try:
+                        has_real_grade = float(raw_grade) >= 0.0
+                    except ValueError:
+                        has_real_grade = bool(raw_grade and raw_grade != '-')
+                    if has_real_grade:
+                        details['status_data']['Điểm'] = raw_grade
     
     return details
 

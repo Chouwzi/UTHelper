@@ -40,14 +40,14 @@ UTHelper là dự án độc lập dành cho sinh viên. Dự án không đại 
 Đại học Giao thông vận tải Thành phố Hồ Chí Minh và không thay thế các cổng
 thông tin chính thức của trường.
 
-Phiên bản mã nguồn hiện tại là `2.6.2`. UI, runtime package và số build nền tảng
+Phiên bản mã nguồn hiện tại là `2.7.0`. UI, runtime package và số build nền tảng
 đều được sinh từ version canonical trong `pyproject.toml`; không chỉnh version
 riêng trong từng nền tảng.
 
-Bản Android ARM64 nhẹ dùng tệp `UTHelper-2.6.2-arm64-v8a.apk`; bản universal
-`UTHelper-2.6.2.apk` dành cho các kiến trúc còn lại (mã gói thống nhất
+Bản Android ARM64 nhẹ dùng tệp `UTHelper-2.7.0-arm64-v8a.apk`; bản universal
+`UTHelper-2.7.0.apk` dành cho các kiến trúc còn lại (mã gói thống nhất
 `io.github.chouwzi.uthelper`). Windows tiếp tục dùng bộ cài EXE/MSI đã ký
-(`UTHelper-Setup-2.6.2.exe`, `UTHelper-2.6.2.msi`), bên cạnh hai kênh cửa hàng
+(`UTHelper-Setup-2.7.0.exe`, `UTHelper-2.7.0.msi`), bên cạnh hai kênh cửa hàng
 độc lập trên Google Play (`.aab`) và Microsoft Store (`.msix`).
 
 ## Tính năng

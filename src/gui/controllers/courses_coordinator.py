@@ -776,6 +776,22 @@ class CoursesCoordinator:
             return
 
         if modname == "quiz" and self._activity_service is not None:
+            status_cb = self._on_assignment_status_changed
+            opened_epoch = self._resolve_account_epoch()
+
+            def _forward_quiz_status_with_epoch(
+                quiz_url: str,
+                new_status: str,
+                _cb: Optional[Callable[..., Any]] = status_cb,
+                _epoch: int = opened_epoch,
+            ) -> None:
+                if _cb is None or self._resolve_account_epoch() != _epoch:
+                    return
+                try:
+                    _cb(quiz_url, new_status, _epoch)
+                except TypeError:
+                    _cb(quiz_url, new_status)
+
             view = QuizActivityView(
                 source=course.source,
                 course_id=course.id,
@@ -786,6 +802,11 @@ class CoursesCoordinator:
                     s, t, u, tag=f"webview:quiz:{m.cmid}"
                 ),
                 on_start_quiz=(lambda: self._dispatch_cb(self._on_start_quiz, course, mod)) if self._on_start_quiz is not None else None,
+                on_status_changed=(
+                    _forward_quiz_status_with_epoch
+                    if status_cb is not None
+                    else None
+                ),
                 on_toggle_expand=self.courses_view.toggle_pane3_expanded,
             )
             self.courses_view.push_overlay(view, tag=f"activity:quiz:{mod.cmid}")

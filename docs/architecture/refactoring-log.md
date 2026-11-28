@@ -2707,25 +2707,56 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `uv run ruff check src tests`: **All checks passed!**.
   - `pytest tests -q --tb=short`: **3443 passed, 26 skipped, 0 failed** (verified in live Flet Web Desktop + Mobile browser renders).
 
-## Calendar Schedule-to-Week Highlight Fix (2026-11-27)
+## Hotfix 2.6.2 (PDF Knockout Transparency, Mobile PPTX Wingdings & Scroll Speed) & Hotfix 2.6.3 (Windows Tray Close, Default Shortcuts, Legacy Cleanup & Autostart Hardening) (2026-11-27)
 
-- **Scope**: `src/gui/components/calendar_view.py`, `tests/test_calendar_week_view.py`.
-- Apply the three mode-button styles before rendering month/week content. The
-  render path can update the page immediately; styling afterward left the
-  schedule tab's active background visible when switching back to Week.
-- Added a regression test that hooks `page.update()` and checks the schedule
+- **Branch & Scope**:
+  - `hotfix/2.6.2` -> `main` (`PR #144`) & `develop` (`PR #145`).
+  - `hotfix/2.6.3` — `src/main.py`, `src/gui/tray.py`, `src/gui/app_controller.py`, `src/gui/controllers/autostart_settings.py`, `src/notifiers/windows.py`, `src/platform_utils/windows_update.py`, `packaging/windows/{Package.wxs,Bundle.wxs,BundleTheme.xml,BundleTheme.wxl,cleanup_legacy_installs.ps1,UTHelper.Package.wixproj,UTHelper.Bundle.wixproj}`, `pyproject.toml`, `README.md`, `docs/README.md`, `docs/releases/2.6.3.md`, `tests/{test_hotfix_windows_tray_installer_autostart,test_release_metadata,test_settings_credits_and_version}.py`.
+- **Changes**:
+  - **Close-to-Tray (`_handle_window_close_request` & `TrayApp.is_ready`)**: Routed the custom desktop window header `X` button (`_exit_from_window_header`) through `_handle_window_close_request()` alongside `_on_window_event()`, hiding to the system tray with a one-time balloon notification when `settings.MINIMIZE_TO_TRAY` is enabled and `TrayApp.is_ready` is true, and safely exiting instead of creating an invisible headless process when the tray is unavailable.
+  - **Default-Checked Desktop & Start Menu Shortcuts (`BundleTheme.xml`, `Bundle.wxs`, `Package.wxs`)**: Added pre-checked `InstallDesktopShortcut` and `InstallStartMenuShortcut` (`Value="1"`) Burn variables and checkboxes on the WiX v7 setup `Install` page, wired to secure MSI properties `INSTALLDESKTOPSHORTCUT="1"` and `INSTALLSTARTMENUSHORTCUT="1"`.
+  - **Legacy Version Removal & Single Start Menu Shortcut Hygiene (`cleanup_legacy_installs.ps1`, `WindowsNotifier`, `windows_update.py`)**: Stamped `System.AppUserModel.ID = "UTHelper.App"` directly on the MSI `StartMenuUTHelper` shortcut; replaced `WindowsNotifier._ensure_shortcut` with `reconcile_windows_start_menu_shortcuts()` (never creating bare `python.exe` shortcuts and purging duplicate per-user Start Menu / Startup / Desktop `.lnk` entries when the per-machine MSI shortcut exists); added post-commit `CleanupLegacyInstalls` (`After="InstallFinalize"`) to silently uninstall legacy Inno Setup versions (`<= v2.4.1`) and remove stale per-user shortcuts; and taught `read_install_channel()` to detect registered WiX Burn bundles (`BURN_UPGRADE_CODE`) so in-app updates use `bootstrapper` and remove superseded Burn bundles cleanly.
+  - **Windows Autostart Hardening (`src/main.py`, `app_controller.py`, `autostart_settings.py`)**: Normalized packaged Windows `cwd` to the executable directory when launched from `C:\Windows\System32` at logon, retried `TrayApp.setup()` on `autostart_launch` for slow taskbar startup, blocked source/dev Python launches from clobbering `HKCU\...\Run\UTHelper`, and cleaned up foreign/stale `Run\UTHelper` entries when `START_WITH_WINDOWS` is disabled.
+- **Verification**:
+  - Real WiX v7 builds (`UTHelper.Package.wixproj` + `UTHelper.Bundle.wixproj`): **0 warnings, 0 errors**.
+  - `uv run ruff check src tests scripts`: **All checks passed!**.
+  - Full `pytest` suite (`tests/`): **3457 passed, 26 skipped, 0 failed**.
+
+## Release v2.7.0: Unified Mobile/PC Calendar & Schedule, Grades Modal Scroll Pinning, UTH Maintenance Detection, Desktop WebView2 Occlusion/Speed, Submitted/THNN Notification Precision & Multi-Channel Sentry (2026-11-28)
+
+- **Branch & Scope**:
+  - `swarm/v270-integrated` (canonical release `2.7.0`, `build_number = 2007000`) integrating:
+    - **Desktop WebView2 Occlusion & Speed (`71e4094`, `5c3fce2`)**: `src/gui/components/courses/{embedded_webview_host,webview_pane,document_reader_view}.py`, `src/gui/controllers/courses_coordinator.py`, `src/gui/app_controller.py`, `tests/test_embedded_webview_window_binding.py`.
+    - **Unified `Tháng` | `Tuần` Calendar & Schedule (`swarm/v270-calendar-ui` -> `e33ae18`)**: `src/gui/components/{calendar_view,schedule_week_view}.py`, `tests/{test_calendar_view_ux,test_schedule_week_view}.py`.
+    - **Grades Instant Modal Scroll Pinning & Stale-Cache Preservation (`swarm/v270-grades-scroll` -> `74a89bd`)**: `src/gui/components/grade_overview_view.py`, `src/gui/components/academic_radar/radar_card.py`, `tests/test_grade_overview_view.py`.
+    - **UTH Nightly Maintenance (`01:00–04:00 UTC+7`) Detection & Resilience (`swarm/v270-uth-maintenance` -> `dd4570a`, `fca0787`)**: `src/core/{maintenance,portal_client,client,moodle_service,data_orchestrator,today_schedule}.py`, `src/core/academic_radar/service.py`, `src/gui/app_controller.py`, `tests/test_uth_maintenance.py`.
+    - **Multi-Channel Sentry (`release` + `develop` + `IPA_LTS` + Package Format Tags) (`swarm/v270-sentry-channels` -> `8d82904`)**: `src/core/distribution.py`, `src/diagnostics/{release_config,models,redaction,runtime,transport}.py`, `scripts/{release_metadata,generate_public_runtime_config}.py`, `scripts/build_android.ps1`, `.github/workflows/{release,build-android,build-ios,build-msstore,package-benchmark}.yml`, `tests/test_sentry_distribution_channels.py`.
+    - **Submitted-Activity & THNN Notification Precision (`swarm/v270-notif-submitted` -> `7b76c01`)**: `src/core/{activity_status,data_orchestrator,notification_policy,notification_types,ws_functions}.py`, `src/core/courses/cache_store.py`, `src/gui/{app_controller,components/courses/activity_views,controllers/courses_coordinator,controllers/refresh_coordinator}.py`, `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/src/main/kotlin/com/uthelper/backgroundsync/{data/ForegroundActivityImporter,network/MoodleWsClient,notification/NotificationPolicy,worker/MoodleSyncWorker}.kt`, `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/android/src/test/kotlin/com/uthelper/backgroundsync/notification/SubmittedAndThnnNotificationTest.kt`, `extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/ios/Classes/UthBackgroundSyncPlugin.swift`, `tests/test_submitted_notification_simulation.py`.
+    - **Cross-Slice Wiring & Canonical `2.7.0` Release Bump (`f1c15c2`, `c4e5ff7`, HEAD)**: `src/gui/app_controller.py`, `pyproject.toml`, `README.md`, `docs/README.md`, `docs/releases/2.7.0.md`, `docs/architecture/refactoring-log.md`, `tests/{test_uth_maintenance,test_release_metadata,test_settings_credits_and_version}.py`.
+- **Changes**:
+  - **Unified `Tháng` | `Tuần` Calendar & Fixed `172px` PC Schedule Cards**: Replaced the 3-mode PC / 2-mode Mobile split and mobile `"Lịch học"` header button with a single 2-mode `Tháng` | `Tuần` segmented control (`no_wrap=True`, `padding=symmetric(horizontal=16)`) embedding `ScheduleWeekView(embedded_in_calendar=True)` on both Desktop and Mobile while preserving `self._view_mode = "schedule"` compatibility. Added a `T2..CN` 7-day strip + interleaved Moodle deadline cards in narrow `<920px` `Tuần` agenda mode, `height=_WEEK_SESSION_CARD_HEIGHT` (`172px`) uniform session cards with `2`-line `ELLIPSIS` clamping in wide 7-column mode, cancellation-safe `hydrate_and_ensure_weeks` (`_loading` cleanup on `CancelledError` + same-target task reuse), and viewport width forwarding from `AppController._apply_responsive_layout`.
+  - **Grades Pre-Modal Scroll Lock, Account Reset & Stale Banner**: Captured live scroll offset via `on_scroll` (`throttle_interval=16`) with a monotonic `20ms` post-`scroll_to` cooldown + deferred follow-up pin (`_schedule_post_pin_unlock`), wrapped all 4 modal launchers (`_show_planner_dialog`, `_show_gpa_detail`, `_open_course_detail`, `AcademicRadarCard._open_metric_sheet`) with `_run_preserving_scroll` (`ft.ScrollKey("grades_overview_root")`), added `GradeOverviewView.reset()`/`clear()` for clean account teardown, and retained rendered transcript data with a WCAG AA `_stale_banner` when manual/retry refresh fails.
+  - **UTH Maintenance Window (`01:00–04:00 UTC+7`) Classification & Session Preservation**: Added pure-stdlib `src/core/maintenance.py` (`UthMaintenanceNotice`, `UthMaintenanceError`, `classify_uth_maintenance_response`, `extract_uth_maintenance_notice`, `merge_maintenance_notices`, `UTC+7` midnight reopen calculation, bounded 64KB/256KB gzip reader, Cloudflare exclusion). Wired `PortalMaintenanceError` (`PortalClient` preserving `_token`), `MoodleClient` (preserving `MOODLE_WS_TOKEN` and `_sesskey`), `MoodleService`, `DataOrchestrator.sync_result`, `TodayScheduleCoordinator` & `AcademicGradeService` (preserving cached schedules/grades), and `AppController` (`_maintenance_banner`, once-per-window `_show_maintenance_dialog` with `WebView2` occlusion, `force=True` on manual refresh / WebView / Quiz launch).
+  - **Submitted-Activity & THNN Notification Precision Across Desktop, Android & iOS**: Added pre-dispatch Moodle WS status hydration (`notification_status_hydration_candidates` + `apply_pre_dispatch_status_hydration` with cancellation early-abort) before `save_server_snapshot` / `import_activities` / `notifier.dispatch` so unverified `action_events` `'new'` items never fire false alerts; resolved team/group submissions (`teamsubmissionstatus`) and direct lecturer gradebook grading (`gradingstatus == "graded"` / `feedback.grade`) in both Python (`DataOrchestrator._fetch_one_activity_status`, `activity_status.py`) and Android (`MoodleWsClient.kt`); isolated `site_kind` (`courses` vs `thnn` with receipt-compatible `ActivityNotification.key`) so `unknown` blocks only WS-verifiable Courses modules (`/mod/assign/`, `/mod/quiz/`) while keeping THNN calendar deadlines and Courses `mod_scorm`/`mod_lesson` deadlines eligible; promoted completed THNN modules from `CourseCacheStore` (`completed_cmids_for_source("thnn")`) and `QuizActivityView` (`_forward_quiz_status_with_epoch`); preserved unexpired foreign-site (`thnn:*`) Room rows across `MoodleSyncWorker` runs while blocking stale `"not_submitted"` carry-over on transient WS status failures; and aligned iOS `UthBackgroundSyncPlugin.swift` status/module filtering without altering Dashboard `[ NỘP MUỘN ]` late-submission display.
+  - **Multi-Channel Sentry Telemetry & `IPA_LTS`**: Added `DistributionChannel.IPA_LTS = "ipa_lts"`, extended `diagnostics-config.json` to Schema v2 (`build_environment`, `package_format`) with full Schema v1 backward compatibility, omitted unset fields via `@model_serializer(mode="wrap")` on `DiagnosticContext`/`DiagnosticReport`, refined Windows `exe_lts` `exe_msi` into `"exe"` vs `"msi"` via `read_install_channel()`, ignored `UthMaintenanceError` in `DiagnosticRuntime._record_exception`, emitted `dist` + `distribution_channel`/`package_format`/`build_track` tags in `transport.py`, and updated all CI workflows and `build_android.ps1` on single lines (`environment: release` on `getsentry/action-release`).
+- **Verification**:
+  - `ruff check src tests scripts extensions/flet_uth_quiz/src extensions/flet_uth_quiz/tests extensions/flet_uth_background_sync/src extensions/flet_uth_background_sync/tests`: **All checks passed!**.
+  - Android Gradle Robolectric unit tests (`extensions/flet_uth_background_sync` `:testDebugUnitTest`): **BUILD SUCCESSFUL**.
+  - Full `pytest` suite (`tests`, `extensions/flet_uth_quiz/tests`, `extensions/flet_uth_background_sync/tests`): **3604 passed, 27 skipped, 0 failed**.
+
+## PR #143 Calendar Schedule Highlight Regression (2026-11-27)
+
+- Added a regression test that hooks `page.update()` and verifies the schedule
   tab is already transparent while rendering both Week and Month after leaving
   Schedule mode.
-- **Verification (local Windows, Python 3.12, 2026-11-27)**:
+- **Verification (local Windows, Python 3.12)**:
   - `python -m pytest tests/test_calendar_week_view.py -q --tb=short`: **45 passed**.
   - `ruff check src tests`: **All checks passed**.
   - `python -m pytest tests -q --tb=short`: **3436 passed, 38 skipped, 3 failed**.
-    The three failures are in unrelated cache/Quiz tests:
+    The failures were in unrelated cache/Quiz tests:
     `test_default_user_data_dir_and_filename_sanitization`,
     `test_live_safe_exam_browser_requirement_preserves_browser_recovery`, and
     `test_late_old_session_error_cannot_clear_new_open_pending_cookies`.
-
-
-
-
+- After syncing `develop` on 2026-11-28, the calendar-focused suite passed again:
+  **52 passed**; `ruff check src tests`: **All checks passed**.
 

@@ -131,24 +131,29 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $buildNumber) { throw "Build number resolution failed" }
           "MSSTORE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          if ($LASTEXITCODE -ne 0) { throw "Runtime version generation failed" }
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
-          if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
-          $clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
-          if ([string]::IsNullOrWhiteSpace($env:CL)) {
-            $env:CL = $clFlag
-          } elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
-            $env:CL = "$($env:CL.Trim()) $clFlag"
+          $buildEnv = if ($env:GITHUB_REF -eq "refs/heads/main" -or $env:GITHUB_REF -like "refs/tags/v*") { "release" } else { "develop" }
+          try {
+            python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+            if ($LASTEXITCODE -ne 0) { throw "Runtime version generation failed" }
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --build-environment "$buildEnv" --package-format msix --output src/assets/diagnostics-config.json --distribution-channel msstore --distribution-output src/assets/distribution-channel.json
+            if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
+            $clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
+            if ([string]::IsNullOrWhiteSpace($env:CL)) {
+              $env:CL = $clFlag
+            } elseif ($env:CL -notmatch '(?:^|\s)[/-]D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS(?:=\S*)?(?=\s|$)') {
+              $env:CL = "$($env:CL.Trim()) $clFlag"
+            }
+            flet build windows --build-version "$version" --build-number "$buildNumber" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
+            if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed" }
+            python scripts/verify_flutter_diagnostics.py --template build/support/flet-build-template-0.86.5-diagnostics.zip --project-root build/flutter
+            if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
+            python scripts/prepare_windows_bundle.py build/windows
+            if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
+            python scripts/verify_windows_bundle.py build/windows --expected-version "$version" --strict-site-packages
+            if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
+          } finally {
+            Remove-Item -LiteralPath "src/assets/distribution-channel.json" -Force -ErrorAction SilentlyContinue
           }
-          flet build windows --build-version "$version" --build-number "$buildNumber" --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
-          if ($LASTEXITCODE -ne 0) { throw "Flet Windows build failed" }
-          python scripts/verify_flutter_diagnostics.py --template build/support/flet-build-template-0.86.5-diagnostics.zip --project-root build/flutter
-          if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
-          python scripts/prepare_windows_bundle.py build/windows
-          if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
-          python scripts/verify_windows_bundle.py build/windows --expected-version "$version" --strict-site-packages
-          if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
 
       - name: Package and verify Microsoft Store MSIX
         timeout-minutes: 20
