@@ -923,17 +923,16 @@ def test_settings_view_cache_stats_and_clear_handles_courses_and_preview_caches(
 # ---------------------------------------------------------------------------
 
 
-def test_grade_overview_open_courses_routes_to_course_grades_view_preserving_grades_rail():
+def test_grade_overview_omits_header_courses_btn_while_view_manager_preserves_grades_rail():
     async def _run() -> None:
         from gui.components.grade_overview_view import GradeOverviewView
 
-        opened_courses = Mock()
-        grade_view = GradeOverviewView(on_open_courses=opened_courses)
-        courses_btn = grade_view._courses_btn
-        assert courses_btn is not None
-        assert courses_btn.height == 44
-        courses_btn.on_click(None)
-        opened_courses.assert_called_once()
+        grade_view = GradeOverviewView()
+        assert not hasattr(grade_view, "_courses_btn")
+        header_labels = [
+            c.label for c in grade_view._header.controls if isinstance(c, ft.Semantics)
+        ]
+        assert "Môn học" not in header_labels
 
         destinations: list[str] = []
         page = _FakePage(width=1200)

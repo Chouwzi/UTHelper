@@ -3528,7 +3528,6 @@ class AppController:
             on_refresh=lambda: self._safe_run_task(lambda: self._show_grades(force_refresh=True)),
             page=self.page,
             moodle_courses_provider=self._get_moodle_course_grades,
-            on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
             course_grades_lookup=self._lookup_moodle_course_grades_cached,
             course_grades_async_lookup=self._fetch_moodle_course_grades_async,
             on_open_roadmap=lambda: self._safe_run_task(self._show_roadmap),

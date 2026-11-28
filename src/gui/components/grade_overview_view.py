@@ -123,15 +123,6 @@ class GradeOverviewView(ft.Container):
             size_constraints=btn_constraints,
             on_click=self._handle_refresh,
         )
-        self._courses_btn = ft.TextButton(
-            "Môn học",
-            height=44,
-            on_click=self._handle_open_courses,
-            style=ft.ButtonStyle(
-                color=C.ACCENT,
-                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
-            ),
-        )
         self._planner_btn = ft.IconButton(
             icon=ft.Icons.CALCULATE_ROUNDED,
             icon_color=C.TEXT_SECONDARY,
@@ -145,7 +136,6 @@ class GradeOverviewView(ft.Container):
             controls=[
                 ft.Semantics(label="Quay lại", button=True, content=self._back_btn),
                 self._title,
-                ft.Semantics(label="Môn học", button=True, content=self._courses_btn),
                 ft.Semantics(label="Tính GPA mong muốn", button=True, content=self._planner_btn),
                 ft.Semantics(label="Làm mới bảng điểm từ Portal", button=True, content=self._refresh_btn),
             ],
@@ -579,10 +569,15 @@ class GradeOverviewView(ft.Container):
             if 0 <= self._selected_semester_idx < len(self._semesters)
             else self._semesters[0]
         )
-        self._gpa_target_card = GpaTargetCard(target_text=self._gpa_target_card._target_text)
-        self._gpa_target_card.set_semester(sem)
-        self._graduation_card = GraduationGpaCard(target_text=self._graduation_card._target_text)
-        self._graduation_card.set_data(self._semesters, self._progress)
+        self._gpa_target_card = GpaTargetCard(
+            target_text=self._gpa_target_card._target_text,
+            semester=sem,
+        )
+        self._graduation_card = GraduationGpaCard(
+            target_text=self._graduation_card._target_text,
+            semesters=self._semesters,
+            progress=self._progress,
+        )
 
         # Khung cuộn phải có chiều cao giới hạn, nếu không Flutter không dựng được dialog
         try:
@@ -1018,10 +1013,6 @@ class GradeOverviewView(ft.Container):
         self._stale_banner.border = ft.Border.all(1, C.WARNING)
         self._stale_icon.color = C.WARNING
         self._stale_text.color = C.TEXT_PRIMARY
-        self._courses_btn.style = ft.ButtonStyle(
-            color=C.ACCENT,
-            padding=ft.Padding.symmetric(horizontal=8, vertical=0),
-        )
         self._planner_btn.icon_color = C.TEXT_SECONDARY
         self._roadmap_action.bgcolor = C.SURFACE
         self._roadmap_action.border = ft.Border.all(1, C.BORDER)
