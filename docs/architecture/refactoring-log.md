@@ -2761,3 +2761,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 - After syncing `develop` on 2026-11-28, the calendar-focused suite passed again:
   **52 passed**; `ruff check src tests`: **All checks passed**.
 
+## Calendar Week-First Default & Schedule Month Date-Picker Popup (2026-11-28)
+
+- **Branch & Scope**: `feature/schedule-month-date-picker` — `src/gui/components/{calendar_view,schedule_week_view}.py`, `tests/{test_calendar_week_view,test_schedule_week_view,test_theme_propagation}.py`, `docs/releases/2.7.0.md`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - **Week-First Mode Toggle & Default `Tuần` on Opening `Lịch` (`CalendarView`)**: Reordered `CalendarView._mode_toggle` pills to `[Tuần, Tháng]` on Mobile and `[Tuần, Tháng, Lịch học]` on Desktop, changed `CalendarView.__init__` default `_view_mode` to `"week"` (pre-seeding lightweight 88px 7-day week strips on startup), and updated `CalendarView.show()` so clicking `Lịch` always opens on `Tuần` anchored to `date.today()` while preserving active mode across `DetailView` back navigation and background `update_data()` refreshes.
+  - **Month Date-Picker Dialog on `ScheduleWeekView` (`_show_month_date_picker`)**: Made `ScheduleWeekView._week_label_box` interactive (`44px` touch target, `Semantics` button, subtle chevron indicator refreshed in `update_theme()`) to open a Monday-first Vietnamese month calendar `AlertDialog` (`Tháng M, YYYY`, `<`/`>` month navigation with year rollover, active week band highlight, selected day + today highlight, cached class dots, `"Hôm nay"` shortcut, and `Escape` dismiss) that jumps directly to any chosen date/week on 1 click (`self._go(target)`).
+- **Verification**:
+  - `ruff check src tests`: **All checks passed!**.
+  - Full `pytest` suite (`tests/`): **3540 passed, 26 skipped, 0 failed** (3,609 passed across root + extension test suites).
+

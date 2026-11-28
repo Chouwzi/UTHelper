@@ -33,14 +33,15 @@ def test_month_period_cells_keep_absolute_dates_after_anchor_changes():
 
 def test_seeding_month_and_week_modes_always_builds_three_slots():
     view = CalendarView(_page_stub())
+    assert view._view_mode == "week"
+    assert len(view._period_pages) == 3
+    assert view._period_pages[1].anchor == view._week_start
+
+    view._toggle_view_mode("month")
+
     assert [page.anchor for page in view._period_pages] == list(
         month_slot_anchors(MonthAnchor(view._year, view._month))
     )
-
-    view._toggle_view_mode("week")
-
-    assert len(view._period_pages) == 3
-    assert view._period_pages[1].anchor == view._week_start
 
 
 @pytest.mark.parametrize("target_mode", ["week", "month"])
@@ -63,6 +64,7 @@ def test_schedule_tab_is_unhighlighted_during_calendar_mode_page_update(target_m
 
 def test_page_change_advances_month_once_and_recenters():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 12
     view._selected_day = 20
     view._seed_period_pages()
@@ -83,6 +85,7 @@ def test_page_change_advances_month_once_and_recenters():
 
 def test_recenter_and_transition_events_do_not_advance_twice():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     before = (view._year, view._month)
     view._pager_recentering = True
     asyncio.run(view._on_period_page_change(SimpleNamespace(data="1")))
@@ -117,6 +120,7 @@ def test_mobile_keeps_page_view_while_desktop_uses_native_dismissible():
 
 def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 12
     view._seed_period_pages()
     dismissed = view._period_dismissible
@@ -138,6 +142,8 @@ def test_native_desktop_dismiss_commits_next_month_and_replaces_swiped_control()
 def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
     page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
     view = CalendarView(page)
+    view._toggle_view_mode("month")
+    page.update.reset_mock()
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     old_underlay = view._desktop_period_underlay.content
@@ -174,6 +180,7 @@ def test_confirm_dismiss_updates_target_underlay_and_header_before_removal():
 def test_confirm_dismiss_resolves_each_replacement_before_next_drag():
     page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
     view = CalendarView(page)
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
 
@@ -216,6 +223,7 @@ def test_rejected_confirm_explicitly_releases_flet_drag_lock():
 def test_missing_dismiss_event_is_rearmed_by_bounded_recovery():
     page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
     view = CalendarView(page)
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     source = view._period_dismissible
@@ -240,6 +248,7 @@ def test_missing_dismiss_event_is_rearmed_by_bounded_recovery():
 
 def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     stale_source = view._period_dismissible
@@ -279,6 +288,7 @@ def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
 
 def test_current_swipe_heals_orphaned_pending_control():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     current_source = view._period_dismissible
@@ -301,6 +311,7 @@ def test_current_swipe_heals_orphaned_pending_control():
 
 def test_native_desktop_dismiss_reuses_two_adjacent_period_pages():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     old_pages = list(view._period_pages)
@@ -318,6 +329,7 @@ def test_native_desktop_dismiss_reuses_two_adjacent_period_pages():
 
 def test_native_desktop_reverse_dismiss_reuses_two_adjacent_period_pages():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     old_pages = list(view._period_pages)
@@ -363,6 +375,7 @@ def test_release_frame_preview_keeps_activity_dot_and_count_badge():
 
 def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
 
     strip = view._period_dismissible.content
     assert isinstance(strip, ft.Stack)
@@ -396,6 +409,8 @@ def test_native_desktop_drag_moves_adjacent_pages_as_one_clipped_strip():
 def test_native_desktop_dismiss_batches_only_changed_subtrees_and_can_repeat():
     page = SimpleNamespace(update=MagicMock(), run_task=lambda *_args: None)
     view = CalendarView(page)
+    view._toggle_view_mode("month")
+    page.update.reset_mock()
     view._year, view._month = 2026, 8
     view._seed_period_pages()
     first = view._period_dismissible
@@ -465,6 +480,7 @@ def test_native_desktop_drag_uses_flutter_snap_without_python_frame_events():
 
 def test_unmounted_arrow_navigation_uses_same_logical_period_pipeline():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     view._year, view._month = 2026, 12
 
     asyncio.run(view._request_period_navigation(1))
@@ -506,23 +522,24 @@ def test_rapid_navigation_requests_do_not_queue_multiple_page_changes():
 
 def test_today_and_mode_switch_reseed_the_center_slot():
     view = CalendarView(_page_stub())
-    view._year, view._month = 2024, 1
+    view._week_start = date(2024, 1, 1)
 
     view._go_today()
+
+    assert view._period_pager.selected_index == 1
+    assert view._period_pages[1].anchor == view._week_start
+
+    view._toggle_view_mode("month")
 
     assert view._period_pager.selected_index == 1
     assert view._period_pages[1].anchor == MonthAnchor(
         date.today().year, date.today().month
     )
 
-    view._toggle_view_mode("week")
-
-    assert view._period_pager.selected_index == 1
-    assert view._period_pages[1].anchor == view._week_start
-
 
 def test_data_refresh_rebuilds_all_three_period_pages():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     original_controls = [period.control for period in view._period_pages]
 
     view.update_data(
@@ -547,11 +564,11 @@ def test_data_refresh_rebuilds_all_three_period_pages():
 def test_period_pager_has_bounded_height_for_each_view_mode():
     view = CalendarView(_page_stub())
 
-    assert view._period_pager.height == 316
-
-    view._toggle_view_mode("week")
-
     assert view._period_pager.height == 88
+
+    view._toggle_view_mode("month")
+
+    assert view._period_pager.height == 316
 
 
 def test_month_period_page_uses_count_badge_for_three_or_more_deadlines():
@@ -612,6 +629,7 @@ def test_mode_switch_publishes_week_pager_in_the_same_ui_frame():
     view = CalendarView(
         SimpleNamespace(update=observe_update, run_task=lambda *_args: None)
     )
+    view._toggle_view_mode("month")
     holder["view"] = view
 
     view._toggle_view_mode("week")
@@ -622,6 +640,7 @@ def test_mode_switch_publishes_week_pager_in_the_same_ui_frame():
 
 def test_month_date_click_repaints_the_mounted_period_cell_immediately():
     view = CalendarView(_page_stub())
+    view._toggle_view_mode("month")
     selected = date(2026, 8, 20)
     view._year, view._month = selected.year, selected.month
     view._selected_day = None
@@ -986,6 +1005,7 @@ def test_shift_bars_and_compact_room_badge_handle_cancelled_only_vs_mixed_shifts
     ]
 
     # Check month cell subtle 10x2.5 accent bar + preserved 3+ count badge
+    cal._toggle_view_mode("month")
     cal._year, cal._month = 2026, 11
     cal._selected_day = monday.day
     cal._selected_date = monday
@@ -1083,7 +1103,8 @@ def test_week_navigation_advances_selected_weekday_and_filter_chips_switch_clean
     )
     cal._selected_date = wednesday
     cal._week_start = monday
-    cal._toggle_view_mode("week")
+    cal._reset_period_pager()
+    cal._render_week()
 
     assert "2 ca học" in cal._month_summary.value
     assert "1 bài tập" in cal._month_summary.value
@@ -1150,7 +1171,8 @@ def test_reset_schedule_clears_class_indicators_and_timeline_rows_across_account
     cal._year, cal._month, cal._selected_day = monday.year, monday.month, monday.day
     cal._selected_date = monday
     cal._week_start = monday
-    cal._toggle_view_mode("week")
+    cal._reset_period_pager()
+    cal._render_week()
     cal._filter_week_chip.on_click(None)
     assert cal._detail_filter_mode == "week_classes"
     assert len(cal._day_list.controls) > 0
@@ -1218,7 +1240,8 @@ def test_day_tap_and_overlapping_month_swipe_never_cancel_or_wedge_inflight_week
         )
         cal._selected_date = week_start
         cal._week_start = week_start
-        cal._toggle_view_mode("week")
+        cal._reset_period_pager()
+        cal._render_week()
 
         await asyncio.sleep(0.01)
         assert week_start in cal._schedule_view._loading
@@ -1290,6 +1313,61 @@ def test_hidden_calendar_update_theme_and_reset_do_not_trigger_network_schedule_
 
     assert scheduled_tasks == []
     assert fetch_calls == []
+
+
+def test_calendar_defaults_to_week_mode_places_week_before_month_and_resets_to_week_on_show():
+    from gui.core.theme import C
+
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        update=lambda *_a: None,
+        run_task=lambda *_a, **_k: None,
+    )
+    cal = CalendarView(page)
+    active_bg = ft.Colors.with_opacity(0.19, C.ACCENT)
+
+    # 1. Mode toggle order: Tuần -> Tháng -> Lịch học
+    assert cal._mode_toggle.content.controls == [
+        cal._mode_week_btn,
+        cal._mode_month_btn,
+        cal._mode_schedule_btn,
+    ]
+    assert cal._mode_week_text.value == "Tuần"
+    assert cal._mode_month_text.value == "Tháng"
+    assert cal._mode_schedule_text.value == "Lịch học"
+
+    # 2. Initial default mode is "week"
+    assert cal._view_mode == "week"
+    assert cal._grid.visible is False
+    assert cal._week_strip.visible is True
+    assert cal._period_pager.height == 88
+    assert cal._desktop_period_host.height == 88
+    assert cal._mode_week_btn.bgcolor == active_bg
+    assert cal._mode_month_btn.bgcolor == "transparent"
+    assert cal._mode_schedule_btn.bgcolor == "transparent"
+
+    # 3. Re-opening Calendar via show() from "month" or "schedule" defaults back to "week"
+    cal._toggle_view_mode("month")
+    assert cal._view_mode == "month"
+    cal.hide()
+    cal.show([])
+    assert cal._view_mode == "week"
+    assert cal._grid.visible is False
+    assert cal._week_strip.visible is True
+    assert cal._mode_week_btn.bgcolor == active_bg
+    assert cal._mode_month_btn.bgcolor == "transparent"
+    assert cal._month_label.value.startswith("Tuần ")
+
+    cal._toggle_view_mode("schedule")
+    assert cal._view_mode == "schedule"
+    cal.hide()
+    cal.show([])
+    assert cal._view_mode == "week"
+    assert cal._schedule_view.visible is False
+    assert cal._detail_panel.visible is True
+    assert cal._mode_week_btn.bgcolor == active_bg
+    assert cal._mode_schedule_btn.bgcolor == "transparent"
 
 
 if __name__ == "__main__":
