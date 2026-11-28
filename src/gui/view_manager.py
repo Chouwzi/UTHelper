@@ -193,6 +193,7 @@ class ViewManager:
         self.grade_overview_view.visible = False
         if self.course_grades_view is not None:
             self.course_grades_view.visible = False
+        self._hide_roadmap()
         on_shown = getattr(self.courses_view, "on_tab_shown", None)
         if callable(on_shown):
             on_shown()
@@ -574,6 +575,7 @@ class ViewManager:
             self.course_grades_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
+        self._hide_roadmap()
 
         self.detail_view.offset = ft.Offset(0, 0)
         self.detail_view.opacity = 1.0
