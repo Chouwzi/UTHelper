@@ -1852,17 +1852,15 @@ class ScheduleWeekView(ft.Container):
             suspended_watermark = ft.Container(
                 content=ft.Text(
                     "Tạm ngưng",
-                    size=14,
-                    weight=ft.FontWeight.W_700,
-                    color=ft.Colors.with_opacity(0.34, C.CRITICAL),
+                    size=16,
+                    weight=ft.FontWeight.W_800,
+                    color=ft.Colors.with_opacity(0.68, C.CRITICAL),
                     text_align=ft.TextAlign.CENTER,
                     no_wrap=True,
                 ),
                 width=120,
                 height=24,
                 alignment=ft.Alignment.CENTER,
-                left=-25,
-                top=31,
                 rotate=ft.Rotate(
                     angle=-0.785,
                     alignment=ft.Alignment.CENTER,

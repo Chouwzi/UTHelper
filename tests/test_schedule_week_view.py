@@ -862,14 +862,15 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     watermark = card_long.content.controls[1]
     assert watermark.width == 120
     assert watermark.height == 24
-    assert watermark.left == -25
-    assert watermark.top == 31
+    assert watermark.left is None
+    assert watermark.top is None
     assert watermark.bgcolor is None
     assert watermark.rotate.angle == -0.785
     assert "Tạm ngưng" in _text_values(watermark)
     watermark_text = watermark.content
-    assert watermark_text.size == 14
-    assert watermark_text.color == ft.Colors.with_opacity(0.34, C.CRITICAL)
+    assert watermark_text.size == 16
+    assert watermark_text.weight == ft.FontWeight.W_800
+    assert watermark_text.color == ft.Colors.with_opacity(0.68, C.CRITICAL)
 
     assert card_body.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
     summary_col = card_body.controls[0]
