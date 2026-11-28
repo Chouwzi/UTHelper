@@ -26,6 +26,12 @@ from core.demo_sandbox import (
     render_demo_session_html,
     verify_demo_credentials_cached,
 )
+from core.maintenance import (
+    MaintenanceNotice,
+    UthMaintenanceError,
+    detect_uth_maintenance,
+    read_bounded_error_body,
+)
 from core.moodle_sites import (
     COURSES_MOODLE_SITE,
     MoodleSite,
@@ -373,6 +379,72 @@ def _read_raw_with_optional_gzip(response, max_bytes: int) -> bytes:
     return bytes(out[:max_bytes])
 
 
+def _read_html_response_bytes(response, max_bytes: int = 2 * 1024 * 1024) -> bytes:
+    """Read HTML response bytes up to ``max_bytes``, gunzipping when gzip-encoded."""
+    info = (
+        response.info()
+        if hasattr(response, "info")
+        else getattr(response, "headers", None)
+    )
+    encoding = (
+        str(info.get("Content-Encoding") or "").strip().lower()
+        if info is not None and hasattr(info, "get")
+        else ""
+    )
+    if encoding != "gzip":
+        try:
+            body = response.read(max_bytes + 1)
+        except TypeError:
+            body = response.read()
+        if len(body) > max_bytes:
+            raise ValueError("Moodle web response was too large")
+        return body
+
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = bytearray()
+    compressed_limit = max_bytes + 65536
+    compressed_read = 0
+    chunk_size = 65536
+    while True:
+        remaining_comp = compressed_limit - compressed_read
+        if remaining_comp <= 0:
+            extra = response.read(1)
+            if extra:
+                raise ValueError("Moodle web response was too large")
+            break
+        try:
+            chunk = response.read(min(chunk_size, remaining_comp))
+        except TypeError:
+            chunk = response.read()
+        if not chunk:
+            break
+        compressed_read += len(chunk)
+        allowed = (max_bytes + 1) - len(out)
+        try:
+            piece = decompressor.decompress(chunk, allowed)
+        except zlib.error:
+            if not out:
+                if len(chunk) > max_bytes:
+                    raise ValueError("Moodle web response was too large")
+                return chunk
+            break
+        if piece:
+            out.extend(piece)
+        if len(out) > max_bytes or (decompressor.unconsumed_tail and len(out) >= max_bytes):
+            raise ValueError("Moodle web response was too large")
+        if decompressor.eof:
+            break
+    try:
+        tail = decompressor.flush((max_bytes + 1) - len(out))
+        if tail:
+            out.extend(tail)
+    except zlib.error:
+        pass
+    if len(out) > max_bytes:
+        raise ValueError("Moodle web response was too large")
+    return bytes(out)
+
+
 @dataclass(frozen=True)
 class DraftFileRecord:
     """The exact identity Moodle assigned to an uploaded draft file."""
@@ -657,6 +729,62 @@ class MoodleClient:
         self._throttle_lock = threading.Lock()
         self._open_session_meta_local = threading.local()
         self.last_grade_report_error = ""
+        self.last_maintenance_notice: Optional[MaintenanceNotice] = None
+
+    def _maintenance_source(self, url: str = "") -> str:
+        probe = f"{url} {self.moodle_site_origin}".lower()
+        if "portal" in probe:
+            return "portal"
+        if "thnn" in probe:
+            return "thnn"
+        if "courses" in probe or "elearning" in probe:
+            return "courses"
+        return "uth"
+
+    def _record_maintenance(self, notice: MaintenanceNotice) -> MaintenanceNotice:
+        self.last_maintenance_notice = notice
+        self._record_session_login_error("maintenance")
+        return notice
+
+    def _clear_maintenance(self) -> None:
+        self.last_maintenance_notice = None
+
+    def _inspect_http_error_for_maintenance(
+        self, exc: urllib.error.HTTPError, url: str = ""
+    ) -> Optional[MaintenanceNotice]:
+        if exc.code not in (403, 502, 503):
+            return None
+        err_body, err_ct = read_bounded_error_body(exc)
+        notice = detect_uth_maintenance(
+            status=exc.code,
+            body=err_body,
+            content_type=err_ct,
+            source=self._maintenance_source(url),
+        )
+        if notice is not None:
+            self._record_maintenance(notice)
+        return notice
+
+    def _inspect_payload_for_maintenance(
+        self,
+        *,
+        status: int,
+        body: Optional[bytes],
+        content_type: str = "",
+        url: str = "",
+    ) -> Optional[MaintenanceNotice]:
+        if body:
+            notice = detect_uth_maintenance(
+                status=status,
+                body=body[:65536],
+                content_type=content_type,
+                source=self._maintenance_source(url),
+            )
+            if notice is not None:
+                return self._record_maintenance(notice)
+        if 200 <= status < 400:
+            self._clear_maintenance()
+        return None
 
     def _get_lock(self, attr_name: str, *, reentrant: bool = False):
         lock = getattr(self, attr_name, None)
@@ -871,17 +999,41 @@ class MoodleClient:
             url,
             data=encoded,
             method="POST" if data is not None else "GET",
-            headers={"User-Agent": _DEFAULT_UA, "Accept": "text/html"},
+            headers={
+                "User-Agent": _DEFAULT_UA,
+                "Accept": "text/html",
+                "Accept-Encoding": "gzip",
+            },
         )
-        with opener.open(request, timeout=timeout) as response:
-            final_url = response.geturl()
-            parsed = urllib.parse.urlsplit(final_url)
-            final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-            if final_origin != origin:
-                raise ValueError("Moodle web response changed origin")
-            body = response.read(2 * 1024 * 1024 + 1)
-        if len(body) > 2 * 1024 * 1024:
-            raise ValueError("Moodle web response was too large")
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                final_url = response.geturl()
+                parsed = urllib.parse.urlsplit(final_url)
+                final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+                if final_origin != origin:
+                    raise ValueError("Moodle web response changed origin")
+                resp_headers = getattr(response, "headers", None)
+                resp_ct = (
+                    str(resp_headers.get("Content-Type") or "")
+                    if resp_headers is not None and hasattr(resp_headers, "get")
+                    else ""
+                )
+                body = _read_html_response_bytes(response, max_bytes=2 * 1024 * 1024)
+        except urllib.error.HTTPError as exc:
+            notice = self._inspect_http_error_for_maintenance(exc, url)
+            if notice is not None:
+                _close_response_quietly(exc)
+                raise UthMaintenanceError(notice) from exc
+            raise
+        notice = self._inspect_payload_for_maintenance(
+            status=status,
+            body=body,
+            content_type=resp_ct,
+            url=final_url,
+        )
+        if notice is not None:
+            raise UthMaintenanceError(notice)
         return final_url, body.decode("utf-8", errors="replace")
 
     def get_sesskey(self) -> str:
@@ -929,14 +1081,21 @@ class MoodleClient:
             sesskey = self._sesskey
             has_cookie = self._has_moodle_session_cookie()
             auth_at = float(getattr(self, "_session_authenticated_at", 0.0) or 0.0)
+            owner = str(getattr(self, "_session_owner", "") or "").strip().casefold()
             gen = int(getattr(self, "_session_generation", 0))
 
+        if (
+            bool(entry_user)
+            and has_cookie
+            and auth_at > 0.0
+            and (time.monotonic() - auth_at) < max_idle_seconds
+            and (not owner or owner == entry_user)
+        ):
+            return True
         if not sesskey or not has_cookie:
             return bool(
                 self.login_session(force=True) if sesskey else self.login_session()
             )
-        if auth_at > 0.0 and (time.monotonic() - auth_at) < max_idle_seconds:
-            return True
 
         budget = min(self._LIVE_SESSION_PROBE_TIMEOUT, max(0.1, float(probe_timeout)))
         probe_start = time.perf_counter()
@@ -958,7 +1117,11 @@ class MoodleClient:
             meta.ajax_no_auto_login = prev_no_auto_login
             meta.ajax_expected_gen = prev_expected_gen
 
-        probe_state = "fallback"
+        probe_state = (
+            "maintenance"
+            if getattr(self, "last_maintenance_notice", None) is not None
+            else "fallback"
+        )
         if isinstance(resp, dict) and not resp.get("error"):
             data = resp.get("data")
             if (
@@ -1008,6 +1171,8 @@ class MoodleClient:
                     meta.html_opener = probe_opener
                     try:
                         final_url, _ = self._open_html("/my/", timeout=remaining_budget)
+                    except UthMaintenanceError:
+                        probe_state = "maintenance"
                     except urllib.error.HTTPError as exc:
                         try:
                             logger.debug(
@@ -1048,6 +1213,8 @@ class MoodleClient:
                     self._session_authenticated_at = time.monotonic()
                     return True
                 return False
+            if probe_state == "maintenance":
+                return False
             if probe_state == "network_error":
                 return self._has_moodle_session_cookie()
 
@@ -1079,12 +1246,21 @@ class MoodleClient:
             )
             had_sesskey = bool(self._sesskey)
             has_cookie = self._has_moodle_session_cookie()
+            auth_at = float(getattr(self, "_session_authenticated_at", 0.0) or 0.0)
+            owner = str(getattr(self, "_session_owner", "") or "").strip().casefold()
+            cookie_fresh = bool(
+                entry_user
+                and has_cookie
+                and auth_at > 0.0
+                and (time.monotonic() - auth_at) < 900.0
+                and (not owner or owner == entry_user)
+            )
             prev_shared_err = self._last_login_error
             if force_relogin:
                 action = "force"
             elif ensure_login and verify_live:
-                action = "verify_live"
-            elif ensure_login and (not had_sesskey or not has_cookie):
+                action = "none" if cookie_fresh else "verify_live"
+            elif ensure_login and not cookie_fresh and (not had_sesskey or not has_cookie):
                 action = "login"
 
         if action != "none":
@@ -1102,7 +1278,15 @@ class MoodleClient:
                 return []
         elif action == "verify_live":
             try:
-                auth_ok = bool(self.ensure_live_session())
+                if (
+                    not had_sesskey
+                    and not has_cookie
+                    and getattr(self.login_session, "__func__", None)
+                    is MoodleClient.login_session
+                ):
+                    auth_ok = bool(self.login_session(require_sesskey=False))
+                else:
+                    auth_ok = bool(self.ensure_live_session())
             except Exception as exc:
                 logger.warning(
                     "Session liveness check before cookie export failed (%s)",
@@ -1111,11 +1295,18 @@ class MoodleClient:
                 auth_ok = False
         elif action == "login":
             try:
-                auth_ok = bool(
-                    self.login_session(force=True)
-                    if had_sesskey
-                    else self.login_session()
-                )
+                if (
+                    not had_sesskey
+                    and getattr(self.login_session, "__func__", None)
+                    is MoodleClient.login_session
+                ):
+                    auth_ok = bool(self.login_session(require_sesskey=False))
+                else:
+                    auth_ok = bool(
+                        self.login_session(force=True)
+                        if had_sesskey
+                        else self.login_session()
+                    )
             except Exception as exc:
                 logger.warning(
                     "Session login before cookie export failed (%s)",
@@ -1371,6 +1562,14 @@ class MoodleClient:
                     err_body = _read_raw_with_optional_gzip(
                         exc, min(max_bytes, 512 * 1024)
                     )
+                    maint_notice = detect_uth_maintenance(
+                        status=int(exc.code),
+                        body=err_body[:65536],
+                        content_type=err_ct,
+                        source=self._maintenance_source(target_url),
+                    )
+                    if maint_notice is not None:
+                        self._record_maintenance(maint_notice)
                     return int(exc.code), str(exc.geturl() or target_url), err_ct, err_body
                 finally:
                     exc.close()
@@ -1381,6 +1580,15 @@ class MoodleClient:
             final_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
             if final_origin != origin:
                 raise ValueError("Moodle response changed origin")
+            if status in (403, 502, 503) or "html" in resp_ct.lower():
+                self._inspect_payload_for_maintenance(
+                    status=status,
+                    body=raw,
+                    content_type=resp_ct,
+                    url=final_url,
+                )
+            elif 200 <= status < 400:
+                self._clear_maintenance()
             if parsed.path.endswith("/login/index.php") and not path.startswith("/login/index.php"):
                 with self._get_lock("_session_lock", reentrant=True):
                     if int(getattr(self, "_session_generation", 0)) == gen:
@@ -1719,6 +1927,13 @@ class MoodleClient:
                     self._record_session_login_error("server_error")
                     return False
 
+            except UthMaintenanceError as e:
+                logger.warning(
+                    "Moodle HTML session login deferred due to maintenance (%s)",
+                    e.notice.window_text or "maintenance",
+                )
+                self._record_maintenance(e.notice)
+                return False
             except Exception as e:
                 if quiz_lease is not None:
                     logger.warning(
@@ -1805,6 +2020,13 @@ class MoodleClient:
         ) or 20
         try:
             with opener.open(request, timeout=req_timeout) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                resp_headers = getattr(response, "headers", None)
+                resp_ct = (
+                    str(resp_headers.get("Content-Type") or "")
+                    if resp_headers is not None and hasattr(resp_headers, "get")
+                    else ""
+                )
                 body = _read_bounded_response_bytes(
                     response, max_bytes=_MAX_API_RESPONSE_BYTES
                 )
@@ -1814,12 +2036,24 @@ class MoodleClient:
                 try:
                     data = json.loads(body)
                 except ValueError:
+                    self._inspect_payload_for_maintenance(
+                        status=status,
+                        body=body,
+                        content_type=resp_ct,
+                        url=url,
+                    )
                     logger.error("AJAX response không phải JSON.")
                     return None
-                
+
                 if isinstance(data, list) and len(data) > 0:
                     resp = data[0]
                     if isinstance(resp, dict) and resp.get("error"):
+                        self._inspect_payload_for_maintenance(
+                            status=status,
+                            body=body,
+                            content_type="application/json",
+                            url=url,
+                        )
                         if self._is_ajax_session_error(resp):
                             logger.debug(
                                 "AJAX API session error (%s): %s - %s",
@@ -1835,8 +2069,23 @@ class MoodleClient:
                             logger.error(
                                 f"AJAX API error: {resp.get('exception')} - {resp.get('message')}"
                             )
+                    elif isinstance(resp, dict):
+                        self._clear_maintenance()
+                        with self._get_lock("_session_lock", reentrant=True):
+                            if (
+                                int(getattr(self, "_session_generation", 0)) == gen
+                                and self._sesskey
+                            ):
+                                self._session_authenticated_at = time.monotonic()
                     return resp
                 return None
+        except urllib.error.HTTPError as e:
+            try:
+                self._inspect_http_error_for_maintenance(e, url)
+                logger.error(f"Lỗi call_ajax_api (HTTP {e.code}): {e}")
+            finally:
+                _close_response_quietly(e)
+            return None
         except Exception as e:
             logger.error(f"Lỗi call_ajax_api: {e}")
             return None
@@ -1879,6 +2128,9 @@ class MoodleClient:
                 owner = str(getattr(self, "_session_owner", "") or "")
             try:
                 final_url, body = self._open_html(path)
+            except UthMaintenanceError:
+                self.last_grade_report_error = "maintenance"
+                return None
             except Exception as exc:
                 self.last_grade_report_error = f"http:{type(exc).__name__}:{exc}"
                 logger.warning("Không tải được grade report môn %s: %s", course_id, exc)
@@ -1930,16 +2182,39 @@ class MoodleClient:
             try:
                 resp = _urlopen(req, timeout=timeout)
                 status = int(getattr(resp, "status", 200) or 200)
+                resp_info = resp.info() if hasattr(resp, "info") else getattr(resp, "headers", None)
+                resp_ct = (
+                    str(resp_info.get("Content-Type") or "")
+                    if resp_info is not None and hasattr(resp_info, "get")
+                    else ""
+                )
                 body = _read_bounded_response_bytes(resp, max_bytes=_MAX_API_RESPONSE_BYTES)
                 if body is None:
                     return status, None
                 try:
-                    return status, json.loads(body)
+                    parsed_json = json.loads(body)
                 except (json.JSONDecodeError, ValueError):
+                    self._inspect_payload_for_maintenance(
+                        status=status,
+                        body=body,
+                        content_type=resp_ct,
+                        url=url,
+                    )
                     return status, None
+                self._inspect_payload_for_maintenance(
+                    status=status,
+                    body=body,
+                    content_type="application/json",
+                    url=url,
+                )
+                return status, parsed_json
             except urllib.error.HTTPError as e:
                 code = e.code
+                maint_notice = self._inspect_http_error_for_maintenance(e, url)
                 _close_response_quietly(e)
+                if maint_notice is not None:
+                    logger.warning("HTTP %d (UTH maintenance) từ POST %s", code, url.split('?')[0])
+                    return code, None
                 if code >= 500 and attempt < max_attempts - 1:
                     backoff = random.uniform(0, min(15.0, 0.5 * (2 ** attempt)))
                     logger.warning(
@@ -1984,16 +2259,39 @@ class MoodleClient:
             try:
                 resp = _urlopen(req, timeout=timeout)
                 status = int(getattr(resp, "status", 200) or 200)
+                resp_info = resp.info() if hasattr(resp, "info") else getattr(resp, "headers", None)
+                resp_ct = (
+                    str(resp_info.get("Content-Type") or "")
+                    if resp_info is not None and hasattr(resp_info, "get")
+                    else ""
+                )
                 resp_body = _read_bounded_response_bytes(resp, max_bytes=_MAX_API_RESPONSE_BYTES)
                 if resp_body is None:
                     return status, None
                 try:
-                    return status, json.loads(resp_body)
+                    parsed_json = json.loads(resp_body)
                 except (json.JSONDecodeError, ValueError):
+                    self._inspect_payload_for_maintenance(
+                        status=status,
+                        body=resp_body,
+                        content_type=resp_ct,
+                        url=url,
+                    )
                     return status, None
+                self._inspect_payload_for_maintenance(
+                    status=status,
+                    body=resp_body,
+                    content_type="application/json",
+                    url=url,
+                )
+                return status, parsed_json
             except urllib.error.HTTPError as e:
                 code = e.code
+                maint_notice = self._inspect_http_error_for_maintenance(e, url)
                 _close_response_quietly(e)
+                if maint_notice is not None:
+                    logger.warning("HTTP %d (UTH maintenance) from POST-JSON %s", code, url.split('?')[0])
+                    return code, None
                 if code >= 500 and attempt < max_attempts - 1:
                     backoff = random.uniform(0, min(15.0, 0.5 * (2 ** attempt)))
                     time.sleep(backoff)
@@ -2059,16 +2357,39 @@ class MoodleClient:
             try:
                 resp = _urlopen(req, timeout=timeout)
                 status = int(getattr(resp, "status", 200) or 200)
+                resp_info = resp.info() if hasattr(resp, "info") else getattr(resp, "headers", None)
+                resp_ct = (
+                    str(resp_info.get("Content-Type") or "")
+                    if resp_info is not None and hasattr(resp_info, "get")
+                    else ""
+                )
                 resp_body = _read_bounded_response_bytes(resp, max_bytes=_MAX_API_RESPONSE_BYTES)
                 if resp_body is None:
                     return status, None
                 try:
-                    return status, json.loads(resp_body)
+                    parsed_json = json.loads(resp_body)
                 except (json.JSONDecodeError, ValueError):
+                    self._inspect_payload_for_maintenance(
+                        status=status,
+                        body=resp_body,
+                        content_type=resp_ct,
+                        url=url,
+                    )
                     return status, None
+                self._inspect_payload_for_maintenance(
+                    status=status,
+                    body=resp_body,
+                    content_type="application/json",
+                    url=url,
+                )
+                return status, parsed_json
             except urllib.error.HTTPError as e:
                 code = e.code
+                maint_notice = self._inspect_http_error_for_maintenance(e, url)
                 _close_response_quietly(e)
+                if maint_notice is not None:
+                    logger.warning("HTTP %d (UTH maintenance) from POST-MP %s", code, url.split('?')[0])
+                    return code, None
                 if code >= 500 and attempt < max_attempts - 1:
                     backoff = random.uniform(0, min(10.0, 1.0 * (2 ** attempt)))
                     time.sleep(backoff)
@@ -2097,10 +2418,26 @@ class MoodleClient:
         try:
             resp = _urlopen(req, timeout=timeout)
             status = int(getattr(resp, "status", 200) or 200)
+            resp_info = resp.info() if hasattr(resp, "info") else getattr(resp, "headers", None)
+            resp_ct = (
+                str(resp_info.get("Content-Type") or "")
+                if resp_info is not None and hasattr(resp_info, "get")
+                else ""
+            )
             body = _read_bounded_response_bytes(resp, max_bytes=_MAX_API_RESPONSE_BYTES)
+            if status in (403, 502, 503) or "html" in resp_ct.lower():
+                self._inspect_payload_for_maintenance(
+                    status=status,
+                    body=body,
+                    content_type=resp_ct,
+                    url=url,
+                )
+            elif 200 <= status < 400:
+                self._clear_maintenance()
             return status, body
         except urllib.error.HTTPError as e:
             code = e.code
+            self._inspect_http_error_for_maintenance(e, url)
             _close_response_quietly(e)
             logger.warning("HTTP %d from GET %s", code, url.split('?')[0])
             return code, None
@@ -2238,15 +2575,27 @@ class MoodleClient:
                 elif data:
                     error = data.get('error', 'Unknown error')
                     logger.warning(f"Không lấy được WS token: {error}")
-                    if 'invalidlogin' in data.get('errorcode', ''):
+                    if (
+                        getattr(self, "last_maintenance_notice", None) is not None
+                        or data.get('errorcode') == 'sitemaintenance'
+                    ):
+                        self._last_login_error = "maintenance"
+                    elif 'invalidlogin' in data.get('errorcode', ''):
                         self._last_login_error = "invalid_credentials"
                     else:
                         self._last_login_error = "server_error"
                     return ""
                 else:
+                    if getattr(self, "last_maintenance_notice", None) is not None:
+                        logger.warning("Không lấy được WS token do hệ thống UTH đang bảo trì.")
+                        self._last_login_error = "maintenance"
+                        return ""
                     logger.error("Response không phải JSON khi lấy WS token.")
                     self._last_login_error = "server_error"
                     return ""
+            except UthMaintenanceError as e:
+                self._record_maintenance(e.notice)
+                return ""
             except Exception as e:
                 logger.error(f"Lỗi khi lấy WS token: {e}")
                 self._last_login_error = "network_error"
@@ -2300,11 +2649,24 @@ class MoodleClient:
             self._last_login_error = ""
             return True
 
+        prev_ws_token = getattr(settings, "MOODLE_WS_TOKEN", "")
+        prev_ws_origin = getattr(settings, "MOODLE_WS_TOKEN_ORIGIN", "")
+        prev_ws_owner = getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "")
         if force and persist:
             settings.MOODLE_WS_TOKEN = ""
             settings.MOODLE_WS_TOKEN_ORIGIN = ""
             settings.MOODLE_WS_TOKEN_USERNAME = ""
         token = self._get_ws_token(username, password, force=force, persist=persist)
+        if (
+            not token
+            and force
+            and persist
+            and self._last_login_error == "maintenance"
+            and prev_ws_token
+        ):
+            settings.MOODLE_WS_TOKEN = prev_ws_token
+            settings.MOODLE_WS_TOKEN_ORIGIN = prev_ws_origin
+            settings.MOODLE_WS_TOKEN_USERNAME = prev_ws_owner
         return bool(token)
     
     def call_ws_api(self, function: str, **params) -> Optional[dict]:
@@ -2638,6 +3000,7 @@ class MoodleClient:
                 )
         except urllib.error.HTTPError as e:
             try:
+                self._inspect_http_error_for_maintenance(e, url)
                 logger.error("Download failed (HTTP %d): %s", e.code, url)
             finally:
                 e.close()
@@ -2760,6 +3123,7 @@ class MoodleClient:
                     return True
         except urllib.error.HTTPError as e:
             try:
+                self._inspect_http_error_for_maintenance(e, url)
                 logger.error("Session download failed (HTTP %d): %s", e.code, url)
             finally:
                 e.close()

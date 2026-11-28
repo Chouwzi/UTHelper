@@ -15,7 +15,7 @@ import tomllib
 _NUMERIC_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"
 VALID_DISTRIBUTION_CHANNELS = frozenset(
-    {"chplay", "apk_lts", "msstore", "exe_lts", "source"}
+    {"chplay", "apk_lts", "msstore", "exe_lts", "ipa_lts", "source"}
 )
 _ANDROID_PACKAGE_ID = re.compile(
     r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$"

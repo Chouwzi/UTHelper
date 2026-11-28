@@ -152,6 +152,8 @@ class AcademicRadarCard(ft.Container):
             )
             if closer is not None and callable(self._on_dialog_opened):
                 self._on_dialog_opened(token, closer)
+            elif closer is None and callable(self._on_dialog_dismiss):
+                self._on_dialog_dismiss(token)
 
     def _show_radar_info(self, _event=None) -> None:
         page = self._get_page()
@@ -255,20 +257,26 @@ class AcademicRadarCard(ft.Container):
             bgcolor=C.BG,
             shape=ft.RoundedRectangleBorder(radius=16),
         )
+        shown_ok = True
         try:
             page.show_dialog(dialog)
         except Exception:
-            used_overlay = True
             overlay = getattr(page, "overlay", None)
             if overlay is not None:
+                used_overlay = True
                 overlay.append(dialog)
                 dialog.open = True
                 try:
                     page.update()
                 except Exception:
                     pass
-        if callable(self._on_dialog_opened):
-            self._on_dialog_opened(token, lambda: _close_dialog(page, dialog))
+            else:
+                shown_ok = False
+        if shown_ok:
+            if callable(self._on_dialog_opened):
+                self._on_dialog_opened(token, lambda: _close_dialog(page, dialog))
+        else:
+            _notify_dismiss()
 
     def _build_ui(self) -> None:
         # Data-driven rebuilds can happen after a theme preview while this view

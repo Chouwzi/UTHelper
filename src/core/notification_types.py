@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 from typing import Any
+from urllib.parse import urlsplit
 
+from core.activity_status import extract_canonical_submission_status
 from core.time_utils import parse_datetime
 
 
@@ -27,9 +29,34 @@ def _read(value: Any, *names: str, default: Any = "") -> Any:
 
 
 def _as_text(value: Any, default: str = "") -> str:
+    if isinstance(value, bool):
+        return default
     if isinstance(value, (str, int, float)):
         return str(value)
     return default
+
+
+_COURSES_SOURCES = frozenset({"ws_api", "ws_assign_api", "ws_quiz_calendar_api"})
+
+
+def classify_uth_activity_site(site: str, url: str, source_kind: str = "") -> str:
+    """Classify an activity into ``'thnn'``, ``'courses'``, or ``'other'``."""
+    site_norm = str(site or "").strip().casefold()
+    source_norm = str(source_kind or "").strip().casefold()
+    if site_norm == "thnn" or source_norm == "thnn_sync":
+        return "thnn"
+    if site_norm == "courses" or source_norm in _COURSES_SOURCES:
+        return "courses"
+    for candidate in (site, url):
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        host = (urlsplit(raw).hostname or "").casefold()
+        if host == "thnn.ut.edu.vn" or host.endswith(".thnn.ut.edu.vn"):
+            return "thnn"
+        if host in {"courses.ut.edu.vn", "elearning.ut.edu.vn"}:
+            return "courses"
+    return "other"
 
 
 @dataclass(frozen=True)
@@ -52,12 +79,41 @@ class ActivityNotification:
     source: Any = field(default=None, compare=False, repr=False)
 
     @property
+    def site_kind(self) -> str:
+        """Return ``'thnn'``, ``'courses'``, or ``'other'``."""
+        return classify_uth_activity_site(self.site, self.url, self.source_kind)
+
+    @property
     def key(self) -> str:
-        """Stable cache key, preferring Moodle activity/event identifiers."""
+        """Stable cache key, isolating THNN from Courses while preserving legacy Courses keys."""
+        site_clean = self.site.strip().lower()
+        user_clean = self.user_id.strip().lower()
+        resolved_kind = self.site_kind
+
+        if resolved_kind == "thnn":
+            ns_parts = ["thnn"]
+            if user_clean:
+                ns_parts.append(user_clean)
+            namespace = ":".join(ns_parts)
+            source_identity = self.module_id or self.activity_id
+            if source_identity:
+                kind = self.event_type or "activity"
+                return f"{namespace}:{kind}:{source_identity}"
+            if self.url:
+                return (
+                    self.url
+                    if "thnn" in self.url.lower()
+                    else f"{namespace}:{self.url}"
+                )
+            return f"{namespace}:fallback:{self.course_id}:{self.event_type}:{self.title}"
+
+        # Preserve legacy "activity:<id>" receipt keys for default Courses items
+        # when site_identity="courses" is populated without an explicit user_id.
+        effective_site = (
+            "" if (site_clean == "courses" and not user_clean) else site_clean
+        )
         namespace = ":".join(
-            value.strip().lower()
-            for value in (self.site, self.user_id)
-            if value and value.strip()
+            value for value in (effective_site, user_clean) if value
         )
         source_identity = self.module_id or self.activity_id
         if namespace and source_identity:
@@ -79,6 +135,8 @@ class ActivityNotification:
 
     @classmethod
     def from_value(cls, value: Any) -> "ActivityNotification":
+        if isinstance(value, cls):
+            return value
         deadline = _read(value, "deadline", default=None)
         if deadline and not isinstance(deadline, datetime):
             deadline = parse_datetime(deadline)
@@ -91,15 +149,17 @@ class ActivityNotification:
             event_type=_as_text(_read(value, "event_type", "type")),
             deadline=deadline if isinstance(deadline, datetime) else None,
             url=_as_text(_read(value, "url")),
-            submission_status=_as_text(
-                _read(value, "submission_status", default="unknown"), "unknown"
-            ).lower(),
+            submission_status=extract_canonical_submission_status(value),
             revision=_as_text(
                 _read(value, "revision", "timemodified", "updated_at")
             ),
-            site=_as_text(_read(value, "site", "moodle_site", "base_url")),
+            site=_as_text(
+                _read(value, "site", "moodle_site", "base_url", "site_identity")
+            ),
             user_id=_as_text(_read(value, "user_id", "userid")),
-            source_kind=_as_text(_read(value, "source_kind", "source_type")),
+            source_kind=_as_text(
+                _read(value, "source_kind", "source_type", "source")
+            ),
             module_id=_as_text(_read(value, "cmid", "module_id", "instance")),
             source=value,
         )

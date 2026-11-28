@@ -23,10 +23,13 @@ from core.academic_radar.calculator import calculate_radar_profile
 from core.academic_radar.gpa_planner import CreditProgress
 from core.academic_radar.models import RadarProfile, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
+from core.academic_radar.overall import OverallGpa, calculate_overall_gpa
 from gui.components.academic_radar.course_components_dialog import (
     MoodleCourseGradesResult,
     show_course_components_dialog,
 )
+from gui.components.academic_radar.expected_grade_dialog import ExpectedGradeDialog
+from gui.components.academic_radar.gpa_detail_sheet import GpaDetailSheet
 from gui.components.academic_radar.grade_list_view import AcademicGradeListView
 from gui.components.course_grade_table import find_moodle_course
 from gui.components.academic_radar.gpa_target_card import GpaTargetCard
@@ -73,6 +76,10 @@ class GradeOverviewView(ft.Container):
         self._next_dialog_token: int = 0
         self._scroll_restore_token: int = 0
         self._is_restoring_scroll: bool = False
+        self._in_scroll_to_call: bool = False
+        self._restore_in_post_cooldown: bool = False
+        self._pending_post_restore_pin: bool = False
+        self._dialog_closers: dict[int, Callable[[], None]] = {}
         self._active_dialog_token: Optional[int] = None
         self._active_dialog_closer: Optional[Callable[[], None]] = None
 
@@ -204,6 +211,25 @@ class GradeOverviewView(ft.Container):
             visible=False,
         )
 
+        self._stale_icon = ft.Icon(
+            ft.Icons.CLOUD_OFF_ROUNDED, size=15, color=C.WARNING
+        )
+        self._stale_text = ft.Text(
+            "", size=11.5, color=C.TEXT_PRIMARY, expand=True
+        )
+        self._stale_banner = ft.Container(
+            content=ft.Row(
+                controls=[self._stale_icon, self._stale_text],
+                spacing=6,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            bgcolor=C.SURFACE_ELEVATED,
+            border=ft.Border.all(1, C.WARNING),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=7),
+            visible=False,
+        )
+
         # 4. Academic Radar Card & Grade List
         self._radar_card = AcademicRadarCard(
             profiles=[],
@@ -211,7 +237,7 @@ class GradeOverviewView(ft.Container):
             page=self._get_page(),
             on_before_dialog=self._begin_modal_scroll_guard,
             on_dialog_dismiss=self._end_modal_scroll_guard,
-            on_dialog_opened=self._set_active_dialog_closer,
+            on_dialog_opened=self._on_child_dialog_opened,
             on_dialog_closing=self._mark_dialog_closing,
             visible=False,
         )
@@ -232,7 +258,7 @@ class GradeOverviewView(ft.Container):
             spacing=16,
             scroll=ft.ScrollMode.AUTO,
             auto_scroll=False,
-            scroll_interval=32,
+            scroll_interval=10,
             on_scroll=self._on_content_scroll,
             expand=True,
         )
@@ -242,6 +268,7 @@ class GradeOverviewView(ft.Container):
             controls=[
                 self._header,
                 self._header_divider,
+                self._stale_banner,
                 self._loading_row,
                 self._empty_state,
                 self._error_state,
@@ -283,13 +310,18 @@ class GradeOverviewView(ft.Container):
             self._title.size = target_title_size
         self._radar_card.set_viewport_width(numeric)
 
+    def _has_rendered_data(self) -> bool:
+        return bool(self._semesters and self._profiles)
+
     def show_loading(self) -> None:
-        """Shows loading state."""
+        """Shows loading state while keeping existing rendered radar/courses intact on refresh."""
+        has_data = self._has_rendered_data()
+        self._stale_banner.visible = False
         self._loading_row.visible = True
         self._empty_state.visible = False
         self._error_state.visible = False
-        self._radar_card.visible = False
-        self._grade_list_view.visible = False
+        self._radar_card.visible = has_data
+        self._grade_list_view.visible = has_data
         self.visible = True
         self.offset = ft.Offset(0, 0)
         self.opacity = 1.0
@@ -301,24 +333,77 @@ class GradeOverviewView(ft.Container):
             pass
 
     def show_error(self, message: str = "") -> None:
-        """Shows an explicit error state with retry action."""
+        """Shows an explicit error state, preserving already-rendered radar/semester data on refresh."""
+        resolved = (
+            message
+            if message
+            else "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi thử lại."
+        )
         self._loading_row.visible = False
         self._empty_state.visible = False
-        self._radar_card.visible = False
-        self._grade_list_view.visible = False
-        if message:
-            self._error_text.value = message
-        else:
-            self._error_text.value = (
-                "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi thử lại."
+        self._error_text.value = resolved
+        if self._has_rendered_data():
+            self._radar_card.visible = True
+            self._grade_list_view.visible = True
+            self._error_state.visible = False
+            self._stale_text.value = " · ".join(
+                part.strip() for part in resolved.splitlines() if part.strip()
             )
-        self._error_state.visible = True
+            self._stale_banner.visible = True
+        else:
+            self._stale_banner.visible = False
+            self._radar_card.visible = False
+            self._grade_list_view.visible = False
+            self._error_state.visible = True
         if self._defer_self_update:
             return
         try:
             self.update()
         except Exception:
             pass
+
+    def reset(self) -> None:
+        """Clear all account-specific transcript, radar, planner, and modal state."""
+        open_closers = list(reversed(list(self._dialog_closers.values())))
+        self._dialog_closers.clear()
+        self._open_dialog_tokens.clear()
+        self._active_dialog_token = None
+        self._active_dialog_closer = None
+        self._scroll_restore_token += 1
+        self._is_restoring_scroll = False
+        self._in_scroll_to_call = False
+        self._restore_in_post_cooldown = False
+        self._pending_post_restore_pin = False
+        self._saved_scroll_offset = 0.0
+        for closer in open_closers:
+            try:
+                closer()
+            except Exception:
+                logger.debug("GradeOverview dialog close on reset failed", exc_info=True)
+        self._planner_dialog = None
+        self._gpa_target_card = GpaTargetCard()
+        self._graduation_card = GraduationGpaCard()
+        self._semesters = []
+        self._profiles = []
+        self._progress = None
+        self._selected_semester_idx = 0
+        self._stale_text.value = ""
+        self._stale_banner.visible = False
+        self._loading_row.visible = False
+        self._error_state.visible = False
+        self._empty_state.visible = False
+        self._radar_card.visible = False
+        self._grade_list_view.visible = False
+        self._radar_card.set_profiles([], selected_index=0)
+        self._grade_list_view.update_courses([])
+        if self._defer_self_update:
+            return
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    clear = reset
 
     def update_academic_data(
         self,
@@ -327,6 +412,7 @@ class GradeOverviewView(ft.Container):
         progress: Optional[CreditProgress] = None,
     ) -> None:
         """Populates the view with full academic transcript and computed radar profiles."""
+        self._stale_banner.visible = False
         self._loading_row.visible = False
         self._error_state.visible = False
         self._semesters = semesters
@@ -334,7 +420,12 @@ class GradeOverviewView(ft.Container):
         self._selected_semester_idx = 0
         self._saved_scroll_offset = 0.0
         self._open_dialog_tokens.clear()
+        self._dialog_closers.clear()
+        self._scroll_restore_token += 1
         self._is_restoring_scroll = False
+        self._in_scroll_to_call = False
+        self._restore_in_post_cooldown = False
+        self._pending_post_restore_pin = False
         self._active_dialog_token = None
         self._active_dialog_closer = None
 
@@ -534,16 +625,74 @@ class GradeOverviewView(ft.Container):
             shape=ft.RoundedRectangleBorder(radius=16),
         )
         self._planner_dialog = dialog
-        self._set_active_dialog_closer(token, _close)
+        shown_ok = True
         try:
             page.show_dialog(dialog)
             logger.info("GPA planner dialog shown")
         except Exception:
             logger.warning("page.show_dialog failed; falling back to overlay", exc_info=True)
-            used_overlay = True
-            page.overlay.append(dialog)
-            dialog.open = True
-            page.update()
+            overlay = getattr(page, "overlay", None)
+            if overlay is not None:
+                used_overlay = True
+                overlay.append(dialog)
+                dialog.open = True
+                try:
+                    page.update()
+                except Exception:
+                    pass
+            else:
+                shown_ok = False
+        if shown_ok:
+            self._set_active_dialog_closer(token, _close)
+            self._pin_scroll_while_modal_open(token)
+        else:
+            self._open_dialog_tokens.pop(token, None)
+
+    def open_gpa_detail_sheet(self, profile: Optional[RadarProfile] = None) -> None:
+        """Mở hộp thoại chi tiết GPA học kỳ/tích lũy kèm khóa cuộn nền."""
+        page = self._get_page()
+        resolved_profile = profile or (
+            self._profiles[self._selected_semester_idx]
+            if 0 <= self._selected_semester_idx < len(self._profiles)
+            else (self._profiles[0] if self._profiles else None)
+        )
+        if page is None or resolved_profile is None:
+            return
+        token = self._begin_modal_scroll_guard()
+        closer = GpaDetailSheet.show(
+            page,
+            resolved_profile,
+            on_dismiss=lambda t=token: self._end_modal_scroll_guard(t),
+            on_closing=lambda t=token: self._mark_dialog_closing(t),
+        )
+        if closer is not None:
+            self._set_active_dialog_closer(token, closer)
+            self._pin_scroll_while_modal_open(token)
+        else:
+            self._open_dialog_tokens.pop(token, None)
+
+    def open_expected_grade_dialog(self, overall: Optional[OverallGpa] = None) -> None:
+        """Mở hộp thoại tính điểm kỳ vọng (có thể mở lồng trên hộp thoại khác) kèm khóa cuộn nền."""
+        page = self._get_page()
+        if page is None:
+            return
+        resolved_overall = (
+            overall
+            if overall is not None
+            else (calculate_overall_gpa(self._semesters) if self._semesters else None)
+        )
+        token = self._begin_modal_scroll_guard()
+        closer = ExpectedGradeDialog.show(
+            page,
+            resolved_overall,
+            on_dismiss=lambda t=token: self._end_modal_scroll_guard(t),
+            on_closing=lambda t=token: self._mark_dialog_closing(t),
+        )
+        if closer is not None:
+            self._set_active_dialog_closer(token, closer)
+            self._pin_scroll_while_modal_open(token)
+        else:
+            self._open_dialog_tokens.pop(token, None)
 
     def _close_planner(
         self, page: ft.Page, dialog: ft.AlertDialog, *, used_overlay: bool = False
@@ -564,8 +713,22 @@ class GradeOverviewView(ft.Container):
                 pass
         return False
 
+    def _pinned_modal_offset(self) -> Optional[float]:
+        if not self._open_dialog_tokens:
+            return None
+        return next(iter(self._open_dialog_tokens.values()))
+
+    def _pin_scroll_while_modal_open(self, token: Any) -> None:
+        if not isinstance(token, int) or token not in self._open_dialog_tokens:
+            return
+        pinned = self._pinned_modal_offset()
+        if pinned is not None and pinned > 0.0:
+            self._schedule_scroll_restore(pinned)
+
     def _on_content_scroll(self, event: Any) -> None:
-        if self._open_dialog_tokens or self._is_restoring_scroll:
+        if self._in_scroll_to_call:
+            return
+        if self._is_restoring_scroll and not self._restore_in_post_cooldown:
             return
         raw_pixels = getattr(event, "pixels", None)
         if raw_pixels is None:
@@ -577,39 +740,69 @@ class GradeOverviewView(ft.Container):
             return
         if not math.isfinite(pixels) or not math.isfinite(minimum):
             return
+        current_pixels = max(0.0, pixels - minimum)
+        if self._is_restoring_scroll:
+            pinned_cooldown = self._pinned_modal_offset()
+            if pinned_cooldown is not None and abs(current_pixels - pinned_cooldown) > 2.0:
+                self._pending_post_restore_pin = True
+            return
+        pinned = self._pinned_modal_offset()
+        if pinned is not None:
+            if abs(current_pixels - pinned) > 2.0:
+                self._schedule_scroll_restore(pinned)
+            return
         out_of_range = bool(getattr(event, "out_of_range", False))
-        offset = max(0.0, pixels - minimum)
+        offset = current_pixels
         if (out_of_range and pixels <= minimum) or offset <= 5.0:
             offset = 0.0
         self._saved_scroll_offset = offset
 
     def _begin_modal_scroll_guard(self) -> int:
+        pinned = self._pinned_modal_offset()
+        captured = self._saved_scroll_offset if pinned is None else pinned
         self._next_dialog_token += 1
         token = self._next_dialog_token
-        self._open_dialog_tokens[token] = self._saved_scroll_offset
+        self._open_dialog_tokens[token] = captured
         return token
+
+    def _sync_top_dialog_closer(self) -> None:
+        if self._dialog_closers:
+            top_token, top_closer = next(reversed(self._dialog_closers.items()))
+            self._active_dialog_token = top_token
+            self._active_dialog_closer = top_closer
+        else:
+            self._active_dialog_token = None
+            self._active_dialog_closer = None
+
+    def _on_child_dialog_opened(
+        self, token: int, closer: Optional[Callable[[], None]]
+    ) -> None:
+        self._set_active_dialog_closer(token, closer)
+        self._pin_scroll_while_modal_open(token)
 
     def _set_active_dialog_closer(
         self, token: int, closer: Optional[Callable[[], None]]
     ) -> None:
-        self._active_dialog_token = token
-        self._active_dialog_closer = closer
+        if isinstance(token, int) and callable(closer):
+            self._dialog_closers.pop(token, None)
+            self._dialog_closers[token] = closer
+        elif isinstance(token, int):
+            self._dialog_closers.pop(token, None)
+        self._sync_top_dialog_closer()
 
     def _mark_dialog_closing(self, token: Any) -> None:
-        if self._active_dialog_token == token:
-            self._active_dialog_token = None
-            self._active_dialog_closer = None
+        if isinstance(token, int):
+            self._dialog_closers.pop(token, None)
+        self._sync_top_dialog_closer()
 
     def _end_modal_scroll_guard(self, token: Any) -> None:
         if not isinstance(token, int):
             return
+        self._dialog_closers.pop(token, None)
+        self._sync_top_dialog_closer()
         captured_offset = self._open_dialog_tokens.pop(token, None)
         if captured_offset is None:
             return
-
-        if self._active_dialog_token == token:
-            self._active_dialog_token = None
-            self._active_dialog_closer = None
 
         if not self._open_dialog_tokens and captured_offset > 0.0:
             self._schedule_scroll_restore(captured_offset)
@@ -618,23 +811,48 @@ class GradeOverviewView(ft.Container):
         self._scroll_restore_token += 1
         restore_token = self._scroll_restore_token
         self._is_restoring_scroll = True
+        self._restore_in_post_cooldown = False
+        self._pending_post_restore_pin = False
         self._saved_scroll_offset = target_offset
+
+        async def _invoke_scroll(offset_val: float) -> None:
+            scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
+            if not callable(scroll_fn):
+                return
+            self._in_scroll_to_call = True
+            try:
+                res = scroll_fn(offset=offset_val, duration=0)
+                if inspect.isawaitable(res):
+                    await res
+            finally:
+                self._in_scroll_to_call = False
 
         async def _restore() -> None:
             try:
                 await asyncio.sleep(0.03)
                 if restore_token != self._scroll_restore_token:
                     return
-                scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
-                if callable(scroll_fn):
-                    res = scroll_fn(offset=target_offset, duration=0)
-                    if inspect.isawaitable(res):
-                        await res
+                await _invoke_scroll(target_offset)
+                if restore_token != self._scroll_restore_token:
+                    return
+                self._pending_post_restore_pin = False
+                self._restore_in_post_cooldown = True
                 await asyncio.sleep(0.02)
+                self._restore_in_post_cooldown = False
+                if (
+                    restore_token == self._scroll_restore_token
+                    and self._pending_post_restore_pin
+                ):
+                    self._pending_post_restore_pin = False
+                    followup = self._pinned_modal_offset()
+                    if followup is not None:
+                        await _invoke_scroll(followup)
             except Exception:
                 logger.debug("GradeOverview scroll restore failed", exc_info=True)
             finally:
                 if restore_token == self._scroll_restore_token:
+                    self._restore_in_post_cooldown = False
+                    self._pending_post_restore_pin = False
                     self._is_restoring_scroll = False
 
         page = self._get_page()
@@ -650,6 +868,7 @@ class GradeOverviewView(ft.Container):
         except RuntimeError:
             scroll_fn = getattr(self._scrollable_content, "scroll_to", None)
             if callable(scroll_fn) and not inspect.iscoroutinefunction(scroll_fn):
+                self._in_scroll_to_call = True
                 try:
                     res = scroll_fn(offset=target_offset, duration=0)
                     if inspect.isawaitable(res):
@@ -658,12 +877,20 @@ class GradeOverviewView(ft.Container):
                             close_fn()
                 except Exception:
                     pass
+                finally:
+                    self._in_scroll_to_call = False
             self._is_restoring_scroll = False
             return
         loop.create_task(_restore())
 
     def handle_back(self) -> bool:
-        """Close an open modal dialog before navigating away from GradeOverviewView."""
+        """Close the topmost open modal dialog before navigating away from GradeOverviewView."""
+        if self._dialog_closers:
+            top_token, closer = next(reversed(self._dialog_closers.items()))
+            self._dialog_closers.pop(top_token, None)
+            self._sync_top_dialog_closer()
+            closer()
+            return True
         closer = self._active_dialog_closer
         if callable(closer):
             self._active_dialog_token = None
@@ -713,9 +940,11 @@ class GradeOverviewView(ft.Container):
             async_loader=async_loader,
             on_dismiss=lambda t=token: self._end_modal_scroll_guard(t),
             on_closing=lambda t=token: self._mark_dialog_closing(t),
+            on_tab_change=lambda _idx, t=token: self._pin_scroll_while_modal_open(t),
         )
         if closer is not None:
             self._set_active_dialog_closer(token, closer)
+            self._pin_scroll_while_modal_open(token)
         else:
             self._open_dialog_tokens.pop(token, None)
 
@@ -762,6 +991,10 @@ class GradeOverviewView(ft.Container):
         self._error_text.color = C.TEXT_SECONDARY
         self._error_retry_btn.bgcolor = C.ACCENT
         self._error_retry_btn.color = C.ON_ACCENT
+        self._stale_banner.bgcolor = C.SURFACE_ELEVATED
+        self._stale_banner.border = ft.Border.all(1, C.WARNING)
+        self._stale_icon.color = C.WARNING
+        self._stale_text.color = C.TEXT_PRIMARY
         self._courses_btn.style = ft.ButtonStyle(
             color=C.ACCENT,
             padding=ft.Padding.symmetric(horizontal=8, vertical=0),

@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.safe_file_io import SafeFileIO
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ class TodayScheduleViewState:
     snapshot: TodayScheduleSnapshot | None = None
     from_cache: bool = False
     error_code: str = ""
+    maintenance_notice: MaintenanceNotice | None = None
 
 
 def select_spotlight_session(
@@ -521,12 +523,14 @@ class TodayScheduleCoordinator:
         credentials_provider: Callable[[], tuple[str, str]],
         state_sink: Callable[[TodayScheduleViewState], None],
         now_provider: Callable[[], datetime] = datetime.now,
+        on_maintenance: Callable[[MaintenanceNotice], None] | None = None,
     ) -> None:
         self._fetch_day = fetch_day
         self._cache = cache
         self._credentials_provider = credentials_provider
         self._state_sink = state_sink
         self._now_provider = now_provider
+        self._on_maintenance = on_maintenance
         self._guard = asyncio.Lock()
         self._wake_event = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -678,6 +682,30 @@ class TodayScheduleCoordinator:
                         trigger,
                     )
                     return self.state
+                maint_notice = (
+                    exc.notice
+                    if isinstance(exc, UthMaintenanceError)
+                    else getattr(exc, "notice", None)
+                )
+                if maint_notice is not None:
+                    logger.info(
+                        "Portal schedule refresh deferred: UTH maintenance (%s)",
+                        getattr(maint_notice, "window_text", "") or "maintenance",
+                    )
+                    state = TodayScheduleViewState(
+                        ScheduleLoadStatus.ERROR,
+                        snapshot=existing,
+                        from_cache=existing is not None,
+                        error_code="maintenance",
+                        maintenance_notice=maint_notice,
+                    )
+                    self._publish(state)
+                    if callable(self._on_maintenance):
+                        try:
+                            self._on_maintenance(maint_notice)
+                        except Exception:
+                            logger.debug("Today schedule maintenance hook failed", exc_info=True)
+                    return state
                 auth_failure = isinstance(exc, ScheduleAuthenticationError)
                 logger.warning(
                     "Portal schedule refresh failed (%s)",
