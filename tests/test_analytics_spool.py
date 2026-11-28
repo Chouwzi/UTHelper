@@ -234,3 +234,80 @@ def test_installation_identity_store_lazy_mint_persist_wipe_and_rotate(tmp_path:
     rotated_id = store.rotate(allow_create=True)
     assert rotated_id is not None
     assert rotated_id != second_id
+
+
+def test_identity_store_wipe_unlink_failure_forces_fresh_uuid_instead_of_reloading_retired_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import analytics.identity as identity_mod
+
+    analytics_dir = tmp_path / "analytics"
+    store = InstallationIdentityStore(analytics_dir)
+    first_id = store.get_or_create(allow_create=True)
+    assert first_id is not None
+    install_path = analytics_dir / INSTALLATION_FILENAME
+    assert install_path.is_file()
+
+    # 1. Simulate Windows sharing violation (delete_exact_regular -> False) during wipe()
+    monkeypatch.setattr(identity_mod, "delete_exact_regular", lambda *_a, **_kw: False)
+    store.wipe()
+    assert store.peek_cached() is None
+    assert install_path.is_file()  # Stale file still on disk with retired first_id
+
+    # If atomic_write_regular also fails temporarily, _force_new_mint must stay True!
+    real_atomic_write = identity_mod.atomic_write_regular
+
+    def _failing_write(*_a, **_kw):
+        raise OSError("disk busy")
+
+    monkeypatch.setattr(identity_mod, "atomic_write_regular", _failing_write)
+    with pytest.raises(OSError):
+        store.get_or_create(allow_create=True)
+
+    # Restore write: get_or_create must bypass stale installation.json and overwrite with fresh UUID!
+    monkeypatch.setattr(identity_mod, "atomic_write_regular", real_atomic_write)
+    second_id = store.get_or_create(allow_create=True)
+    assert second_id is not None
+    assert second_id != first_id
+    assert InstallationIdentityStore(analytics_dir).get_or_create(allow_create=True) == second_id
+
+    # 2. Simulate lock TimeoutError during wipe() -> still forces fresh mint on next get_or_create!
+    from contextlib import contextmanager
+
+    real_dir_lock = identity_mod.exclusive_directory_lock
+
+    @contextmanager
+    def _timeout_lock(*_a, **_kw):
+        raise TimeoutError("mutex busy")
+        yield
+
+    monkeypatch.setattr(identity_mod, "exclusive_directory_lock", _timeout_lock)
+    store.wipe()
+    assert store.peek_cached() is None
+
+    monkeypatch.setattr(identity_mod, "exclusive_directory_lock", real_dir_lock)
+    third_id = store.get_or_create(allow_create=True)
+    assert third_id is not None
+    assert third_id not in {first_id, second_id}
+
+
+def test_identity_store_rejects_reparse_parent_and_normalizes_relative_lock_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    parent_link = tmp_path / "appdata_link"
+    _make_junction(outside, parent_link)
+
+    with pytest.raises(ValueError):
+        InstallationIdentityStore(parent_link / "analytics")
+
+    real_parent = tmp_path / "real_appdata"
+    real_parent.mkdir()
+    monkeypatch.chdir(real_parent)
+    rel_store = InstallationIdentityStore(Path("analytics"))
+    abs_store = InstallationIdentityStore((real_parent / "analytics").resolve())
+    assert rel_store._lock is abs_store._lock
+

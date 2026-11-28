@@ -6,6 +6,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+import http.client
+import inspect
 import json
 import math
 import random
@@ -216,6 +218,7 @@ class AnalyticsConsentEpochGate:
         self._lock = threading.RLock()
         self._consent = AnalyticsConsent(initial)
         self._epoch = 0
+        self._purge_depth = 0
 
     @property
     def current(self) -> AnalyticsConsent:
@@ -227,18 +230,39 @@ class AnalyticsConsentEpochGate:
         with self._lock:
             return self._epoch
 
+    @property
+    def purging(self) -> bool:
+        with self._lock:
+            return self._purge_depth > 0
+
     def snapshot(self) -> tuple[AnalyticsConsent, int]:
         """Return ``(consent, epoch)`` atomically without blocking on network I/O."""
         with self._lock:
             return self._consent, self._epoch
 
     def is_enabled_at(self, expected_epoch: int) -> bool:
-        """Return True iff consent is ``ENABLED`` and ``_epoch == expected_epoch``."""
+        """Return True iff consent is ``ENABLED``, no purge is active, and ``_epoch == expected_epoch``."""
         with self._lock:
             return (
                 self._consent is AnalyticsConsent.ENABLED
+                and self._purge_depth == 0
                 and self._epoch == expected_epoch
             )
+
+    def begin_purge(self) -> int:
+        """Enter an active local purge window, suppressing enabled checks and bumping ``_epoch``."""
+        with self._lock:
+            self._purge_depth += 1
+            self._epoch += 1
+            return self._epoch
+
+    def end_purge(self, count: int = 1) -> int:
+        """Exit ``count`` completed local purge windows and bump ``_epoch``."""
+        step = max(1, int(count))
+        with self._lock:
+            self._purge_depth = max(0, self._purge_depth - step)
+            self._epoch += 1
+            return self._epoch
 
     def set_consent(
         self,
@@ -246,11 +270,12 @@ class AnalyticsConsentEpochGate:
         *,
         on_revoke: Callable[[], None] | None = None,
     ) -> int:
-        """Update live consent, increment ``_epoch``, and run ``on_revoke`` if disabled."""
+        """Update live consent, increment ``_epoch`` on change, and run ``on_revoke`` if disabled."""
         selected = AnalyticsConsent(consent)
         with self._lock:
-            self._consent = selected
-            self._epoch += 1
+            if selected != self._consent:
+                self._consent = selected
+                self._epoch += 1
             current_epoch = self._epoch
             if selected is not AnalyticsConsent.ENABLED and on_revoke is not None:
                 on_revoke()
@@ -347,6 +372,7 @@ class PostHogHttpTransport:
         events: Sequence[AnalyticsEvent],
         *,
         timeout_seconds: float = MAX_DELIVERY_TIMEOUT_SECONDS,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> BatchDeliveryOutcome:
         """Deliver one batch and confirm ONLY on verified JSON ``200`` status."""
         try:
@@ -365,6 +391,8 @@ class PostHogHttpTransport:
             },
             method="POST",
         )
+        if is_cancelled is not None and is_cancelled():
+            return BatchDeliveryOutcome.retryable_failure("cancelled")
         try:
             with self._opener_func(
                 request,
@@ -389,6 +417,8 @@ class PostHogHttpTransport:
                     pass
         except (TimeoutError, socket.timeout):
             return BatchDeliveryOutcome.retryable_failure("timeout")
+        except (http.client.HTTPException, ValueError):
+            return BatchDeliveryOutcome.retryable_failure("http_protocol_error")
         except (URLError, ssl.SSLError, OSError):
             return BatchDeliveryOutcome.retryable_failure("offline")
 
@@ -500,6 +530,17 @@ class PostHogHttpTransport:
         )
 
 
+def _accepts_is_cancelled(send_fn: Callable[..., Any]) -> bool:
+    try:
+        sig = inspect.signature(send_fn)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters
+    if "is_cancelled" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 class AnalyticsDeliveryWorker:
     """Flush spooled batches with epoch-checked consent, jittered backoff, and poison drops."""
 
@@ -567,7 +608,10 @@ class AnalyticsDeliveryWorker:
     ) -> AnalyticsFlushSummary:
         """Deliver pending batches within ``deadline_seconds`` if consented and configured."""
         consent, start_epoch = self.consent_gate.snapshot()
-        if consent is not AnalyticsConsent.ENABLED:
+        if (
+            consent is not AnalyticsConsent.ENABLED
+            or not self.consent_gate.is_enabled_at(start_epoch)
+        ):
             return AnalyticsFlushSummary(skipped_consent=True)
 
         with self._state_lock:
@@ -617,6 +661,9 @@ class AnalyticsDeliveryWorker:
         dropped_batches = 0
         attempted_batches = 0
 
+        accepts_cancel = _accepts_is_cancelled(transport.send_batch)
+        is_cancelled = lambda: not self.consent_gate.is_enabled_at(start_epoch)  # noqa: E731
+
         for queued in pending:
             if not self.consent_gate.is_enabled_at(start_epoch):
                 return AnalyticsFlushSummary(
@@ -642,11 +689,20 @@ class AnalyticsDeliveryWorker:
                 )
 
             # Socket I/O executes OUTSIDE consent_gate._lock so UI opt-out never blocks.
-            outcome = transport.send_batch(
-                queued.batch.events,
-                timeout_seconds=min(remaining, MAX_DELIVERY_TIMEOUT_SECONDS),
-            )
-            attempted_batches += 1
+            call_timeout = min(remaining, MAX_DELIVERY_TIMEOUT_SECONDS)
+            if accepts_cancel:
+                outcome = transport.send_batch(
+                    queued.batch.events,
+                    timeout_seconds=call_timeout,
+                    is_cancelled=is_cancelled,
+                )
+            else:
+                outcome = transport.send_batch(
+                    queued.batch.events,
+                    timeout_seconds=call_timeout,
+                )
+            if outcome.reason != "cancelled":
+                attempted_batches += 1
 
             if not self.consent_gate.is_enabled_at(start_epoch):
                 return AnalyticsFlushSummary(

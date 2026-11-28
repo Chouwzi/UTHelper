@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Mapping
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 import json
@@ -390,11 +390,14 @@ class AnalyticsRuntime:
         )
 
         self._executor = delivery_executor
-        self._owns_executor = delivery_executor is None
         self._lifecycle_lock = threading.RLock()
+        self._spool_io_lock = threading.RLock()
         self._buffer_lock = threading.Lock()
         self._ram_buffer: deque[AnalyticsEvent] = deque()
         self._immediate_spool_needed = False
+        self._pending_disk_purge_count = 0
+        self._spool_write_seq = 1
+        self._spool_flushed_seq = 0
         self._next_network_flush_mono = 0.0
         self._delivery_in_flight = False
 
@@ -448,7 +451,15 @@ class AnalyticsRuntime:
 
             if self.config.active_eligible:
                 now_mono = self._monotonic()
-                self._next_network_flush_mono = now_mono + self._network_flush_interval
+                if (
+                    self.tracker.authenticated_non_demo
+                    and self.tracker.foreground_visible
+                ):
+                    self._next_network_flush_mono = now_mono
+                else:
+                    self._next_network_flush_mono = (
+                        now_mono + self._network_flush_interval
+                    )
                 loop_thread = threading.Thread(
                     target=self._maintenance_loop,
                     name="uthelper-analytics-loop",
@@ -456,9 +467,6 @@ class AnalyticsRuntime:
                 )
                 self._loop_thread = loop_thread
                 loop_thread.start()
-
-                if self.consent_gate.current is AnalyticsConsent.ENABLED:
-                    self._submit_network_flush()
 
     def bind_consent_changes(
         self,
@@ -492,9 +500,20 @@ class AnalyticsRuntime:
         if self._consent_provider is None:
             return
         try:
-            latest = self._consent_provider()
+            latest = AnalyticsConsent(self._consent_provider())
         except Exception:
             return
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            with self.consent_gate._lock, self.tracker._lock:
+                if (
+                    latest is self.consent_gate.current
+                    and self.tracker.consent is latest
+                    and self._pending_disk_purge_count == 0
+                    and not self.consent_gate.purging
+                ):
+                    return
         self.set_consent(latest)
 
     def set_consent(self, consent: AnalyticsConsent | str) -> None:
@@ -507,24 +526,61 @@ class AnalyticsRuntime:
         with self._lifecycle_lock:
             if self._closed:
                 return
+            with self.consent_gate._lock, self.tracker._lock:
+                if (
+                    selected is self.consent_gate.current
+                    and self.tracker.consent is selected
+                    and self._pending_disk_purge_count == 0
+                    and not self.consent_gate.purging
+                ):
+                    return
 
         if selected is not AnalyticsConsent.ENABLED:
-            def _revoke_and_purge() -> None:
-                self.tracker.set_consent(selected)
-                self._purge_all_state_and_files()
-
-            self.consent_gate.set_consent(
-                selected,
-                on_revoke=_revoke_and_purge,
-            )
+            with self._lifecycle_lock:
+                if self._closed:
+                    return
+                with self.consent_gate._lock, self.tracker._lock, self._buffer_lock:
+                    self.consent_gate.set_consent(selected)
+                    self.consent_gate.begin_purge()
+                    self.tracker.set_consent(selected)
+                    self.identity_store.invalidate_memory()
+                    self._ram_buffer.clear()
+                    self._immediate_spool_needed = False
+                    self._pending_disk_purge_count += 1
+            self._drain_pending_disk_purge()
+            self._wakeup_event.set()
             return
 
-        self.consent_gate.set_consent(selected)
-        events = self.tracker.set_consent(selected)
+        events: list[AnalyticsEvent] = []
+        captured_epoch: int | None = None
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            with self._spool_io_lock:
+                self._drain_pending_disk_purge_locked()
+                with self.consent_gate._lock, self.tracker._lock, self._buffer_lock:
+                    if (
+                        selected is self.consent_gate.current
+                        and self.tracker.consent is selected
+                    ):
+                        return
+                    captured_epoch = self.consent_gate.set_consent(selected)
+                    events = self.tracker.set_consent(selected)
+
         if events:
-            self._enqueue_ram_events(events, urgent_spool=True)
-        elif self.config.active_eligible:
+            self._enqueue_ram_events(
+                events,
+                urgent_spool=True,
+                expected_epoch=captured_epoch,
+            )
+        if (
+            self._started
+            and self.config.active_eligible
+            and self.tracker.authenticated_non_demo
+            and self.tracker.foreground_visible
+        ):
             self._submit_network_flush()
+        self._wakeup_event.set()
 
     apply_consent = set_consent
 
@@ -533,7 +589,15 @@ class AnalyticsRuntime:
         with self._lifecycle_lock:
             if self._closed:
                 return
-        self.consent_gate.bump_epoch(on_purge=self._purge_all_state_and_files)
+            with self.consent_gate._lock, self.tracker._lock, self._buffer_lock:
+                self.consent_gate.begin_purge()
+                self.tracker.purge_in_memory_state()
+                self.identity_store.invalidate_memory()
+                self._ram_buffer.clear()
+                self._immediate_spool_needed = False
+                self._pending_disk_purge_count += 1
+        self._drain_pending_disk_purge()
+        self._wakeup_event.set()
 
     def set_account_state(
         self,
@@ -547,24 +611,47 @@ class AnalyticsRuntime:
             if self._closed:
                 return
         try:
+            was_auth_fg = (
+                self.tracker.authenticated_non_demo and self.tracker.foreground_visible
+            )
+            _, pre_epoch = self.consent_gate.snapshot()
             pre_wipe_events, should_wipe = self.tracker.set_account_state(
                 authenticated=authenticated,
                 is_demo=is_demo,
                 account_changed=account_changed,
             )
             if pre_wipe_events:
-                self._enqueue_ram_events(pre_wipe_events, urgent_spool=False)
-                self.flush_ram_to_spool(fsync=False)
+                self._enqueue_ram_events(
+                    pre_wipe_events,
+                    urgent_spool=False,
+                    expected_epoch=pre_epoch,
+                )
             if should_wipe:
-                if not authenticated or is_demo:
-                    # Drop any stale unsent RAM fragments after spooling session end.
-                    with self._buffer_lock:
-                        self._ram_buffer.clear()
-                        self._immediate_spool_needed = False
-                self.identity_store.wipe()
-            post_events = self.tracker.start_after_account_ready()
+                self.flush_ram_to_spool(fsync=False)
+                with self._buffer_lock:
+                    self._ram_buffer.clear()
+                    self._immediate_spool_needed = False
+                with self._spool_io_lock:
+                    self.identity_store.wipe()
+            elif pre_wipe_events:
+                self.flush_ram_to_spool(fsync=False)
+
+            _, post_epoch = self.consent_gate.snapshot()
+            post_events: list[AnalyticsEvent] = []
+            if self.consent_gate.is_enabled_at(post_epoch):
+                post_events = self.tracker.start_after_account_ready()
             if post_events:
-                self._enqueue_ram_events(post_events, urgent_spool=True)
+                self._enqueue_ram_events(
+                    post_events,
+                    urgent_spool=True,
+                    expected_epoch=post_epoch,
+                )
+            now_auth_fg = (
+                self.tracker.authenticated_non_demo and self.tracker.foreground_visible
+            )
+            if self._started and now_auth_fg and not was_auth_fg:
+                self._submit_network_flush()
+            self._wakeup_event.set()
         except Exception:
             _LOGGER.debug("Analytics set_account_state suppressed error", exc_info=True)
 
@@ -578,9 +665,27 @@ class AnalyticsRuntime:
             if self._closed:
                 return
         try:
+            was_auth_fg = (
+                self.tracker.authenticated_non_demo and self.tracker.foreground_visible
+            )
+            _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                self.tracker.mark_foreground_state(screen=screen)
+                self._wakeup_event.set()
+                return
             events = self.tracker.on_foreground(trigger=trigger, screen=screen)
             if events:
-                self._enqueue_ram_events(events, urgent_spool=True)
+                self._enqueue_ram_events(
+                    events,
+                    urgent_spool=True,
+                    expected_epoch=epoch,
+                )
+            now_auth_fg = (
+                self.tracker.authenticated_non_demo and self.tracker.foreground_visible
+            )
+            if self._started and now_auth_fg and not was_auth_fg:
+                self._submit_network_flush()
+            self._wakeup_event.set()
         except Exception:
             _LOGGER.debug("Analytics on_foreground suppressed error", exc_info=True)
 
@@ -593,10 +698,16 @@ class AnalyticsRuntime:
             if self._closed:
                 return
         try:
+            _, epoch = self.consent_gate.snapshot()
             events = self.tracker.on_background(reason=reason)
             if events:
-                self._enqueue_ram_events(events, urgent_spool=False)
+                self._enqueue_ram_events(
+                    events,
+                    urgent_spool=False,
+                    expected_epoch=epoch,
+                )
             self.flush_ram_to_spool(fsync=False)
+            self._wakeup_event.set()
         except Exception:
             _LOGGER.debug("Analytics on_background suppressed error", exc_info=True)
 
@@ -606,9 +717,19 @@ class AnalyticsRuntime:
             if self._closed:
                 return
         try:
+            _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                self.tracker.mark_current_screen(screen)
+                self._wakeup_event.set()
+                return
             events = self.tracker.record_interaction(screen=screen)
             if events:
-                self._enqueue_ram_events(events, urgent_spool=True)
+                self._enqueue_ram_events(
+                    events,
+                    urgent_spool=True,
+                    expected_epoch=epoch,
+                )
+            self._wakeup_event.set()
         except Exception:
             _LOGGER.debug("Analytics record_interaction suppressed error", exc_info=True)
 
@@ -625,11 +746,24 @@ class AnalyticsRuntime:
                 return False
         try:
             was_eligible = self.tracker.authenticated_non_demo and self.tracker.foreground_visible
+            _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                self.tracker.mark_current_screen(screen)
+                self._wakeup_event.set()
+                return False
             events = self.tracker.capture_screen_viewed(screen, nav_source)
+            enqueued = False
             if events:
-                self._enqueue_ram_events(events)
+                enqueued = self._enqueue_ram_events(events, expected_epoch=epoch)
             self._wakeup_event.set()
-            return bool(events or (was_eligible and self.config.active_eligible and self.current_consent is AnalyticsConsent.ENABLED))
+            return bool(
+                enqueued
+                or (
+                    was_eligible
+                    and self.config.active_eligible
+                    and self.consent_gate.is_enabled_at(epoch)
+                )
+            )
         except Exception:
             return False
 
@@ -644,11 +778,22 @@ class AnalyticsRuntime:
                 return False
         try:
             was_eligible = self.tracker.authenticated_non_demo and self.tracker.foreground_visible
+            _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                return False
             events = self.tracker.capture_filter_applied(surface, filter_kind)
+            enqueued = False
             if events:
-                self._enqueue_ram_events(events)
+                enqueued = self._enqueue_ram_events(events, expected_epoch=epoch)
             self._wakeup_event.set()
-            return bool(events or (was_eligible and self.config.active_eligible and self.current_consent is AnalyticsConsent.ENABLED))
+            return bool(
+                enqueued
+                or (
+                    was_eligible
+                    and self.config.active_eligible
+                    and self.consent_gate.is_enabled_at(epoch)
+                )
+            )
         except Exception:
             return False
 
@@ -866,44 +1011,60 @@ class AnalyticsRuntime:
         with self._lifecycle_lock:
             if self._closed:
                 return 0
+        _, epoch = self.consent_gate.snapshot()
+        if not self.consent_gate.is_enabled_at(epoch):
+            return 0
         events = self.tracker.poll_timers()
         if events:
             has_session_transition = any(
                 ev.event in {EventName.SESSION_STARTED, EventName.SESSION_ENDED}
                 for ev in events
             )
-            self._enqueue_ram_events(events, urgent_spool=has_session_transition)
+            if not self._enqueue_ram_events(
+                events,
+                urgent_spool=has_session_transition,
+                expected_epoch=epoch,
+            ):
+                return 0
         return len(events)
 
     def flush_ram_to_spool(self, *, fsync: bool = False) -> int:
         """Drain buffered RAM events into atomic local spool files."""
-        consent, epoch = self.consent_gate.snapshot()
-        if consent is not AnalyticsConsent.ENABLED or not self.config.active_eligible:
+        with self._spool_io_lock:
+            self._drain_pending_disk_purge_locked()
+            consent, epoch = self.consent_gate.snapshot()
+            if (
+                consent is not AnalyticsConsent.ENABLED
+                or not self.consent_gate.is_enabled_at(epoch)
+                or not self.config.active_eligible
+            ):
+                with self._buffer_lock:
+                    self._ram_buffer.clear()
+                    self._immediate_spool_needed = False
+                return 0
+
             with self._buffer_lock:
+                if not self._ram_buffer:
+                    self._immediate_spool_needed = False
+                    return 0
+                drained = list(self._ram_buffer)
                 self._ram_buffer.clear()
                 self._immediate_spool_needed = False
-            return 0
 
-        with self._buffer_lock:
-            if not self._ram_buffer:
-                self._immediate_spool_needed = False
+            if not self.consent_gate.is_enabled_at(epoch):
                 return 0
-            drained = list(self._ram_buffer)
-            self._ram_buffer.clear()
-            self._immediate_spool_needed = False
+            try:
+                result = self.spool.enqueue(drained, fsync=fsync)
+            except Exception:
+                _LOGGER.debug("Analytics spool write suppressed error", exc_info=True)
+                return 0
 
-        if not self.consent_gate.is_enabled_at(epoch):
-            return 0
-        try:
-            result = self.spool.enqueue(drained, fsync=fsync)
-        except Exception:
-            _LOGGER.debug("Analytics spool write suppressed error", exc_info=True)
-            return 0
-
-        if not self.consent_gate.is_enabled_at(epoch):
-            self._purge_local_files_best_effort()
-            return 0
-        return result.events_stored
+            if not self.consent_gate.is_enabled_at(epoch):
+                self._purge_local_files_unlocked()
+                return 0
+            if result.stored:
+                self._spool_write_seq += 1
+            return result.events_stored
 
     def flush_now(
         self,
@@ -911,16 +1072,16 @@ class AnalyticsRuntime:
         deadline_seconds: float = MAX_DELIVERY_TIMEOUT_SECONDS,
     ) -> AnalyticsFlushSummary:
         """Advance due timers, flush RAM -> spool, and execute one HTTP delivery pass."""
+        self._drain_pending_disk_purge(blocking=False)
         self.poll_timers()
         self.flush_ram_to_spool(fsync=False)
+        self._drain_pending_disk_purge(blocking=False)
         return self.delivery.flush_once(deadline_seconds=deadline_seconds)
 
     def close(self) -> None:
         """Persist ``uth_session_ended`` to local spool (``< 2ms``) and exit without network wait."""
         consent_unsubscribe: Callable[[], None] | None = None
         loop_thread: threading.Thread | None = None
-        executor: Executor | None = None
-        owns_executor = False
 
         with self._lifecycle_lock:
             if self._closed:
@@ -932,30 +1093,23 @@ class AnalyticsRuntime:
             self._wakeup_event.set()
             loop_thread = self._loop_thread
             self._loop_thread = None
-            executor = self._executor
-            owns_executor = self._owns_executor
 
-            if (
-                self.consent_gate.current is AnalyticsConsent.ENABLED
-                and self.config.active_eligible
-            ):
+            consent, epoch = self.consent_gate.snapshot()
+            if consent is AnalyticsConsent.ENABLED and self.config.active_eligible:
                 try:
                     closing_events = self.tracker.prepare_shutdown()
                     if closing_events:
-                        with self._buffer_lock:
-                            self._ram_buffer.extend(closing_events)
+                        self._enqueue_ram_events(
+                            closing_events,
+                            urgent_spool=True,
+                            expected_epoch=epoch,
+                        )
                     self.flush_ram_to_spool(fsync=False)
                 except Exception:
                     pass
             else:
                 with self._buffer_lock:
                     self._ram_buffer.clear()
-
-            if executor is not None and owns_executor:
-                try:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                except Exception:
-                    pass
 
         if consent_unsubscribe is not None:
             try:
@@ -978,6 +1132,9 @@ class AnalyticsRuntime:
             if self._closed:
                 return False
         try:
+            _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                return False
             events = self.tracker.capture_event(
                 event,
                 props,
@@ -988,8 +1145,11 @@ class AnalyticsRuntime:
             has_session_start = any(
                 ev.event is EventName.SESSION_STARTED for ev in events
             )
-            self._enqueue_ram_events(events, urgent_spool=has_session_start)
-            return True
+            return self._enqueue_ram_events(
+                events,
+                urgent_spool=has_session_start,
+                expected_epoch=epoch,
+            )
         except Exception:
             return False
 
@@ -998,14 +1158,22 @@ class AnalyticsRuntime:
         events: list[AnalyticsEvent],
         *,
         urgent_spool: bool = False,
-    ) -> None:
+        expected_epoch: int | None = None,
+    ) -> bool:
         if not events:
-            return
+            return False
         has_session_start = any(
             ev.event is EventName.SESSION_STARTED for ev in events
         )
-        should_wake = False
-        with self._buffer_lock:
+        with self.consent_gate._lock, self._buffer_lock:
+            if expected_epoch is not None:
+                if not self.consent_gate.is_enabled_at(expected_epoch):
+                    return False
+            elif (
+                self.consent_gate.current is not AnalyticsConsent.ENABLED
+                or self.consent_gate.purging
+            ):
+                return False
             self._ram_buffer.extend(events)
             if (
                 urgent_spool
@@ -1013,61 +1181,109 @@ class AnalyticsRuntime:
                 or len(self._ram_buffer) >= RAM_COALESCE_BATCH_THRESHOLD
             ):
                 self._immediate_spool_needed = True
-                should_wake = True
         if has_session_start:
             now_mono = self._monotonic()
             self._next_network_flush_mono = min(
-                self._next_network_flush_mono or (now_mono + SESSION_START_FLUSH_DELAY_SECONDS),
+                self._next_network_flush_mono
+                or (now_mono + SESSION_START_FLUSH_DELAY_SECONDS),
                 now_mono + SESSION_START_FLUSH_DELAY_SECONDS,
             )
-            should_wake = True
-        if should_wake:
-            self._wakeup_event.set()
-
-    def _ensure_executor_locked(self) -> Executor | None:
-        if self._closed:
-            return None
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="uthelper-analytics",
-            )
-            self._owns_executor = True
-        return self._executor
+        self._wakeup_event.set()
+        return True
 
     def _submit_network_flush(self) -> None:
         if (
             not self.config.active_eligible
             or self.consent_gate.current is not AnalyticsConsent.ENABLED
             or self.delivery.disabled_for_process
+            or not self.tracker.authenticated_non_demo
+            or not self.tracker.foreground_visible
         ):
             return
+        executor: Executor | None = None
         with self._lifecycle_lock:
             if self._closed or self._delivery_in_flight:
                 return
-            executor = self._ensure_executor_locked()
-            if executor is None:
-                return
             self._delivery_in_flight = True
+            executor = self._executor
         try:
-            executor.submit(self._run_network_flush_task)
+            if executor is not None:
+                executor.submit(self._run_network_flush_task)
+            else:
+                worker = threading.Thread(
+                    target=self._run_network_flush_task,
+                    name="uthelper-analytics-flush",
+                    daemon=True,
+                )
+                worker.start()
         except Exception:
             with self._lifecycle_lock:
                 self._delivery_in_flight = False
 
     def _run_network_flush_task(self) -> None:
         try:
-            self.delivery.flush_once(deadline_seconds=MAX_DELIVERY_TIMEOUT_SECONDS)
+            self._drain_pending_disk_purge(blocking=False)
+            seq_before = self._spool_write_seq
+            summary = self.delivery.flush_once(
+                deadline_seconds=MAX_DELIVERY_TIMEOUT_SECONDS
+            )
+            if (
+                summary.retained_batches == 0
+                and not summary.skipped_consent
+                and not summary.skipped_backoff
+                and not summary.deadline_exhausted
+                and not summary.skipped_unconfigured
+                and not summary.disabled_invalid_key
+            ):
+                with self._spool_io_lock:
+                    if self._spool_flushed_seq < seq_before:
+                        self._spool_flushed_seq = seq_before
         except Exception:
-            _LOGGER.debug("Analytics delivery worker suppressed error", exc_info=True)
+            _LOGGER.debug("Analytics delivery worker suppressed error")
         finally:
             with self._lifecycle_lock:
                 self._delivery_in_flight = False
 
+    def _compute_loop_wait_timeout(self) -> float | None:
+        if (
+            not self.config.active_eligible
+            or self.consent_gate.current is not AnalyticsConsent.ENABLED
+            or self.delivery.disabled_for_process
+        ):
+            return None
+
+        with self._buffer_lock:
+            buffered_count = len(self._ram_buffer)
+            urgent = self._immediate_spool_needed
+        if urgent:
+            return 0.0
+
+        has_timers = self.tracker.has_pending_timers()
+        can_network_flush = (
+            self.tracker.authenticated_non_demo
+            and self.tracker.foreground_visible
+            and self._spool_write_seq > self._spool_flushed_seq
+        )
+        if buffered_count == 0 and not has_timers and not can_network_flush:
+            return None
+
+        base_tick = min(self._coalesce_interval, 1.0)
+        if buffered_count > 0 or has_timers:
+            return base_tick
+
+        now_mono = self._monotonic()
+        if self._next_network_flush_mono <= 0.0:
+            return self._network_flush_interval
+        return min(
+            max(0.05, self._next_network_flush_mono - now_mono),
+            self._network_flush_interval,
+        )
+
     def _maintenance_loop(self) -> None:
         last_coalesce_mono = self._monotonic()
         while not self.shutdown_event.is_set():
-            self._wakeup_event.wait(timeout=min(self._coalesce_interval, 1.0))
+            wait_timeout = self._compute_loop_wait_timeout()
+            self._wakeup_event.wait(timeout=wait_timeout)
             self._wakeup_event.clear()
             if self.shutdown_event.is_set():
                 return
@@ -1102,16 +1318,43 @@ class AnalyticsRuntime:
         with self._buffer_lock:
             self._ram_buffer.clear()
             self._immediate_spool_needed = False
+        self._wakeup_event.set()
 
-    def _purge_local_files_best_effort(self) -> None:
+    def _purge_local_files_unlocked(self) -> None:
         try:
             self.spool.clear()
+            self._spool_flushed_seq = self._spool_write_seq
         except Exception:
             pass
         try:
             self.identity_store.wipe()
         except Exception:
             pass
+
+    def _drain_pending_disk_purge_locked(self) -> None:
+        while True:
+            with self.consent_gate._lock:
+                count = self._pending_disk_purge_count
+                if count <= 0:
+                    return
+                self._pending_disk_purge_count = 0
+            try:
+                self._purge_local_files_unlocked()
+            finally:
+                self.consent_gate.end_purge(count)
+
+    def _drain_pending_disk_purge(self, *, blocking: bool = True) -> bool:
+        if not self._spool_io_lock.acquire(blocking=blocking):
+            return False
+        try:
+            self._drain_pending_disk_purge_locked()
+            return True
+        finally:
+            self._spool_io_lock.release()
+
+    def _purge_local_files_best_effort(self) -> None:
+        with self._spool_io_lock:
+            self._purge_local_files_unlocked()
 
     def _purge_all_state_and_files(self) -> None:
         with self._buffer_lock:

@@ -40,16 +40,28 @@ class InstallationIdentityStore:
 
     def __init__(self, analytics_dir: Path | str) -> None:
         candidate = Path(analytics_dir)
-        verify_non_reparse_target(candidate, label="analytics directory")
-        self.analytics_dir = candidate
+        verify_non_reparse_target(
+            candidate,
+            check_parent=True,
+            label="analytics directory",
+        )
+        resolved_candidate = candidate.absolute()
+        self.analytics_dir = resolved_candidate
         self.installation_path = self.analytics_dir / INSTALLATION_FILENAME
-        self._lock = thread_lock_for(self.analytics_dir)
+        self._lock = thread_lock_for(resolved_candidate)
         self._cached_distinct_id: str | None = None
+        self._force_new_mint: bool = False
 
     def peek_cached(self) -> str | None:
         """Return the in-memory ``distinct_id`` without performing disk I/O."""
         with self._lock:
             return self._cached_distinct_id
+
+    def invalidate_memory(self) -> None:
+        """Clear cached ``distinct_id`` and force a fresh mint without disk I/O."""
+        with self._lock:
+            self._cached_distinct_id = None
+            self._force_new_mint = True
 
     def get_or_create(self, *, allow_create: bool = True) -> str | None:
         """Return existing or newly minted UUIDv4 ``distinct_id`` when ``allow_create=True``."""
@@ -61,6 +73,7 @@ class InstallationIdentityStore:
 
             resolved_dir, dir_identity = ensure_safe_directory(
                 self.analytics_dir,
+                check_parent=True,
                 label="analytics directory",
             )
             self.analytics_dir = resolved_dir
@@ -73,10 +86,11 @@ class InstallationIdentityStore:
                 lock_filename=".analytics-identity.lock",
                 guard_filename=".analytics-identity.operation",
             ):
-                existing = self._read_validated_locked(resolved_dir)
-                if existing is not None:
-                    self._cached_distinct_id = existing
-                    return existing
+                if not self._force_new_mint:
+                    existing = self._read_validated_locked(resolved_dir)
+                    if existing is not None:
+                        self._cached_distinct_id = existing
+                        return existing
 
                 minted = str(uuid4())
                 payload = (
@@ -98,6 +112,7 @@ class InstallationIdentityStore:
                     payload=payload,
                     fsync=False,
                 )
+                self._force_new_mint = False
                 self._cached_distinct_id = minted
                 return minted
 
@@ -105,15 +120,20 @@ class InstallationIdentityStore:
         """Clear RAM ``distinct_id`` immediately and safely delete ``installation.json``."""
         with self._lock:
             self._cached_distinct_id = None
-            if not self.analytics_dir.exists() and not path_is_reparse(
-                self.analytics_dir
+            self._force_new_mint = True
+            if path_is_reparse(self.analytics_dir) or path_is_reparse(
+                self.analytics_dir.parent
             ):
                 return
-            if path_is_reparse(self.analytics_dir):
+            if not self.analytics_dir.exists():
+                self._force_new_mint = False
                 return
             try:
                 resolved_dir = self.analytics_dir.absolute().resolve(strict=True)
                 dir_identity = path_identity(resolved_dir, expect_directory=True)
+            except FileNotFoundError:
+                self._force_new_mint = False
+                return
             except (OSError, ValueError):
                 return
 
@@ -125,7 +145,8 @@ class InstallationIdentityStore:
                     lock_filename=".analytics-identity.lock",
                     guard_filename=".analytics-identity.operation",
                 ):
-                    self._unlink_owned_identity_files_locked(resolved_dir)
+                    if self._unlink_owned_identity_files_locked(resolved_dir):
+                        self._force_new_mint = False
             except (OSError, RuntimeError, TimeoutError, ValueError):
                 return
 
@@ -194,7 +215,8 @@ class InstallationIdentityStore:
             return None
 
     @staticmethod
-    def _unlink_owned_identity_files_locked(resolved_dir: Path) -> None:
+    def _unlink_owned_identity_files_locked(resolved_dir: Path) -> bool:
+        all_confirmed_deleted = True
         try:
             with os.scandir(resolved_dir) as entries:
                 for entry in entries:
@@ -206,17 +228,26 @@ class InstallationIdentityStore:
                         continue
                     candidate = resolved_dir / entry.name
                     if candidate.parent != resolved_dir:
+                        all_confirmed_deleted = False
                         continue
                     try:
                         file_id: FileIdentity = path_identity(
                             candidate,
                             expect_directory=False,
                         )
-                    except (OSError, ValueError):
+                    except FileNotFoundError:
                         continue
-                    delete_exact_regular(candidate, expected=file_id)
+                    except (OSError, ValueError):
+                        all_confirmed_deleted = False
+                        continue
+                    if not delete_exact_regular(candidate, expected=file_id):
+                        all_confirmed_deleted = False
         except OSError:
-            return
+            return False
+        target = resolved_dir / INSTALLATION_FILENAME
+        if target.exists() or path_is_reparse(target):
+            return False
+        return all_confirmed_deleted
 
 
 __all__ = [
