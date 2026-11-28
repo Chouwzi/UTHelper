@@ -14,16 +14,23 @@ from gui.core.theme import C
 class GraduationGpaCard(ft.Container):
     """GPA ra trường kỳ vọng: cho biết số tín chỉ còn lại cần đạt GPA tối thiểu bao nhiêu."""
 
-    def __init__(self, target_text: str = "", **kwargs) -> None:
+    def __init__(
+        self,
+        target_text: str = "",
+        *,
+        semesters: list[SemesterGradeData] | None = None,
+        progress: CreditProgress | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
-        self._semesters: list[SemesterGradeData] = []
-        self._progress: CreditProgress | None = None
+        self._semesters: list[SemesterGradeData] = list(semesters or ())
+        self._progress: CreditProgress | None = progress
         self._target_text = target_text
         self.bgcolor = C.SURFACE
         self.border_radius = 16
         self.border = ft.Border.all(1, C.BORDER)
         self.padding = ft.Padding.all(16)
-        self._build_ui()
+        self._init_controls()
 
     # ---------- public API ----------
     def set_data(
@@ -33,18 +40,46 @@ class GraduationGpaCard(ft.Container):
     ) -> None:
         self._semesters = semesters
         self._progress = progress
-        self._build_ui()
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._summary_text.value = self._format_summary()
+        self._result_col.controls = self._build_result_controls()
+        updated_any = False
+        for ctrl in (self._summary_text, self._result_col):
+            try:
+                ctrl.update()
+                updated_any = True
+            except Exception:
+                continue
+        if not updated_any:
+            try:
+                self.update()
+            except Exception:
+                pass
 
     def rebuild(self) -> None:
         self.bgcolor = C.SURFACE
         self.border = ft.Border.all(1, C.BORDER)
-        self._build_ui()
+        self._title_icon.color = C.ACCENT
+        self._title_text.color = C.TEXT_PRIMARY
+        self._summary_text.color = C.TEXT_SECONDARY
+        self._summary_text.value = self._format_summary()
+        self._target_field.border_color = C.BORDER
+        self._target_field.focused_border_color = C.ACCENT
+        self._target_field.bgcolor = C.BG
+        self._target_field.color = C.TEXT_PRIMARY
+        self._target_field.cursor_color = C.ACCENT
+        self._target_field.label_style = ft.TextStyle(size=12, color=C.TEXT_SECONDARY)
+        self._result_col.controls = self._build_result_controls()
 
     # ---------- internals ----------
+    def _format_summary(self) -> str:
+        p = self._progress
+        if p is not None:
+            return (
+                f"Đã tích lũy {p.earned_credits:.0f}/{p.required_credits:.0f} TC · "
+                f"còn {max(p.required_credits - p.earned_credits, 0):.0f} TC"
+            )
+        return "Chưa có số tín chỉ ra trường từ Portal."
+
     def _parse_target(self) -> float | None:
         raw = (self._target_text or "").strip().replace(",", ".")
         if not raw:
@@ -55,39 +90,42 @@ class GraduationGpaCard(ft.Container):
             return -1.0
 
     def _on_target_change(self, e: ft.ControlEvent) -> None:
-        self._target_text = e.control.value or ""
+        data_val = getattr(e, "data", None)
+        if isinstance(data_val, str):
+            raw_val = data_val
+        else:
+            ctrl = getattr(e, "control", None)
+            ctrl_val = getattr(ctrl, "value", None)
+            raw_val = str(ctrl_val) if ctrl_val is not None else ""
+        self._target_text = raw_val
+        if self._target_field.value != raw_val:
+            self._target_field.value = raw_val
         self._result_col.controls = self._build_result_controls()
-        try:
-            self._result_col.update()
-        except Exception:
-            pass
+        for ctrl in (self._result_col, self):
+            try:
+                ctrl.update()
+                return
+            except Exception:
+                continue
 
     def _note(self, text: str, color: str | None = None) -> ft.Text:
         return ft.Text(text, size=12.5, color=color or C.TEXT_SECONDARY)
 
-    def _build_ui(self) -> None:
+    def _init_controls(self) -> None:
+        self._title_icon = ft.Icon(ft.Icons.SCHOOL_ROUNDED, size=18, color=C.ACCENT)
+        self._title_text = ft.Text(
+            "GPA ra trường kỳ vọng",
+            size=16,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            expand=True,
+        )
         title = ft.Row(
-            controls=[
-                ft.Icon(ft.Icons.SCHOOL_ROUNDED, size=18, color=C.ACCENT),
-                ft.Text(
-                    "GPA ra trường kỳ vọng",
-                    size=16,
-                    weight=ft.FontWeight.W_700,
-                    color=C.TEXT_PRIMARY,
-                    expand=True,
-                ),
-            ],
+            controls=[self._title_icon, self._title_text],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        p = self._progress
-        if p is not None:
-            summary = (
-                f"Đã tích lũy {p.earned_credits:.0f}/{p.required_credits:.0f} TC · "
-                f"còn {max(p.required_credits - p.earned_credits, 0):.0f} TC"
-            )
-        else:
-            summary = "Chưa có số tín chỉ ra trường từ Portal."
+        self._summary_text = self._note(self._format_summary())
         self._target_field = ft.TextField(
             value=self._target_text,
             label="GPA ra trường hệ 4",
@@ -109,7 +147,12 @@ class GraduationGpaCard(ft.Container):
         )
         self._result_col = ft.Column(controls=self._build_result_controls(), spacing=8)
         self.content = ft.Column(
-            controls=[title, self._note(summary), ft.Row(controls=[self._target_field]), self._result_col],
+            controls=[
+                title,
+                self._summary_text,
+                ft.Row(controls=[self._target_field]),
+                self._result_col,
+            ],
             spacing=10,
         )
 

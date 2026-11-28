@@ -2771,3 +2771,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests`: **All checks passed!**.
   - Full `pytest` suite (`tests/`): **3540 passed, 26 skipped, 0 failed** (3,609 passed across root + extension test suites).
 
+## Fix Semester & Graduation GPA Planner Input Desync (`Prop.__set__`) & Remove Grades Header `Môn học` Action (2026-11-28)
+
+- **Branch & Scope**: `fix/gpa-target-planner-and-grades-header` — `src/gui/components/academic_radar/{gpa_target_card,graduation_gpa_card,radar_card,overall_gpa_card}.py`, `src/gui/components/grade_overview_view.py`, `src/gui/app_controller.py`, `tests/{test_grade_overview_view,test_courses_app_integration}.py`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - **Root-Cause Fix for Unresponsive Semester/Graduation GPA Planner Inputs (`GpaTargetCard`, `GraduationGpaCard`)**: In Flet `0.86.5`, `@control` uses `@dataclass(eq=True)` and `Prop.__set__` short-circuits when `old == value`. Calling `_build_ui()` in `__init__` and again in `set_semester()` / `set_data()` while `_target_text == ""` produced a second `ft.Column` structurally equal (`==`) to the first, causing `Prop.__set__` to keep the first `Column` (and first `TextField` + `_result_col`) mounted on `self.content` while overwriting `self._target_field` and `self._result_col` with detached instances. Refactored both `GpaTargetCard` (with active semester indicator in hint text) and `GraduationGpaCard` to initialize their control trees once and mutate text/result controls in place across `set_semester()`, `set_data()`, `rebuild()`, and `_on_target_change()` (supporting both `e.data` and `e.control.value`), and guarded `AcademicRadarCard` / `OverallGpaCard` against `Prop.__set__` equality skips.
+  - **Clean Up `GradeOverviewView` Header**: Removed the legacy `"Môn học"` header text button (`_courses_btn`) from `GradeOverviewView._header` and `AppController` wiring, leaving only `[Quay lại, Bảng điểm, Tính GPA mong muốn, Làm mới]`.
+- **Verification**:
+  - `ruff check src tests`: **All checks passed!**.
+  - Targeted & integration suites (`test_grade_overview_view.py`, `test_courses_app_integration.py`, `test_academic_radar_*.py`, `test_theme_propagation.py`, `test_architecture_boundaries.py`, `test_repository_governance.py`): **All passed** (including live Flet `Session` + `msgpack` wire-level planner input test).
+

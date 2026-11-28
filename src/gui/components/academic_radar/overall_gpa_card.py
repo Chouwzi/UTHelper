@@ -43,6 +43,7 @@ class OverallGpaCard(ft.Container):
 
     def set_overall(self, overall: OverallGpa | None, update: bool = True) -> None:
         self._overall = overall
+        self.content = None
         if overall is None:
             self.content = ft.Text("Chưa đủ dữ liệu để tính GPA toàn khóa", size=13, color=C.TEXT_SECONDARY)
         else:
