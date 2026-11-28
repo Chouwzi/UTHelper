@@ -1861,8 +1861,6 @@ class ScheduleWeekView(ft.Container):
                 width=220,
                 height=30,
                 alignment=ft.Alignment.CENTER,
-                bgcolor="#FCE4E8",
-                border_radius=5,
                 rotate=ft.Rotate(
                     angle=-0.32,
                     alignment=ft.Alignment.CENTER,
@@ -1888,7 +1886,11 @@ class ScheduleWeekView(ft.Container):
             height=None if narrow else 172,
             content=card_content,
             padding=ft.Padding.all(8 if not narrow else 10),
-            bgcolor=C.SURFACE,
+            bgcolor=(
+                ft.Colors.with_opacity(0.10, C.CRITICAL)
+                if session.cancelled
+                else C.SURFACE
+            ),
             border=ft.Border.all(1, C.BORDER),
             border_radius=8,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
