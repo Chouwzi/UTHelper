@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uthelper"
-version = "2.5.1"
+version = "2.7.0"
 description = "UTHelper — Ứng dụng theo dõi bài tập và deadline UTH E-learning"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,7 +48,7 @@ uth-alert = "main:main"
 packages = ["src"]
 
 [tool.flet]
-org = "com.uthelper"
+org = "io.github.chouwzi"
 product = "UTHelper"
 artifact = "UTHelper"
 company = "UTHelper"
@@ -93,6 +93,9 @@ dependencies = [
 [tool.flet.windows.dev_packages]
 flet-uth-quiz = "extensions/flet_uth_quiz"
 
+[tool.flet.windows.app]
+hide_window_on_start = true
+
 [tool.flet.windows.cleanup]
 # PyWin32 compiled help is not used at runtime; retain every runtime module.
 package_files = ["**.chm"]
@@ -100,7 +103,7 @@ package_files = ["**.chm"]
 # ── Android-specific configuration ──
 [tool.flet.android]
 legacy_packaging = true
-bundle_id = "com.uthelper.uthelper"
+bundle_id = "io.github.chouwzi.uthelper"
 adaptive_icon_background = "#0F172A"
 target_sdk_version = 36
 dependencies = [
@@ -136,7 +139,7 @@ flet-uth-quiz = "extensions/flet_uth_quiz"
 
 # ── iOS-specific configuration ──
 [tool.flet.ios]
-bundle_id = "com.uthelper.UTHelper"
+bundle_id = "io.github.chouwzi.uthelper"
 dependencies = [
     "flet-uth-background-sync==0.1.0",
     "flet-uth-quiz==0.1.0",
@@ -157,6 +160,10 @@ NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để 
 [dependency-groups]
 dev = [
     "flet-webview==0.86.5",
+    # flet-web 0.86.5 builds FastAPI(openapi_prefix=...); FastAPI removed that
+    # keyword in 0.116, which breaks `--web` mode with
+    # "FastAPI.__init__() got an unexpected keyword argument 'openapi_prefix'".
+    "fastapi>=0.115.12,<0.116",
     "filelock>=3.25.0",
     "pytest>=9.0.3",
     "pytest-timeout>=2.3,<3",

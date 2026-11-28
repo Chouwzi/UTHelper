@@ -3,6 +3,8 @@ param(
     [string]$Channel = "msstore",
     [string]$IdentityName = "",
     [string]$Publisher = "",
+    [string]$DisplayName = "",
+    [string]$PublisherDisplayName = "",
     [string]$Version = "",
     [string]$StoreProductId = "",
     [string]$Output = "",
@@ -245,6 +247,17 @@ try {
     }
 
     $logoNode = $manifestDoc.SelectSingleNode("/f:Package/f:Properties/f:Logo", $nsMgr)
+    $displayNameNode = $manifestDoc.SelectSingleNode("/f:Package/f:Properties/f:DisplayName", $nsMgr)
+    $publisherDisplayNameNode = $manifestDoc.SelectSingleNode("/f:Package/f:Properties/f:PublisherDisplayName", $nsMgr)
+    if ($null -eq $displayNameNode -or [string]::IsNullOrWhiteSpace($displayNameNode.InnerText)) {
+        throw "MSIX verification failed: Properties/DisplayName is missing or empty"
+    }
+    if ($null -eq $publisherDisplayNameNode -or [string]::IsNullOrWhiteSpace($publisherDisplayNameNode.InnerText)) {
+        throw "MSIX verification failed: Properties/PublisherDisplayName is missing or empty"
+    }
+    $actualDisplayName = $displayNameNode.InnerText.Trim()
+    $actualPublisherDisplayName = $publisherDisplayNameNode.InnerText.Trim()
+
     $resourceNodes = @($manifestDoc.SelectNodes("/f:Package/f:Resources/f:Resource", $nsMgr))
     if ($resourceNodes.Count -eq 0) {
         throw "MSIX verification failed: Package/Resources/Resource element is missing"
@@ -259,6 +272,27 @@ try {
     }
     $visualElements = $appNode.SelectSingleNode("uap:VisualElements", $nsMgr)
     $defaultTile = if ($null -ne $visualElements) { $visualElements.SelectSingleNode("uap:DefaultTile", $nsMgr) } else { $null }
+
+    if (-not [string]::IsNullOrWhiteSpace($DisplayName)) {
+        $expectedDisplayName = $DisplayName.Trim()
+        if ($actualDisplayName -ne $expectedDisplayName) {
+            throw "MSIX verification failed: Properties/DisplayName '$actualDisplayName' does not match expected '$expectedDisplayName'"
+        }
+        $actualVisualDisplayName = if ($null -ne $visualElements) { $visualElements.GetAttribute("DisplayName").Trim() } else { "" }
+        if ($actualVisualDisplayName -ne $expectedDisplayName) {
+            throw "MSIX verification failed: uap:VisualElements/@DisplayName '$actualVisualDisplayName' does not match expected '$expectedDisplayName'"
+        }
+        $actualStartupDisplayName = $startupTask.GetAttribute("DisplayName").Trim()
+        if ($actualStartupDisplayName -ne $expectedDisplayName) {
+            throw "MSIX verification failed: desktop:StartupTask/@DisplayName '$actualStartupDisplayName' does not match expected '$expectedDisplayName'"
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PublisherDisplayName)) {
+        $expectedPublisherDisplayName = $PublisherDisplayName.Trim()
+        if ($actualPublisherDisplayName -ne $expectedPublisherDisplayName) {
+            throw "MSIX verification failed: Properties/PublisherDisplayName '$actualPublisherDisplayName' does not match expected '$expectedPublisherDisplayName'"
+        }
+    }
 
     if ($null -eq $logoNode -or (Normalize-RelativeAssetPath $logoNode.InnerText) -ne "Assets\StoreLogo.png") {
         throw "MSIX verification failed: Properties/Logo must reference Assets\StoreLogo.png"
@@ -492,9 +526,11 @@ try {
         channel          = $Channel
         asset_name       = [IO.Path]::GetFileName($resolvedInput)
         sha256           = $packageSha256
-        identity_name    = $actualName
-        publisher        = $actualPublisher
-        version          = $actualVersion
+        identity_name          = $actualName
+        publisher              = $actualPublisher
+        display_name           = $actualDisplayName
+        publisher_display_name = $actualPublisherDisplayName
+        version                = $actualVersion
         architecture     = $actualArch
         store_product_id = $observedProductId
         visual_assets    = $verifiedVisualAssets

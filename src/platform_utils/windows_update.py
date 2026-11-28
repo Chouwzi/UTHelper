@@ -198,6 +198,140 @@ def _write_exclusive_utf8(path: Path, content: str) -> None:
         raise OSError("Target file became a symlink or reparse point")
 
 
+def _seal_handoff_readonly_dacl(handoff_dir: Path, files: tuple[Path, ...]) -> None:
+    """Strip write/create/GENERIC_ALL rights from user_sid after writing handoff files."""
+    for target in (*files, handoff_dir):
+        if _is_reparse_or_symlink(target):
+            raise OSError("Refusing symlink or reparse point while sealing handoff DACL")
+    if os.name == "nt":
+        import ntsecuritycon
+        import win32api
+        import win32con
+        import win32security
+
+        token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+        )
+        try:
+            user_sid = win32security.GetTokenInformation(
+                token, win32security.TokenUser
+            )[0]
+        finally:
+            win32api.CloseHandle(token)
+
+        admins_sid = win32security.CreateWellKnownSid(
+            win32security.WinBuiltinAdministratorsSid, None
+        )
+        system_sid = win32security.CreateWellKnownSid(
+            win32security.WinLocalSystemSid, None
+        )
+        inherit_flags = (
+            win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE
+        )
+        # Allow Medium-IL user_sid read/execute ONLY; forbid GENERIC_ALL,
+        # write/create, and DELETE/FILE_DELETE_CHILD so scripts/config/handoff_dir
+        # cannot be modified or rename-swapped without WRITE_DAC (and the elevated
+        # inline bootstrapper pins install_helper.ps1 + config.json by SHA-256).
+        user_readonly_mask = (
+            ntsecuritycon.FILE_GENERIC_READ
+            | ntsecuritycon.FILE_GENERIC_EXECUTE
+        )
+        sealed_dacl = win32security.ACL()
+        seen_sids: set[str] = set()
+        for sid, mask in (
+            (admins_sid, win32con.GENERIC_ALL),
+            (system_sid, win32con.GENERIC_ALL),
+            (user_sid, user_readonly_mask),
+        ):
+            sid_str = win32security.ConvertSidToStringSid(sid)
+            if sid_str in seen_sids:
+                continue
+            seen_sids.add(sid_str)
+            sealed_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                inherit_flags,
+                mask,
+                sid,
+            )
+        security_info = (
+            win32security.DACL_SECURITY_INFORMATION
+            | win32security.PROTECTED_DACL_SECURITY_INFORMATION
+        )
+        for target in (*files, handoff_dir):
+            win32security.SetNamedSecurityInfo(
+                str(target),
+                win32security.SE_FILE_OBJECT,
+                security_info,
+                None,
+                None,
+                sealed_dacl,
+                None,
+            )
+    else:
+        for file_path in files:
+            os.chmod(file_path, 0o400)
+        os.chmod(handoff_dir, 0o500)
+
+
+def _unseal_and_remove_handoff_dir(handoff_dir: Path) -> None:
+    if os.name == "nt":
+        try:
+            import win32api
+            import win32con
+            import win32security
+
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+            )
+            try:
+                user_sid = win32security.GetTokenInformation(
+                    token, win32security.TokenUser
+                )[0]
+            finally:
+                win32api.CloseHandle(token)
+
+            cleanup_dacl = win32security.ACL()
+            cleanup_dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                win32security.CONTAINER_INHERIT_ACE | win32security.OBJECT_INHERIT_ACE,
+                win32con.GENERIC_ALL,
+                user_sid,
+            )
+            targets: list[Path] = [handoff_dir]
+            try:
+                targets.extend(handoff_dir.iterdir())
+            except OSError:
+                pass
+            for target in targets:
+                if _is_reparse_or_symlink(target):
+                    continue
+                try:
+                    win32security.SetNamedSecurityInfo(
+                        str(target),
+                        win32security.SE_FILE_OBJECT,
+                        win32security.DACL_SECURITY_INFORMATION,
+                        None,
+                        None,
+                        cleanup_dacl,
+                        None,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    else:
+        try:
+            os.chmod(handoff_dir, 0o700)
+            for child in handoff_dir.iterdir():
+                try:
+                    os.chmod(child, 0o600)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    shutil.rmtree(handoff_dir, ignore_errors=True)
+
+
 class VerificationCancelled(RuntimeError):
     """Raised when an active Windows package verification probe is cancelled."""
 
@@ -205,6 +339,10 @@ class VerificationCancelled(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class TransientVerificationResult(VerificationResult):
     retryable: bool = True
+
+    @property
+    def is_transient(self) -> bool:
+        return self.retryable
 
 _SIGNATURE_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
@@ -357,6 +495,7 @@ def _powershell_json(
         completed = subprocess.run(
             argv,
             env=child_environment,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=bounded_timeout,
@@ -368,6 +507,7 @@ def _powershell_json(
         proc = subprocess.Popen(
             argv,
             env=child_environment,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -471,8 +611,65 @@ def probe_executable_details(
     )
 
 
+def _normalize_guid_token(raw: object) -> str:
+    if isinstance(raw, (list, tuple)):
+        for entry in raw:
+            norm = _normalize_guid_token(entry)
+            if norm:
+                return norm
+        return ""
+    return str(raw or "").strip().strip("{}").upper()
+
+
+def _has_installed_burn_bundle() -> bool:
+    """Detect whether any UTHelper WiX Burn bundle is registered in Uninstall."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    expected = _normalize_guid_token(BURN_UPGRADE_CODE)
+    uninstall_subkeys = (
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    )
+    roots = (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER)
+    base_access = winreg.KEY_READ
+    view_flags = (0, getattr(winreg, "KEY_WOW64_64KEY", 0), getattr(winreg, "KEY_WOW64_32KEY", 0))
+
+    for root in roots:
+        for subkey_path in uninstall_subkeys:
+            for view_flag in dict.fromkeys(view_flags):
+                try:
+                    with winreg.OpenKey(root, subkey_path, 0, base_access | view_flag) as uninstall_key:
+                        index = 0
+                        while True:
+                            try:
+                                child_name = winreg.EnumKey(uninstall_key, index)
+                                index += 1
+                            except OSError:
+                                break
+                            try:
+                                with winreg.OpenKey(
+                                    uninstall_key, child_name, 0, base_access | view_flag
+                                ) as entry_key:
+                                    upgrade_val, _ = winreg.QueryValueEx(
+                                        entry_key, "BundleUpgradeCode"
+                                    )
+                                    if _normalize_guid_token(upgrade_val) == expected:
+                                        return True
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+    return False
+
+
 def read_install_channel() -> str | None:
-    """Read only the machine-scoped channel marker written by the MSI."""
+    """Resolve effective Windows install channel, preferring Burn when registered."""
+    if _has_installed_burn_bundle():
+        return "bootstrapper"
+
     try:
         import winreg
     except ImportError:
@@ -610,12 +807,25 @@ class WindowsPackageVerifier:
             if package.package_type == "exe" and not magic.startswith(b"MZ"):
                 return VerificationResult(False, "Burn executable header mismatch")
 
-            signature = _call_probe(
-                self.signature_probe,
-                candidate_path,
-                self.timeout_seconds,
-                self._cancel,
-            )
+            try:
+                signature = _call_probe(
+                    self.signature_probe,
+                    candidate_path,
+                    self.timeout_seconds,
+                    self._cancel,
+                )
+            except (
+                VerificationCancelled,
+                subprocess.TimeoutExpired,
+                subprocess.SubprocessError,
+            ):
+                raise
+            except OSError:
+                return TransientVerificationResult(
+                    False,
+                    "Windows package verification failed",
+                    retryable=True,
+                )
             fingerprint = normalize_fingerprint(signature.fingerprint)
             self_signed_pinned = (
                 candidate.manifest.schema_version == 3
@@ -641,12 +851,25 @@ class WindowsPackageVerifier:
                 )
 
             if package.package_type == "msi":
-                details = _call_probe(
-                    self.msi_probe,
-                    candidate_path,
-                    self.timeout_seconds,
-                    self._cancel,
-                )
+                try:
+                    details = _call_probe(
+                        self.msi_probe,
+                        candidate_path,
+                        self.timeout_seconds,
+                        self._cancel,
+                    )
+                except (
+                    VerificationCancelled,
+                    subprocess.TimeoutExpired,
+                    subprocess.SubprocessError,
+                ):
+                    raise
+                except OSError:
+                    return TransientVerificationResult(
+                        False,
+                        "Windows package verification failed",
+                        retryable=True,
+                    )
                 if (
                     details.product_name != "UTHelper"
                     or details.product_version != candidate.manifest.release_version
@@ -655,12 +878,25 @@ class WindowsPackageVerifier:
                 ):
                     return VerificationResult(False, "MSI identity mismatch")
             else:
-                details = _call_probe(
-                    self.executable_probe,
-                    candidate_path,
-                    self.timeout_seconds,
-                    self._cancel,
-                )
+                try:
+                    details = _call_probe(
+                        self.executable_probe,
+                        candidate_path,
+                        self.timeout_seconds,
+                        self._cancel,
+                    )
+                except (
+                    VerificationCancelled,
+                    subprocess.TimeoutExpired,
+                    subprocess.SubprocessError,
+                ):
+                    raise
+                except OSError:
+                    return TransientVerificationResult(
+                        False,
+                        "Windows package verification failed",
+                        retryable=True,
+                    )
                 if (
                     details.product_name != "UTHelper"
                     or details.product_version != candidate.manifest.release_version
@@ -691,12 +927,143 @@ class WindowsPackageVerifier:
 
 _INSTALL_HELPER_SCRIPT = r"""
 param(
-  [Parameter(Mandatory=$true)][string]$ConfigPath
+  [Parameter(Mandatory=$true)][string]$ConfigPath,
+  [string]$ExpectedSha256 = '',
+  [string]$ExpectedKind = '',
+  [string]$ExpectedConfigSha256 = ''
 )
 $ErrorActionPreference = 'Stop'
-$config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$exitCode = 1
+foreach ($cfgCandidate in @($ConfigPath, (Split-Path -Parent $ConfigPath))) {
+  if ((Get-Item -LiteralPath $cfgCandidate -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point in handoff config path'
+  }
+}
+$cfgStream = [System.IO.File]::Open(
+  $ConfigPath,
+  [System.IO.FileMode]::Open,
+  [System.IO.FileAccess]::Read,
+  [System.IO.FileShare]::Read
+)
 try {
+  $cfgMem = New-Object System.IO.MemoryStream
+  try {
+    $cfgStream.CopyTo($cfgMem)
+    $cfgBytes = $cfgMem.ToArray()
+  } finally {
+    $cfgMem.Dispose()
+  }
+} finally {
+  $cfgStream.Dispose()
+}
+if ($ExpectedConfigSha256) {
+  $cfgShaAlg = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $cfgHash = ([System.BitConverter]::ToString($cfgShaAlg.ComputeHash($cfgBytes))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $cfgShaAlg.Dispose()
+  }
+  if ($cfgHash -ne $ExpectedConfigSha256.ToLowerInvariant()) {
+    throw 'Handoff config SHA-256 verification failed'
+  }
+}
+$config = [System.Text.Encoding]::UTF8.GetString($cfgBytes) | ConvertFrom-Json
+$handoffOwnerSid = $null
+try {
+  $handoffOwnerSid = (Get-Acl -LiteralPath $ConfigPath).GetOwner([System.Security.Principal.SecurityIdentifier])
+} catch {}
+$exitCode = 1
+$stageDir = $null
+$statusParent = $null
+$trustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18')
+function Assert-TrustedAdminDir([string]$Path, [System.Security.AccessControl.DirectorySecurity]$Acl, [System.Security.Principal.SecurityIdentifier]$OwnerSid) {
+  if ($null -eq $OwnerSid) { throw 'Missing OwnerSid' }
+  if (Test-Path -LiteralPath $Path) {
+    $existing = Get-Item -LiteralPath $Path -Force
+    if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+      throw ('Refusing reparse point in ' + $Path)
+    }
+    [System.IO.Directory]::SetAccessControl($Path, $Acl)
+  } else {
+    [void][System.IO.Directory]::CreateDirectory($Path, $Acl)
+  }
+  try {
+    $dirOwnerAcl = Get-Acl -LiteralPath $Path
+    $dirOwnerAcl.SetOwner($OwnerSid)
+    Set-Acl -LiteralPath $Path -AclObject $dirOwnerAcl
+  } catch {}
+  [System.IO.Directory]::SetAccessControl($Path, $Acl)
+  $verifiedItem = Get-Item -LiteralPath $Path -Force
+  if ($verifiedItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw ('Refusing reparse point after lock in ' + $Path)
+  }
+  $verifiedOwner = (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+  if ($trustedOwnerSids -notcontains $verifiedOwner) {
+    throw ('Untrusted directory owner in ' + $Path)
+  }
+}
+try {
+  $pinnedSha256 = ([string]$config.expected_sha256).ToLowerInvariant()
+  if ($ExpectedSha256 -and ($pinnedSha256 -ne $ExpectedSha256.ToLowerInvariant())) {
+    throw 'Installer SHA-256 command-line pin mismatch'
+  }
+  $installerKind = [string]$config.kind
+  if ($ExpectedKind -and ($installerKind -ne $ExpectedKind)) {
+    throw 'Installer kind command-line pin mismatch'
+  }
+
+  $programDataBase = [Environment]::GetFolderPath('CommonApplicationData')
+  if (-not $programDataBase) { $programDataBase = $env:ProgramData }
+  if (-not $programDataBase) { throw 'ProgramData directory unavailable' }
+  $uthelperProgramData = Join-Path $programDataBase 'UTHelper'
+  $stageParent = Join-Path $uthelperProgramData 'update_stage'
+  $candidateStatusParent = Join-Path $uthelperProgramData 'update_status'
+
+  $adminOwnerSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+  $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  $prop = [System.Security.AccessControl.PropagationFlags]::None
+
+  $adminAcl = New-Object System.Security.AccessControl.DirectorySecurity
+  $adminAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+    $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,
+      $inherit,
+      $prop,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $adminAcl.AddAccessRule($rule)
+  }
+
+  $readOnlyStatusAcl = New-Object System.Security.AccessControl.DirectorySecurity
+  $readOnlyStatusAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+    $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $sid,
+      [System.Security.AccessControl.FileSystemRights]::FullControl,
+      $inherit,
+      $prop,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $readOnlyStatusAcl.AddAccessRule($rule)
+  }
+  $usersSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')
+  $usersReadRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $usersSid,
+    [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+    $inherit,
+    $prop,
+    [System.Security.AccessControl.AccessControlType]::Allow
+  )
+  $readOnlyStatusAcl.AddAccessRule($usersReadRule)
+
+  Assert-TrustedAdminDir $uthelperProgramData $readOnlyStatusAcl $adminOwnerSid
+  Assert-TrustedAdminDir $stageParent $adminAcl $adminOwnerSid
+  Assert-TrustedAdminDir $candidateStatusParent $readOnlyStatusAcl $adminOwnerSid
+  $statusParent = $candidateStatusParent
+
   $parentPid = [int]$config.parent_pid
   $waitSeconds = [double]$config.wait_timeout_seconds
   if ($waitSeconds -le 0) { $waitSeconds = 30 }
@@ -708,17 +1075,49 @@ try {
   Start-Sleep -Milliseconds 300
 
   $packagePath = [string]$config.package_path
-  $actualHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actualHash -ne ([string]$config.expected_sha256).ToLowerInvariant()) {
-    throw 'Installer SHA-256 verification failed'
+  if ((Get-Item -LiteralPath $packagePath -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point installer package'
+  }
+
+  $stageDir = Join-Path $stageParent ('stage-' + [guid]::NewGuid().ToString('N'))
+  Assert-TrustedAdminDir $stageDir $adminAcl $adminOwnerSid
+
+  $fileName = [System.IO.Path]::GetFileName($packagePath)
+  if (-not $fileName) { throw 'Invalid installer filename' }
+  $stagedPackage = Join-Path $stageDir $fileName
+  Copy-Item -LiteralPath $packagePath -Destination $stagedPackage -Force
+  if ((Get-Item -LiteralPath $stagedPackage -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    throw 'Refusing reparse point in staged installer'
+  }
+
+  $lockStream = [System.IO.File]::Open(
+    $stagedPackage,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::Read
+  )
+  try {
+    $sha256Alg = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hashBytes = $sha256Alg.ComputeHash($lockStream)
+    } finally {
+      $sha256Alg.Dispose()
+    }
+    $streamHash = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    $actualHash = (Get-FileHash -LiteralPath $stagedPackage -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (($streamHash -ne $pinnedSha256) -or ($actualHash -ne $pinnedSha256)) {
+      throw 'Installer SHA-256 verification failed'
+    }
+  } finally {
+    $lockStream.Dispose()
   }
 
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  if ([string]$config.kind -eq 'launch_msi') {
+  if ($installerKind -eq 'launch_msi') {
     $psi.FileName = (Join-Path $env:SystemRoot 'System32\msiexec.exe')
-    $psi.Arguments = '/i "' + $packagePath + '" /passive /norestart'
-  } elseif ([string]$config.kind -eq 'launch_bootstrapper') {
-    $psi.FileName = $packagePath
+    $psi.Arguments = '/i "' + $stagedPackage + '" /passive /norestart'
+  } elseif ($installerKind -eq 'launch_bootstrapper') {
+    $psi.FileName = $stagedPackage
     $psi.Arguments = '/passive /norestart'
   } else {
     throw 'Unsupported installer kind'
@@ -730,13 +1129,62 @@ try {
 } catch {
   if ($exitCode -eq 0) { $exitCode = 1 }
 } finally {
+  if ($stageDir -and (Test-Path -LiteralPath $stageDir)) {
+    Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
   $statusPath = [string]$config.status_path
-  if ($statusPath) {
-    $statusTmp = $statusPath + '.tmp'
-    $statusJson = @{ exit_code = $exitCode } | ConvertTo-Json -Compress
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($statusTmp, $statusJson, $utf8NoBom)
-    Move-Item -LiteralPath $statusTmp -Destination $statusPath -Force
+  if ($statusPath -and $statusParent -and (Test-Path -LiteralPath $statusParent)) {
+    $resolvedStatusDir = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($statusPath))
+    $resolvedStatusParent = [System.IO.Path]::GetFullPath($statusParent)
+    $statusFileName = [System.IO.Path]::GetFileName($statusPath)
+    if (
+      ($resolvedStatusDir.Equals($resolvedStatusParent, [System.StringComparison]::OrdinalIgnoreCase)) -and
+      ($statusFileName -match '^handoff-[0-9a-f]+\.status\.json$')
+    ) {
+      $staleCutoff = (Get-Date).ToUniversalTime().AddMinutes(-15)
+      Get-ChildItem -LiteralPath $resolvedStatusParent -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if (
+          ($_.Name -ne $statusFileName) -and
+          ($_.Name -match '^handoff-[0-9a-f]+\.status\.json(\.tmp)?$') -and
+          (-not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -and
+          ($_.LastWriteTimeUtc -lt $staleCutoff)
+        ) {
+          try { [System.IO.File]::Delete($_.FullName) } catch {}
+        }
+      }
+      $safeStatusPath = Join-Path $resolvedStatusParent $statusFileName
+      $statusTmp = Join-Path $resolvedStatusParent ($statusFileName + '.tmp')
+      $statusJson = @{ exit_code = $exitCode } | ConvertTo-Json -Compress
+      $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+      [System.IO.File]::WriteAllText($statusTmp, $statusJson, $utf8NoBom)
+      if ($handoffOwnerSid) {
+        $statusFileAcl = New-Object System.Security.AccessControl.FileSecurity
+        $statusFileAcl.SetAccessRuleProtection($true, $false)
+        foreach ($sidValue in @('S-1-5-32-544', 'S-1-5-18')) {
+          $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
+          $statusFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+          )))
+        }
+        if ($trustedOwnerSids -notcontains $handoffOwnerSid.Value) {
+          $statusFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $handoffOwnerSid,
+            [System.Security.AccessControl.FileSystemRights]'Read, Synchronize, Delete',
+            [System.Security.AccessControl.AccessControlType]::Allow
+          )))
+        }
+        [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
+        try {
+          $ownerAcl = Get-Acl -LiteralPath $statusTmp
+          $ownerAcl.SetOwner($adminOwnerSid)
+          Set-Acl -LiteralPath $statusTmp -AclObject $ownerAcl
+        } catch {}
+        [System.IO.File]::SetAccessControl($statusTmp, $statusFileAcl)
+      }
+      Move-Item -LiteralPath $statusTmp -Destination $safeStatusPath -Force
+    }
   }
 }
 """
@@ -748,13 +1196,61 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $statusPath = [string]$config.status_path
-$deadline = (Get-Date).AddSeconds(600)
+$statusWaitSeconds = 600.0
+if ($null -ne $config.status_wait_timeout_seconds) {
+  $parsedWait = 0.0
+  if (
+    [double]::TryParse(
+      [string]$config.status_wait_timeout_seconds,
+      [System.Globalization.NumberStyles]::Float,
+      [System.Globalization.CultureInfo]::InvariantCulture,
+      [ref]$parsedWait
+    ) -and ($parsedWait -gt 0)
+  ) {
+    $statusWaitSeconds = [Math]::Min($parsedWait, 600.0)
+  }
+}
+$deadline = (Get-Date).AddSeconds($statusWaitSeconds)
 $exitCode = -1
 while ((Get-Date) -lt $deadline) {
   if ($statusPath -and (Test-Path -LiteralPath $statusPath)) {
     try {
-      $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
-      $exitCode = [int]$status.exit_code
+      $statusItem = Get-Item -LiteralPath $statusPath -Force -ErrorAction Stop
+      if ($statusItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { break }
+      $rawStatus = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 -ErrorAction Stop
+      if ([string]::IsNullOrWhiteSpace($rawStatus)) { throw 'Empty status payload' }
+      $status = $rawStatus | ConvertFrom-Json -ErrorAction Stop
+      if (
+        ($null -eq $status) -or
+        ($status.PSObject.Properties.Match('exit_code').Count -eq 0) -or
+        ($null -eq $status.exit_code) -or
+        ($status.exit_code -is [bool])
+      ) {
+        throw 'Missing exit_code in status payload'
+      }
+      $parsedExitCode = 0
+      if (
+        -not [int]::TryParse(
+          [string]$status.exit_code,
+          [System.Globalization.NumberStyles]::Integer,
+          [System.Globalization.CultureInfo]::InvariantCulture,
+          [ref]$parsedExitCode
+        )
+      ) {
+        throw 'Invalid integer exit_code in status payload'
+      }
+      $exitCode = $parsedExitCode
+      if ($statusItem.Name -match '^handoff-[0-9a-f]+\.status\.json$') {
+        for ($delTry = 0; $delTry -lt 3; $delTry++) {
+          try {
+            [System.IO.File]::Delete($statusItem.FullName)
+            break
+          } catch {
+            if (-not (Test-Path -LiteralPath $statusItem.FullName)) { break }
+            Start-Sleep -Milliseconds 50
+          }
+        }
+      }
       break
     } catch {}
   }
@@ -791,7 +1287,59 @@ if ($exitCode -eq 0 -or $exitCode -eq 3010) {
 Set-Location -LiteralPath $env:TEMP
 $handoffDir = [string]$config.handoff_dir
 if ($handoffDir -and (Test-Path -LiteralPath $handoffDir)) {
-  Remove-Item -LiteralPath $handoffDir -Recurse -Force -ErrorAction SilentlyContinue
+  $dirItem = Get-Item -LiteralPath $handoffDir -Force -ErrorAction SilentlyContinue
+  if (
+    $dirItem -and
+    $dirItem.PSIsContainer -and
+    ($dirItem.Name -match '^handoff-[0-9a-f]+$') -and
+    (-not ($dirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -and
+    $dirItem.Parent -and
+    ($dirItem.Parent.Name -eq 'update_handoff') -and
+    (-not ($dirItem.Parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+  ) {
+    try {
+      $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $dirRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentSid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow
+      )
+      $fileRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentSid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+      )
+      $children = @(Get-ChildItem -LiteralPath $dirItem.FullName -Force -ErrorAction SilentlyContinue)
+      $hasReparseChild = $false
+      foreach ($child in $children) {
+        if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+          $hasReparseChild = $true
+          break
+        }
+      }
+      if (-not $hasReparseChild) {
+        $dirAcl = [System.IO.Directory]::GetAccessControl(
+          $dirItem.FullName,
+          [System.Security.AccessControl.AccessControlSections]::Access
+        )
+        $dirAcl.SetAccessRule($dirRule)
+        [System.IO.Directory]::SetAccessControl($dirItem.FullName, $dirAcl)
+        foreach ($child in $children) {
+          if (-not $child.PSIsContainer) {
+            $childAcl = [System.IO.File]::GetAccessControl(
+              $child.FullName,
+              [System.Security.AccessControl.AccessControlSections]::Access
+            )
+            $childAcl.SetAccessRule($fileRule)
+            [System.IO.File]::SetAccessControl($child.FullName, $childAcl)
+          }
+        }
+        Remove-Item -LiteralPath $dirItem.FullName -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 """
 
@@ -887,7 +1435,12 @@ def resolve_relaunch_executable(
 
 
 def _start_process(argv: list[str]) -> _Process:
-    return subprocess.Popen(argv)
+    return subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 class WindowsPackageLauncher:
@@ -1097,7 +1650,13 @@ class WindowsPackageLauncher:
             )
 
         config_path = handoff_dir / "config.json"
-        status_path = handoff_dir / "status.json"
+        program_data_raw = os.environ.get("ProgramData", "").strip() or r"C:\ProgramData"
+        status_path = (
+            Path(program_data_raw)
+            / "UTHelper"
+            / "update_status"
+            / f"{handoff_dir.name}.status.json"
+        )
         install_ps1 = handoff_dir / "install_helper.ps1"
         relaunch_ps1 = handoff_dir / "relaunch_helper.ps1"
         config_data = {
@@ -1115,12 +1674,62 @@ class WindowsPackageLauncher:
                 str(fallback_relaunch) if fallback_relaunch is not None else ""
             ),
         }
+        config_json = json.dumps(config_data)
+        config_sha256 = hashlib.sha256(config_json.encode("utf-8")).hexdigest().lower()
         try:
-            _write_exclusive_utf8(config_path, json.dumps(config_data))
+            _write_exclusive_utf8(config_path, config_json)
             _write_exclusive_utf8(install_ps1, _INSTALL_HELPER_SCRIPT)
             _write_exclusive_utf8(relaunch_ps1, _RELAUNCH_HELPER_SCRIPT)
+            script_sha256 = hashlib.sha256(install_ps1.read_bytes()).hexdigest().lower()
+            _seal_handoff_readonly_dacl(
+                handoff_dir,
+                (config_path, install_ps1, relaunch_ps1),
+            )
         except OSError:
-            shutil.rmtree(handoff_dir, ignore_errors=True)
+            _unseal_and_remove_handoff_dir(handoff_dir)
+            return LaunchResult(
+                False,
+                "installer launch failed",
+                status="launch_failed",
+            )
+
+        def _ps_single_quote(value: str) -> str:
+            if any(ch in value for ch in ("\x00", "\r", "\n")):
+                raise ValueError("Invalid control character in PowerShell argument")
+            return "'" + value.replace("'", "''") + "'"
+
+        try:
+            bootstrap_command = (
+                "& { param([string]$ScriptPath,[string]$ExpectedScriptSha256,"
+                "[string]$ConfigPath,[string]$ExpectedSha256,[string]$ExpectedKind,"
+                "[string]$ExpectedConfigSha256) $ErrorActionPreference='Stop'; "
+                "foreach ($p in @($ScriptPath,(Split-Path -Parent $ScriptPath))) { "
+                "if ((Get-Item -LiteralPath $p -Force).Attributes -band "
+                "[System.IO.FileAttributes]::ReparsePoint) { "
+                "throw 'Refusing reparse point in install script path' } }; "
+                "$fs=[System.IO.File]::Open($ScriptPath,[System.IO.FileMode]::Open,"
+                "[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read); "
+                "try { $ms=New-Object System.IO.MemoryStream; try { "
+                "$fs.CopyTo($ms); $bytes=$ms.ToArray() } finally { $ms.Dispose() } } "
+                "finally { $fs.Dispose() }; "
+                "$sha=[System.Security.Cryptography.SHA256]::Create(); "
+                "try { $actual=([System.BitConverter]::ToString("
+                "$sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } "
+                "finally { $sha.Dispose() }; "
+                "if ($actual -ne $ExpectedScriptSha256.ToLowerInvariant()) { "
+                "throw 'Install helper script SHA-256 verification failed' }; "
+                "$sb=[scriptblock]::Create([System.Text.Encoding]::UTF8.GetString($bytes)); "
+                "& $sb -ConfigPath $ConfigPath -ExpectedSha256 $ExpectedSha256 "
+                "-ExpectedKind $ExpectedKind -ExpectedConfigSha256 $ExpectedConfigSha256 } "
+                f"-ScriptPath {_ps_single_quote(str(install_ps1))} "
+                f"-ExpectedScriptSha256 {_ps_single_quote(script_sha256)} "
+                f"-ConfigPath {_ps_single_quote(str(config_path))} "
+                f"-ExpectedSha256 {_ps_single_quote(package.sha256.lower())} "
+                f"-ExpectedKind {_ps_single_quote(kind)} "
+                f"-ExpectedConfigSha256 {_ps_single_quote(config_sha256)}"
+            )
+        except ValueError:
+            _unseal_and_remove_handoff_dir(handoff_dir)
             return LaunchResult(
                 False,
                 "installer launch failed",
@@ -1158,10 +1767,8 @@ class WindowsPackageLauncher:
             "Hidden",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            str(install_ps1),
-            "-ConfigPath",
-            str(config_path),
+            "-Command",
+            bootstrap_command,
         ]
         if _is_user_admin():
             try:
@@ -1176,7 +1783,7 @@ class WindowsPackageLauncher:
                     stderr=subprocess.DEVNULL,
                 )
             except OSError:
-                shutil.rmtree(handoff_dir, ignore_errors=True)
+                _unseal_and_remove_handoff_dir(handoff_dir)
                 return LaunchResult(
                     False,
                     "installer launch failed",
@@ -1189,14 +1796,14 @@ class WindowsPackageLauncher:
                 safe_cwd,
             )
             if err == _ERROR_CANCELLED:
-                shutil.rmtree(handoff_dir, ignore_errors=True)
+                _unseal_and_remove_handoff_dir(handoff_dir)
                 return LaunchResult(
                     False,
                     "installer cancelled by user",
                     status="uac_cancelled",
                 )
             if err != 0:
-                shutil.rmtree(handoff_dir, ignore_errors=True)
+                _unseal_and_remove_handoff_dir(handoff_dir)
                 return LaunchResult(
                     False,
                     "installer launch failed",

@@ -142,7 +142,9 @@ def test_android_build_workflows_install_the_notification_patcher():
         assert "flet-android-notifications-patch --project-root build/flutter" in workflow
 
     build_workflow = _read(".github/workflows/build-android.yml")
-    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in build_workflow
+    assert 'application-id "$APK")" = "io.github.chouwzi.uthelper"' in build_workflow
+    benchmark_workflow = _read(".github/workflows/package-benchmark.yml")
+    assert "'com.uthelper.benchmark' || 'io.github.chouwzi.uthelper'" in benchmark_workflow
 
 
 def test_android_release_uses_canonical_version_code_and_signing_inputs():
@@ -158,9 +160,11 @@ def test_android_release_uses_canonical_version_code_and_signing_inputs():
     assert "UTH_DISTRIBUTION_CHANNEL=apk_lts" in workflow
     assert "--distribution-channel apk_lts --distribution-output src/assets/distribution-channel.json" in workflow
     assert "--channel apk_lts" in workflow
-    assert 'application-id "$APK")" = "com.uthelper.uthelper"' in workflow
+    assert 'application-id "$APK")" = "io.github.chouwzi.uthelper"' in workflow
     assert 'version-code "$APK")" = "$BUILD_NUMBER"' in workflow
-    assert config["tool"]["flet"]["android"]["bundle_id"] == "com.uthelper.uthelper"
+    assert config["tool"]["flet"]["org"] == "io.github.chouwzi"
+    assert config["tool"]["flet"]["android"]["bundle_id"] == "io.github.chouwzi.uthelper"
+    assert config["tool"]["flet"]["ios"]["bundle_id"] == "io.github.chouwzi.uthelper"
     assert "yes | flet build apk" not in workflow
     assert "--yes --verbose" in workflow
     assert "COMPLETED_APKS" not in workflow
@@ -258,7 +262,10 @@ def test_local_android_build_script_applies_the_native_notification_patch():
     assert '"org.gradle.workers.max" = "2"' in script
     assert '"kotlin.compiler.execution.strategy" = "in-process"' in script
     assert '"kotlin.incremental" = "false"' in script
-    assert script.count("build $Target @fletOptions --verbose") == 2
+    assert (
+        script.count("Invoke-FletCliBuild -BuildTarget $Target -BuildOptions $fletOptions")
+        == 2
+    )
 
 
 def test_wix7_build_requires_owner_confirmed_eula_variable():
@@ -439,7 +446,11 @@ def test_every_release_flet_build_generates_packaged_runtime_assets_first():
     candidates = tuple((ROOT / ".github" / "workflows").glob("*.y*ml")) + tuple(
         (ROOT / "scripts").glob("*.ps1")
     )
-    invocation_markers = ("flet build ", "$fletCommand.Source build ")
+    invocation_markers = (
+        "flet build ",
+        "$fletCommand.Source build ",
+        "Invoke-FletCliBuild -BuildTarget ",
+    )
     build_files = []
     for path in candidates:
         content = path.read_text(encoding="utf-8").replace("\\", "/")

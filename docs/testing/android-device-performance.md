@@ -88,7 +88,7 @@ justify silently changing the production release/updater contract.
 ## Isolated installation comparison
 
 CI matrix APKs have different ephemeral debug certificates. Replacing them in
-`com.uthelper.uthelper` would require uninstalling the logged-in application.
+`io.github.chouwzi.uthelper` would require uninstalling the logged-in application.
 The manual workflow's `android_namespace=isolated` instead builds
 `com.uthelper.benchmark` from the same source and three packaging profiles. It
 verifies the actual application ID, version, signatures and notification receivers

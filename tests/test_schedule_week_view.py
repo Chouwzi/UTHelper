@@ -423,6 +423,7 @@ def test_schedule_theme_update_rebuilds_nav_button_styles():
         view.update_theme()
         assert view._prev_btn.icon_color == C.TEXT_PRIMARY
         assert view._next_btn.icon_color == C.TEXT_PRIMARY
+        assert view._picker_chevron_icon.color == C.TEXT_SECONDARY
         assert view._refresh_btn.icon_color == C.TEXT_SECONDARY
         assert view._refresh_action_box.bgcolor == C.SURFACE
         assert view._stepper_box.bgcolor == C.SURFACE
@@ -828,3 +829,348 @@ def test_app_controller_open_url_in_app_mounts_embedded_webview_pane_and_handles
     assert controller._app_webview_host.visible is False
     assert controller._app_webview_pane is None
     assert pane.disposed is True
+
+
+def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_lengths():
+    view = _view(1120)
+    s_elearning = _session(
+        TODAY,
+        subject="Nhập môn Trí tuệ nhân tạo",
+        room="E-Learning",
+        cancelled=False,
+    )
+    s_long_cs1_address = _session(
+        TODAY,
+        subject="Phân tích và thiết kế hệ thống thông tin quản lý doanh nghiệp hiện đại",
+        room="F502 - CS1 (P.Thạnh Mỹ Tây, TP.HCM)",
+        cancelled=True,
+    )
+
+    card_short = view._session_summary_card(s_elearning, narrow=False)
+    card_long = view._session_summary_card(s_long_cs1_address, narrow=False)
+    card_narrow = view._session_summary_card(s_long_cs1_address, narrow=True)
+
+    assert card_short.height == 172
+    assert card_long.height == 172
+    assert card_narrow.height is None
+    assert card_short.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    assert card_long.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+
+    summary_col = card_long.content.controls[0]
+    top_row = summary_col.controls[0]
+    assert isinstance(top_row, ft.Row)
+    assert "07:00 – 09:30" in _text_values(top_row)
+    assert "Tạm ngưng" in _text_values(top_row)
+
+    title_txt, class_txt, room_txt = (
+        summary_col.controls[1],
+        summary_col.controls[2],
+        summary_col.controls[3],
+    )
+    assert title_txt.max_lines == 2
+    assert class_txt.max_lines == 1
+    assert room_txt.max_lines == 2
+
+
+def test_hydrate_and_ensure_weeks_hydrates_cache_immediately_and_debounces_rapid_month_swipes(
+    tmp_path,
+):
+    from core.today_schedule import WeekScheduleCache
+
+    today_monday = _monday(date.today())
+    cache = WeekScheduleCache(cache_dir=tmp_path, namespace="student-1")
+    cached_session = _session(today_monday, subject="Môn từ cache 0ms")
+    cache.save_week(
+        today_monday,
+        {today_monday: (cached_session,)},
+        datetime.now(),
+    )
+
+    month1_far = today_monday + timedelta(weeks=8)
+    month2_far = today_monday + timedelta(weeks=14)
+    fetched_mondays: list[date] = []
+    change_notifications: list[int] = []
+
+    async def scenario():
+        tasks: list[asyncio.Task] = []
+
+        class _AsyncPage:
+            width = 1120
+            height = 844
+            window = SimpleNamespace(width=1120)
+
+            def run_task(self, coro_fn, *args, **kwargs):
+                t = asyncio.create_task(coro_fn(*args, **kwargs))
+                tasks.append(t)
+                return t
+
+            def update(self):
+                pass
+
+        def _fetch_week(monday_date: date):
+            fetched_mondays.append(monday_date)
+            return {
+                monday_date: (
+                    _session(monday_date, subject=f"Live {monday_date.isoformat()}"),
+                )
+            }
+
+        view = ScheduleWeekView(
+            page=_AsyncPage(),
+            fetch_week=_fetch_week,
+            cache=cache,
+            on_weeks_changed=lambda: change_notifications.append(1),
+        )
+
+        # First month swipe (debounced 250ms): cache must hydrate synchronously in 0ms
+        view.hydrate_and_ensure_weeks([today_monday, month1_far], debounce_ms=250)
+        hydrated = view.sessions_for_day(today_monday)
+        assert len(hydrated) == 1
+        assert hydrated[0].session_id == cached_session.session_id
+        assert hydrated[0].subject == "Môn từ cache 0ms"
+        assert hydrated[0].link == ""  # Disk cache never persists personal URLs
+        assert today_monday in view.sessions_for_week(today_monday)
+
+        # Within 50ms, user swipes to month2 -> month1 fetch MUST be cancelled!
+        await asyncio.sleep(0.05)
+        assert month1_far not in fetched_mondays
+        view.hydrate_and_ensure_weeks([month2_far], debounce_ms=250)
+
+        await asyncio.sleep(0.32)
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        assert month1_far not in fetched_mondays
+        assert month2_far in fetched_mondays
+        assert view.sessions_for_day(month2_far)[0].subject == f"Live {month2_far.isoformat()}"
+        assert len(change_notifications) >= 1
+
+    asyncio.run(scenario())
+
+
+def test_schedule_week_view_duck_typed_maintenance_preserves_cache_and_notifies_callback():
+    class PortalMaintenanceError(RuntimeError):
+        def __init__(self, notice):
+            super().__init__("UTH maintenance")
+            self.notice = notice
+
+    notice = SimpleNamespace(
+        source="portal",
+        window_text="01h00 - 04h00 (giờ Việt Nam)",
+        reopen_text="04h00 ngày 28/11/2026",
+        dedupe_key="2026-11-28|01h00-04h00|04h00",
+    )
+    maintenance_events: list[tuple[object, bool]] = []
+
+    def _on_maint(received_notice, *, user_initiated: bool = False):
+        maintenance_events.append((received_notice, user_initiated))
+
+    fetch_calls: list[date] = []
+
+    def _maint_fail(monday_date: date):
+        fetch_calls.append(monday_date)
+        raise PortalMaintenanceError(notice)
+
+    async def scenario():
+        tasks: list[asyncio.Task] = []
+
+        class _AsyncPage:
+            width = 1120
+            height = 760
+            window = SimpleNamespace(width=1120)
+
+            def run_task(self, coro_fn, *args, **kwargs):
+                t = asyncio.create_task(coro_fn(*args, **kwargs))
+                tasks.append(t)
+                return t
+
+            def update(self):
+                pass
+
+        view = ScheduleWeekView(
+            page=_AsyncPage(),
+            fetch_week=_maint_fail,
+            on_maintenance=_on_maint,
+        )
+        anchor = _monday(TODAY)
+        cached_sess = _session(TODAY, subject="Lịch đã lưu an toàn")
+        view._weeks[anchor] = {TODAY: (cached_sess,)}
+
+        await view._load_async(anchor)
+        assert view.sessions_for_day(TODAY) == (cached_sess,)
+        assert view._auth_failed is False
+        is_loading, err = view.week_status(anchor)
+        assert is_loading is False
+        assert "01h00 - 04h00" in err
+        assert "04h00 ngày 28/11/2026" in err
+        assert maintenance_events == [(notice, False)]
+
+        # Prefetch should not hammer remaining weeks while _maintenance_active is True
+        fetch_calls.clear()
+        await view._prefetch_async()
+        assert fetch_calls == []
+
+        # Manual reload_week resets _maintenance_active and passes user_initiated=True
+        view.reload_week(anchor)
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        assert maintenance_events[-1] == (notice, True)
+        assert view.sessions_for_day(TODAY) == (cached_sess,)
+
+    asyncio.run(scenario())
+
+
+def test_clicking_week_range_label_opens_month_date_picker_and_jumps_to_selected_day():
+    dialogs: list[ft.AlertDialog] = []
+    pops: list[bool] = []
+    requested_mondays: list[date] = []
+
+    selected = date(2026, 11, 25)
+    selected_monday = _monday(selected)  # 2026-11-23
+    class_day = date(2026, 11, 24)
+
+    page = SimpleNamespace(
+        width=1120,
+        height=760,
+        window=SimpleNamespace(width=1120),
+        dialogs=dialogs,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: pops.append(True),
+        run_task=MagicMock(),
+        update=MagicMock(),
+    )
+
+    def _fetch_week(monday_date: date):
+        requested_mondays.append(monday_date)
+        return {}
+
+    view = ScheduleWeekView(page=page, fetch_week=_fetch_week)
+    view._weeks[selected_monday] = {class_day: (_session(class_day),)}
+    view._live_at[selected_monday] = datetime.now()
+    view._selected = selected
+    view.visible = True
+    view._render()
+
+    assert view._week_label.value == "23/11 – 29/11/2026"
+    assert callable(view._week_label_box.on_click)
+
+    view._week_label_box.on_click(None)
+    assert len(dialogs) == 1
+    dialog = dialogs[-1]
+    assert dialog.modal is True
+    assert dialog.semantics_label == "Chọn ngày trong tháng"
+    assert "Tháng 11, 2026" in _text_values(dialog)
+
+    nov_cells = {
+        c.data["picker_date"]: c
+        for c in _walk(dialog)
+        if isinstance(c, ft.Container)
+        and isinstance(c.data, dict)
+        and "picker_date" in c.data
+    }
+    assert nov_cells["2026-11-25"].data["is_selected"] is True
+    assert nov_cells["2026-11-23"].data["in_selected_week"] is True
+    assert nov_cells["2026-11-29"].data["in_selected_week"] is True
+    assert nov_cells["2026-11-24"].data["has_classes"] is True
+    assert nov_cells["2026-11-26"].data["has_classes"] is False
+
+    next_month_btn = next(
+        c.content
+        for c in _walk(dialog)
+        if isinstance(c, ft.Semantics)
+        and c.label == "Tháng sau"
+        and isinstance(c.content, ft.IconButton)
+    )
+    prev_month_btn = next(
+        c.content
+        for c in _walk(dialog)
+        if isinstance(c, ft.Semantics)
+        and c.label == "Tháng trước"
+        and isinstance(c.content, ft.IconButton)
+    )
+
+    # Verify month switching and year rollover (Nov 2026 -> Dec 2026 -> Jan 2027 -> Dec 2026)
+    next_month_btn.on_click(None)
+    assert "Tháng 12, 2026" in _text_values(dialog)
+    next_month_btn.on_click(None)
+    assert "Tháng 1, 2027" in _text_values(dialog)
+    prev_month_btn.on_click(None)
+    assert "Tháng 12, 2026" in _text_values(dialog)
+
+    dec_cells = {
+        c.data["picker_date"]: c
+        for c in _walk(dialog)
+        if isinstance(c, ft.Container)
+        and isinstance(c.data, dict)
+        and "picker_date" in c.data
+    }
+    target_day = date(2026, 12, 16)
+    dec_cells[target_day.isoformat()].on_click(None)
+
+    assert pops == [True]
+    assert view._selected == target_day
+    assert view._week_label.value == "14/12 – 20/12/2026"
+    assert page.run_task.called
+    assert page.run_task.call_args.args[1] == date(2026, 12, 14)
+
+
+def test_month_date_picker_today_button_and_escape_key():
+    dialogs: list[ft.AlertDialog] = []
+    pops: list[bool] = []
+    focused: list[bool] = []
+
+    page = SimpleNamespace(
+        width=390,
+        height=844,
+        window=SimpleNamespace(width=390),
+        dialogs=dialogs,
+        show_dialog=dialogs.append,
+        pop_dialog=lambda: pops.append(True),
+        run_task=MagicMock(),
+        update=MagicMock(),
+    )
+
+    class _Trigger:
+        async def focus(self):
+            focused.append(True)
+
+    far_date = date(2027, 1, 15)
+    view = ScheduleWeekView(page=page, fetch_week=lambda _d: {})
+    view._selected = far_date
+    view.visible = True
+    view._render()
+
+    view._show_month_date_picker(return_focus=_Trigger())
+    assert len(dialogs) == 1
+    dialog = dialogs[-1]
+
+    # Escape dismisses without changing _selected and restores focus on dismiss
+    dialog.content.on_key_down(SimpleNamespace(key="Escape"))
+    assert pops == [True]
+    assert view._selected == far_date
+    asyncio.run(dialog.on_dismiss(None))
+    assert focused == [True]
+
+    # Re-open via real _week_label_box click, pick "Hôm nay", and run real Flet on_dismiss lifecycle
+    pops.clear()
+    assert hasattr(view._week_label_box, "focus") and callable(view._week_label_box.focus)
+    view._week_label_box.on_click(None)
+    dialog2 = dialogs[-1]
+    today_btn = next(
+        c
+        for c in _walk(dialog2)
+        if isinstance(c, ft.TextButton) and c.content == "Hôm nay"
+    )
+    today_btn.on_click(None)
+    asyncio.run(dialog2.on_dismiss(None))
+    assert pops == [True]
+    assert view._selected == date.today()
+
+    # Also verify defensive focus guard when a non-focusable Container is passed to return_focus
+    view._show_month_date_picker(return_focus=ft.Container())
+    asyncio.run(dialogs[-1].on_dismiss(None))
+
+
+

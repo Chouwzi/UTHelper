@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import types
 import unittest
 from datetime import date, datetime
 from pathlib import Path
@@ -20,7 +19,6 @@ from tests import test_learning_roadmap_ui as ui  # noqa: E402,F401  (installs f
 from tests.test_learning_roadmap import course, sem  # noqa: E402
 
 from core.learning_roadmap.builder import build_snapshot  # noqa: E402
-from core.learning_roadmap.models import CourseStatus  # noqa: E402
 from core.learning_roadmap.plan_store import PlanStore  # noqa: E402
 from core.learning_roadmap.planner import (  # noqa: E402
     PlanLimits, PlanState, Slot, Term, build_plan, move_course, parse_term,

@@ -12,6 +12,7 @@ import io
 import posixpath
 import re
 import struct
+import sys
 import threading
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -306,6 +307,26 @@ def _convert_document_uncached(
         )
 
 
+def _estimate_converted_bytes(raw_len: int, converted: ConvertedDocument) -> int:
+    """Estimate decoded RAM footprint so compressed OOXML ZIPs are budgeted accurately."""
+    decoded = sys.getsizeof(converted.html_document) + sys.getsizeof(converted.markdown_text)
+    if converted.sheets:
+        decoded += sum(
+            len(sheet.rows) * max(1, len(sheet.rows[0]) if sheet.rows else 1) * 48
+            for sheet in converted.sheets
+        )
+    if converted.slides:
+        decoded += sum(
+            sys.getsizeof(body) + sys.getsizeof(notes)
+            for _idx, body, notes in converted.slides
+        )
+    if converted.docx_blocks:
+        decoded += len(converted.docx_blocks) * 192
+    if converted.rich_slides:
+        decoded += len(converted.rich_slides) * 512
+    return max(raw_len, decoded)
+
+
 def convert_document_bytes(
     file_name: str,
     data: bytes,
@@ -329,16 +350,18 @@ def convert_document_bytes(
 
     converted = _convert_document_uncached(title, data, kind, dark_mode=dark_mode)
     if use_cache and cache_key is not None:
-        with _DOC_LRU_LOCK:
-            _DOC_LRU_CACHE[cache_key] = (raw_len, converted)
-            _DOC_LRU_CACHE.move_to_end(cache_key)
-            total_b = sum(item[0] for item in _DOC_LRU_CACHE.values())
-            while (
-                len(_DOC_LRU_CACHE) > _DOC_LRU_MAX_ENTRIES
-                or total_b > _DOC_LRU_MAX_BYTES
-            ) and len(_DOC_LRU_CACHE) > 1:
-                _, (evicted_len, _) = _DOC_LRU_CACHE.popitem(last=False)
-                total_b -= evicted_len
+        entry_bytes = _estimate_converted_bytes(raw_len, converted)
+        if entry_bytes <= _DOC_LRU_MAX_BYTES:
+            with _DOC_LRU_LOCK:
+                _DOC_LRU_CACHE[cache_key] = (entry_bytes, converted)
+                _DOC_LRU_CACHE.move_to_end(cache_key)
+                total_b = sum(item[0] for item in _DOC_LRU_CACHE.values())
+                while (
+                    len(_DOC_LRU_CACHE) > _DOC_LRU_MAX_ENTRIES
+                    or total_b > _DOC_LRU_MAX_BYTES
+                ) and len(_DOC_LRU_CACHE) > 1:
+                    _, (evicted_len, _) = _DOC_LRU_CACHE.popitem(last=False)
+                    total_b -= evicted_len
     return converted
 
 
@@ -3110,6 +3133,103 @@ def _pptx_r_style(r_pr: Optional[ET.Element], *, href: str = "") -> dict[str, ob
     }
 
 
+_PPTX_SYMBOL_FONT_NAMES: frozenset[str] = frozenset(
+    {
+        "wingdings",
+        "wingdings 2",
+        "wingdings 3",
+        "webdings",
+        "symbol",
+        "monotype sorts",
+        "mt extra",
+        "zapfdingbats",
+        "bookshelf symbol 7",
+    }
+)
+
+_PPTX_WINGDINGS_BULLETS: dict[str, str] = {
+    "n": "■",
+    "l": "●",
+    "m": "❍",
+    "o": "□",
+    "p": "□",
+    "q": "❑",
+    "r": "❑",
+    "s": "▪",
+    "t": "❖",
+    "u": "❖",
+    "v": "❖",
+    "w": "▪",
+    "x": "☒",
+    "\xa7": "▪",
+    "\xa8": "○",
+    "\xb7": "•",
+    "\xd8": "➢",
+    "\xdc": "➲",
+    "\xe0": "➔",
+    "\xe8": "➔",
+    "\xf0": "➔",
+    "\xfb": "✗",
+    "\xfc": "✓",
+    "\xfe": "☑",
+    "F": "☞",
+    "H": "☞",
+}
+
+_PPTX_SYMBOL_BULLETS: dict[str, str] = {
+    "\xb7": "•",
+    "o": "○",
+    "-": "−",
+    "\xa7": "♣",
+    "\xa8": "♦",
+    "\xa9": "♥",
+    "\xaa": "♠",
+    "\xae": "→",
+    "\xde": "⇒",
+}
+
+_PPTX_WEBDINGS_BULLETS: dict[str, str] = {
+    "=": "■",
+    "<": "■",
+    "g": "■",
+    "n": "●",
+    "a": "✓",
+    "r": "✗",
+    "4": "▸",
+    "8": "▸",
+}
+
+
+def _normalize_pptx_bullet_char(raw_char: str, typeface: str = "") -> str:
+    """Convert legacy Wingdings/Symbol/Webdings & PUA bullet codepoints to Unicode."""
+    cleaned = (raw_char or "").strip()
+    if not cleaned:
+        return "•"
+    ch = cleaned[0]
+    code = ord(ch)
+    was_pua = 0xF020 <= code <= 0xF0FF
+    low = chr(code - 0xF000) if was_pua else ch
+    tf = (typeface or "").strip().lower()
+    is_sym_font = tf in _PPTX_SYMBOL_FONT_NAMES or tf.startswith(("wingdings", "bookshelf symbol"))
+    if not was_pua and not is_sym_font:
+        return cleaned
+    if tf == "symbol":
+        return _PPTX_SYMBOL_BULLETS.get(low) or _PPTX_WINGDINGS_BULLETS.get(low) or "•"
+    if tf == "webdings":
+        return _PPTX_WEBDINGS_BULLETS.get(low) or _PPTX_WINGDINGS_BULLETS.get(low) or "•"
+    if tf in {"wingdings 2", "wingdings 3", "monotype sorts", "zapfdingbats"}:
+        if low in {"P", "Q"}:
+            return "✓"
+        if low in {"O", "N"}:
+            return "✗"
+        return _PPTX_WINGDINGS_BULLETS.get(low) or "▸"
+    return (
+        _PPTX_WINGDINGS_BULLETS.get(low)
+        or _PPTX_SYMBOL_BULLETS.get(low)
+        or ("■" if low == "n" else "•")
+    )
+
+
 def _pptx_tx_body_paragraphs(
     tx_body: ET.Element,
     hyperlinks: Optional[dict[str, str]] = None,
@@ -3137,7 +3257,10 @@ def _pptx_tx_body_paragraphs(
                 bullet = ""
             elif p_pr.find(f"{{{_A_NS}}}buChar") is not None:
                 bu_char = p_pr.find(f"{{{_A_NS}}}buChar")
-                bullet = (bu_char.attrib.get("char") or "•") if bu_char is not None else "•"
+                bu_font = p_pr.find(f"{{{_A_NS}}}buFont")
+                raw_bu = (bu_char.attrib.get("char") or "•") if bu_char is not None else "•"
+                bu_tf = (bu_font.attrib.get("typeface") or "") if bu_font is not None else ""
+                bullet = _normalize_pptx_bullet_char(raw_bu, bu_tf)
             elif p_pr.find(f"{{{_A_NS}}}buAutoNum") is not None:
                 bu_auto = p_pr.find(f"{{{_A_NS}}}buAutoNum")
                 auto_type = (bu_auto.attrib.get("type") or "").lower() if bu_auto is not None else ""

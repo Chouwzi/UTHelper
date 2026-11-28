@@ -38,7 +38,7 @@ on:
           - debug-test
           - unsigned-diagnostic
       apk_namespace:
-        description: Package ID for debug-test APK (isolated=com.uthelper.qa installs side-by-side with Release; original=com.uthelper.uthelper)
+        description: Package ID for debug-test APK (isolated=com.uthelper.qa installs side-by-side with Release; original=io.github.chouwzi.uthelper)
         required: false
         type: choice
         default: isolated
@@ -116,7 +116,7 @@ jobs:
           APK_ARCH="universal"
           APK_INSTALLABLE_TEST="false"
           APK_NAMESPACE="original"
-          APK_PACKAGE_ID="com.uthelper.uthelper"
+          APK_PACKAGE_ID="io.github.chouwzi.uthelper"
 
           if [ "$CHANNEL" = "apk_lts" ] && [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ]; then
             case "${APK_ARCH_INPUT:-arm64-v8a}" in
@@ -136,7 +136,7 @@ jobs:
                   ;;
                 original)
                   APK_NAMESPACE="original"
-                  APK_PACKAGE_ID="com.uthelper.uthelper"
+                  APK_PACKAGE_ID="io.github.chouwzi.uthelper"
                   ;;
                 *) echo "Unsupported apk_namespace: ${APK_NAMESPACE_INPUT:-}"; exit 1 ;;
               esac
@@ -151,16 +151,57 @@ jobs:
 
           PROJECT_VERSION=$(python scripts/release_metadata.py --pyproject pyproject.toml --print-version)
           BUILD_NUMBER=$(python -c "from pathlib import Path; from scripts.release_metadata import read_project_version, release_build_number; print(release_build_number(read_project_version(Path('pyproject.toml'))))")
+          if [ "${GITHUB_REF:-}" = "refs/heads/main" ] || [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            BUILD_ENV="release"
+          else
+            BUILD_ENV="develop"
+          fi
 
           export UTH_DISTRIBUTION_CHANNEL="$CHANNEL"
           export ORG_GRADLE_PROJECT_uthDistributionChannel="$CHANNEL"
+          export GRADLE_OPTS="-Dorg.gradle.internal.http.retry.max.attempts=6 -Dorg.gradle.internal.http.retry.initial.backoff=3000 ${GRADLE_OPTS:-}"
+
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/maven-central-mirror.gradle" <<'GRADLE'
+          def mirrorUrl = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+          def rewriteMavenCentral = { RepositoryHandler repos ->
+              repos.withType(MavenArtifactRepository).configureEach { repo ->
+                  def raw = repo.url?.toString() ?: ""
+                  if (raw.startsWith("https://repo.maven.apache.org/maven2") || raw.startsWith("https://repo1.maven.org/maven2")) {
+                      repo.setUrl(mirrorUrl)
+                  }
+              }
+          }
+
+          settingsEvaluated { settings ->
+              def pluginRepos = settings.pluginManagement.repositories
+              if (pluginRepos.isEmpty()) {
+                  pluginRepos.maven { url = mirrorUrl }
+                  pluginRepos.gradlePluginPortal()
+              } else {
+                  def existing = new ArrayList(pluginRepos)
+                  pluginRepos.clear()
+                  pluginRepos.maven { url = mirrorUrl }
+                  pluginRepos.addAll(existing)
+                  rewriteMavenCentral(pluginRepos)
+              }
+              rewriteMavenCentral(settings.dependencyResolutionManagement.repositories)
+          }
+
+          gradle.projectsLoaded { g ->
+              g.allprojects { proj ->
+                  rewriteMavenCentral(proj.buildscript.repositories)
+                  rewriteMavenCentral(proj.repositories)
+              }
+          }
+          GRADLE
 
           EXTRA_ARGS=("$LEGACY_FLAG")
           if [ "$CHANNEL" = "apk_lts" ]; then
             if [ "$APK_ARCH" = "arm64-v8a" ]; then
               EXTRA_ARGS+=(--arch arm64-v8a)
             fi
-            if [ "$APK_PACKAGE_ID" != "com.uthelper.uthelper" ]; then
+            if [ "$APK_PACKAGE_ID" != "io.github.chouwzi.uthelper" ]; then
               EXTRA_ARGS+=(--bundle-id "$APK_PACKAGE_ID")
             fi
           elif [ "$CHANNEL" = "chplay" ]; then
@@ -175,15 +216,35 @@ jobs:
           # First pass materializes Flet's Flutter project. The notification
           # extension patcher and shared channel preparation then configure SDK 36,
           # manifest removals, and 16 KB packaging before the final build pass.
-          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
-          flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter
+          for build_attempt in 1 2 3; do
+            python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
+            if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter; then
+              break
+            fi
+            if [ "$build_attempt" -lt 3 ]; then
+              echo "Android bootstrap packaging ($BUILD_TARGET) failed on attempt $build_attempt; retrying in $((build_attempt * 15))s..." >&2
+              sleep "$((build_attempt * 15))"
+            fi
+          done
+          test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/prepare_android_flutter_project.py --project-root build/flutter --channel "$CHANNEL" --target-sdk 36
 
-          python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
-          flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose
+          build_ok=0
+          for build_attempt in 1 2 3; do
+            python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
+            if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose; then
+              build_ok=1
+              break
+            fi
+            if [ "$build_attempt" -lt 3 ]; then
+              echo "Android artifact packaging ($BUILD_TARGET) failed on attempt $build_attempt; retrying in $((build_attempt * 15))s..." >&2
+              sleep "$((build_attempt * 15))"
+            fi
+          done
+          test "$build_ok" -eq 1
 
       - name: Test native update and background sync contracts
         if: matrix.channel == 'apk_lts'
@@ -285,8 +346,8 @@ jobs:
           APK="${APK_CANDIDATES[0]}"
           APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
           test -x "$APKANALYZER"
-          if [ "${APK_PACKAGE_ID:-com.uthelper.uthelper}" = "com.uthelper.uthelper" ]; then
-            test "$($APKANALYZER manifest application-id "$APK")" = "com.uthelper.uthelper"
+          if [ "${APK_PACKAGE_ID:-io.github.chouwzi.uthelper}" = "io.github.chouwzi.uthelper" ]; then
+            test "$($APKANALYZER manifest application-id "$APK")" = "io.github.chouwzi.uthelper"
           else
             test "$($APKANALYZER manifest application-id "$APK")" = "$APK_PACKAGE_ID"
           fi
@@ -344,7 +405,7 @@ jobs:
               "Architecture: ${APK_ARCH}" \
               "Package ID: ${APK_PACKAGE_ID}" \
               "Namespace mode: ${APK_NAMESPACE}" \
-              "Note: Signed with Gradle's ephemeral debug keystore. If package ID is com.uthelper.uthelper, uninstall any production Release build before installing." \
+              "Note: Signed with Gradle's ephemeral debug keystore. If package ID is io.github.chouwzi.uthelper, uninstall any production Release build before installing." \
               > DEBUG_TEST_ONLY.txt
             {
               echo "APK_TEST_FILENAME=$TEST_APK"
@@ -385,7 +446,7 @@ jobs:
             --allow-unsigned \
             --version "$PROJECT_VERSION" \
             --build-number "$BUILD_NUMBER" \
-            --package-id com.uthelper.uthelper \
+            --package-id io.github.chouwzi.uthelper \
             --commit-sha "${{ github.sha }}" \
             --workflow-run-id "${{ github.run_id }}" \
             --architecture universal \
@@ -528,7 +589,7 @@ jobs:
             --channel chplay \
             --version "$PROJECT_VERSION" \
             --build-number "$BUILD_NUMBER" \
-            --package-id com.uthelper.uthelper \
+            --package-id io.github.chouwzi.uthelper \
             --certificate-sha256 "$PLAY_UPLOAD_CERT_SHA256" \
             --commit-sha "${{ github.sha }}" \
             --workflow-run-id "${{ github.run_id }}" \

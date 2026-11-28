@@ -17,7 +17,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 DISTRIBUTION_CHANNEL_FILENAME = "distribution-channel.json"
-DEFAULT_ANDROID_PACKAGE_ID = "com.uthelper.uthelper"
+DEFAULT_ANDROID_PACKAGE_ID = "io.github.chouwzi.uthelper"
 _SOURCE_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 _PROJECT_PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
 _MAX_CONFIG_BYTES = 4096
@@ -35,6 +35,7 @@ class DistributionChannel(str, Enum):
     APK_LTS = "apk_lts"
     MSSTORE = "msstore"
     EXE_LTS = "exe_lts"
+    IPA_LTS = "ipa_lts"
     SOURCE = "source"
 
 
@@ -123,6 +124,16 @@ def build_distribution_profile(
             store_product_id=None,
         )
     if channel is DistributionChannel.EXE_LTS:
+        return DistributionProfile(
+            channel=channel,
+            supports_github_self_update=True,
+            store_url=None,
+            store_display_name="GitHub Releases",
+            store_web_url=None,
+            android_package_id=None,
+            store_product_id=None,
+        )
+    if channel is DistributionChannel.IPA_LTS:
         return DistributionProfile(
             channel=channel,
             supports_github_self_update=True,
@@ -277,7 +288,14 @@ def resolve_distribution_channel(
     if is_android:
         return build_distribution_profile(DistributionChannel.APK_LTS)
     if is_ios:
-        return build_distribution_profile(DistributionChannel.SOURCE)
+        packaged = (
+            _is_packaged_build(env, pyproject_path=pyproject_path)
+            if is_packaged is None
+            else bool(is_packaged)
+        )
+        return build_distribution_profile(
+            DistributionChannel.IPA_LTS if packaged else DistributionChannel.SOURCE
+        )
     return build_distribution_profile(DistributionChannel.SOURCE)
 
 

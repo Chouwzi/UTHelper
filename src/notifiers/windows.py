@@ -6,7 +6,7 @@ import sys
 import ctypes
 import threading
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List
 from models import Assignment
 from config import BASE_DIR, _USER_DATA_DIR
@@ -43,6 +43,83 @@ def _get(obj, key, default=''):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def _safe_unlink_file(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _safe_cleanup_shortcut_folder(folder: Path | None) -> None:
+    if folder is None or not folder.is_dir():
+        return
+    try:
+        for child in list(folder.iterdir()):
+            if child.suffix.casefold() == ".lnk":
+                _safe_unlink_file(child)
+        if not any(folder.iterdir()):
+            folder.rmdir()
+    except OSError:
+        pass
+
+
+def reconcile_windows_start_menu_shortcuts(
+    *,
+    executable: Path,
+    common_programs_dir: Path | None,
+    user_programs_dir: Path,
+    public_desktop_dir: Path | None = None,
+    user_desktop_dir: Path | None = None,
+    shortcut_writer=None,
+) -> str:
+    """Keep exactly one valid UTHelper Start Menu shortcut and purge legacy duplicates."""
+    legacy_names = ("UTH Elearning Alert",)
+    for legacy in legacy_names:
+        _safe_unlink_file(user_programs_dir / f"{legacy}.lnk")
+        _safe_cleanup_shortcut_folder(user_programs_dir / legacy)
+        if user_desktop_dir is not None:
+            _safe_unlink_file(user_desktop_dir / f"{legacy}.lnk")
+
+    startup_dir = user_programs_dir / "Startup"
+    _safe_unlink_file(startup_dir / "UTHelper.lnk")
+    _safe_unlink_file(startup_dir / "UTH Elearning Alert.lnk")
+
+    machine_shortcut = (
+        common_programs_dir / "UTHelper" / "UTHelper.lnk"
+        if common_programs_dir is not None
+        else None
+    )
+    if machine_shortcut is not None and machine_shortcut.is_file():
+        _safe_unlink_file(user_programs_dir / "UTHelper.lnk")
+        _safe_cleanup_shortcut_folder(user_programs_dir / "UTHelper")
+        if (
+            public_desktop_dir is not None
+            and user_desktop_dir is not None
+            and (public_desktop_dir / "UTHelper.lnk").is_file()
+        ):
+            _safe_unlink_file(user_desktop_dir / "UTHelper.lnk")
+        return "machine_shortcut_present"
+
+    exe = Path(executable)
+    win_exe = PureWindowsPath(str(executable))
+    if win_exe.stem.casefold() in {"python", "pythonw"}:
+        _safe_unlink_file(user_programs_dir / "UTHelper.lnk")
+        return "skipped_interpreter"
+
+    if win_exe.name.casefold() == "uthelperautostart.exe":
+        sibling = exe.with_name("UTHelper.exe")
+        if sibling.is_file():
+            exe = sibling
+
+    target_lnk = user_programs_dir / "UTHelper.lnk"
+    if callable(shortcut_writer):
+        shortcut_writer(target_lnk, exe)
+    return "user_shortcut_created"
 
 
 class WindowsNotifier(BaseNotifier):
@@ -86,40 +163,70 @@ class WindowsNotifier(BaseNotifier):
 
     def _ensure_shortcut(self):
         """
-        Tạo Shortcut trong Start Menu và gắn AppUserModelID để Windows 10/11 
-        nhận diện đúng Tên ứng dụng và Icon ở khu vực Header (Attribution Area).
+        Đồng bộ Shortcut Start Menu và gắn AppUserModelID chuẩn cho Windows 10/11,
+        đồng thời dọn trùng lặp lối tắt per-user khi đã cài MSI per-machine.
         """
+        if os.environ.get("UTH_TEST_MODE") == "1" or "pytest" in sys.modules:
+            return
         try:
+            import pythoncom
             import win32com.client
             import win32com.propsys.propsys as propsys
             import win32com.propsys.pscon as pscon
-            import pythoncom
             from win32com.shell import shellcon
+            from platform_utils.autostart import get_current_process_executable
 
-            appdata = os.environ.get('APPDATA')
+            appdata = os.environ.get("APPDATA")
             if not appdata:
                 return
 
-            programs_path = os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs")
-            shortcut_path = os.path.join(programs_path, f"{self.app_id}.lnk")
-
-            # Tạo file shortcut cơ bản
-            wsh_shell = win32com.client.Dispatch("WScript.Shell")
-            shortcut = wsh_shell.CreateShortcut(shortcut_path)
-            shortcut.TargetPath = sys.executable
-            # Tránh console popup khi click
-            if hasattr(sys, 'frozen') or sys.executable.endswith("pythonw.exe"):
-                pass
-            shortcut.IconLocation = self._icon_path
-            shortcut.Save()
-
-            # Gắn AppUserModelID cho file shortcut vừa tạo! Đây là bước cực kỳ quan trọng cho Toast.
-            props = propsys.SHGetPropertyStoreFromParsingName(
-                shortcut_path, None, shellcon.GPS_READWRITE, propsys.IID_IPropertyStore
+            user_programs = (
+                Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
             )
-            prop_variant = propsys.PROPVARIANTType(self.aumid, pythoncom.VT_LPWSTR)
-            props.SetValue(pscon.PKEY_AppUserModel_ID, prop_variant)
-            props.Commit()
+            program_data = os.environ.get("ProgramData")
+            common_programs = (
+                Path(program_data)
+                / "Microsoft"
+                / "Windows"
+                / "Start Menu"
+                / "Programs"
+                if program_data
+                else None
+            )
+            public_dir = os.environ.get("PUBLIC")
+            public_desktop = Path(public_dir) / "Desktop" if public_dir else None
+            user_profile = os.environ.get("USERPROFILE")
+            user_desktop = Path(user_profile) / "Desktop" if user_profile else None
+
+            def _write_shortcut_with_aumid(shortcut_path: Path, target_exe: Path) -> None:
+                shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+                wsh_shell = win32com.client.Dispatch("WScript.Shell")
+                shortcut = wsh_shell.CreateShortcut(str(shortcut_path))
+                shortcut.TargetPath = str(target_exe)
+                shortcut.WorkingDirectory = str(target_exe.parent)
+                shortcut.IconLocation = self._icon_path
+                shortcut.Save()
+
+                props = propsys.SHGetPropertyStoreFromParsingName(
+                    str(shortcut_path),
+                    None,
+                    shellcon.GPS_READWRITE,
+                    propsys.IID_IPropertyStore,
+                )
+                prop_variant = propsys.PROPVARIANTType(
+                    self.aumid, pythoncom.VT_LPWSTR
+                )
+                props.SetValue(pscon.PKEY_AppUserModel_ID, prop_variant)
+                props.Commit()
+
+            reconcile_windows_start_menu_shortcuts(
+                executable=get_current_process_executable(),
+                common_programs_dir=common_programs,
+                user_programs_dir=user_programs,
+                public_desktop_dir=public_desktop,
+                user_desktop_dir=user_desktop,
+                shortcut_writer=_write_shortcut_with_aumid,
+            )
         except Exception as e:
             logger.warning("Shortcut AUMID setup failed: %r", e)
 
@@ -423,10 +530,14 @@ class WindowsNotifier(BaseNotifier):
         self._ensure_schedule_runtime()
         with self._schedule_condition:
             self._scheduler_stopping = True
+            self._scheduler_enabled = False
             self._schedule_condition.notify_all()
         thread = self._scheduler_thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout=1)
+        with self._schedule_condition:
+            if self._scheduler_thread is thread and (thread is None or not thread.is_alive()):
+                self._scheduler_thread = None
 
     def _ensure_schedule_runtime(self) -> None:
         """Initialize scheduler fields for tests constructing via ``__new__``."""

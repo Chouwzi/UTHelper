@@ -106,6 +106,14 @@ class AdaptiveNavShell:
             border=ft.Border.only(right=ft.BorderSide(1, C.BORDER)),
             visible=False,
         )
+        # Permanently visible slot keeps sibling main_stack at index 1 in Row
+        # across <600dp <-> >=600dp (Samsung Pop-up View) so PlatformViews never unmount.
+        self.rail_slot = ft.Container(
+            content=self.rail_host,
+            width=0,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            visible=True,
+        )
         self.bar = ft.NavigationBar(
             selected_index=0,
             height=64,
@@ -163,6 +171,7 @@ class AdaptiveNavShell:
                 use_rail = False
         self.rail_visible = use_rail
         self.rail_host.visible = use_rail
+        self.rail_slot.width = None if use_rail else 0
         self.bar.visible = (not use_rail) and (not self._immersive)
         return use_rail
 

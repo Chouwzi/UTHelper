@@ -83,7 +83,7 @@ class ViewManager:
 
     def _hide_roadmap(self) -> None:
         """Ẩn panel Lộ trình học tập khi chuyển sang mục khác."""
-        if self.roadmap_view is not None:
+        if getattr(self, "roadmap_view", None) is not None:
             self.roadmap_view.visible = False
 
     def _hide_courses_view(self) -> None:
@@ -101,6 +101,14 @@ class ViewManager:
             clear_fn()
 
     def _clear_detail_layer(self) -> None:
+        try:
+            from gui.components.courses.embedded_webview_host import (
+                set_global_webview_occlusion,
+            )
+
+            set_global_webview_occlusion("detail_view", False)
+        except Exception:
+            pass
         self.detail_view.visible = False
         self._detail_origin = None
         self._clear_selected_card()
@@ -185,7 +193,6 @@ class ViewManager:
         self.grade_overview_view.visible = False
         if self.course_grades_view is not None:
             self.course_grades_view.visible = False
-        self._hide_roadmap()
         on_shown = getattr(self.courses_view, "on_tab_shown", None)
         if callable(on_shown):
             on_shown()
@@ -228,6 +235,7 @@ class ViewManager:
 
     async def close_calendar(self):
         """Ẩn màn hình Lịch bằng hiệu ứng và hiển thị lại màn hình Dashboard."""
+        self._dismiss_menu_if_open()
         self.calendar_view.hide()
         self._hide_courses_view()
         self._hide_roadmap()
@@ -376,6 +384,7 @@ class ViewManager:
         target = self._grade_courses_target()
         if target is None:
             return
+        self._dismiss_menu_if_open()
         if hasattr(target, "hide"):
             target.hide()
         if self.course_grades_view is not None:
@@ -512,6 +521,7 @@ class ViewManager:
 
     async def close_grades(self):
         """Đóng màn hình điểm số và quay lại màn hình chính."""
+        self._dismiss_menu_if_open()
         self.grade_overview_view.hide()
         self._hide_courses_view()
         self._hide_roadmap()
@@ -537,6 +547,14 @@ class ViewManager:
     def show_detail_loading(self, data):
         """Chuyển sang màn hình chi tiết bài tập ở trạng thái tải dữ liệu."""
         self._dismiss_menu_if_open()
+        try:
+            from gui.components.courses.embedded_webview_host import (
+                set_global_webview_occlusion,
+            )
+
+            set_global_webview_occlusion("detail_view", True)
+        except Exception:
+            pass
         # Retain origin view mounted behind opaque Detail to preserve native ScrollPosition.
         if getattr(self.calendar_view, "visible", False):
             origin = self.calendar_view
@@ -556,7 +574,6 @@ class ViewManager:
             self.course_grades_view.visible = False
         self.settings_view.visible = False
         self.grade_overview_view.visible = False
-        self._hide_roadmap()
 
         self.detail_view.offset = ft.Offset(0, 0)
         self.detail_view.opacity = 1.0
@@ -582,6 +599,15 @@ class ViewManager:
 
     async def close_detail(self, detail_from_calendar: bool):
         """Đóng màn hình chi tiết và quay lại nơi xuất phát (Lịch, Môn học, hoặc Dashboard)."""
+        self._dismiss_menu_if_open()
+        try:
+            from gui.components.courses.embedded_webview_host import (
+                set_global_webview_occlusion,
+            )
+
+            set_global_webview_occlusion("detail_view", False)
+        except Exception:
+            pass
         if detail_from_calendar:
             destination = self.calendar_view
         elif self._detail_origin is not None:
@@ -610,6 +636,7 @@ class ViewManager:
 
     async def close_settings(self):
         """Đóng màn hình cấu hình với hiệu ứng và hiển thị lại màn hình Dashboard chính."""
+        self._dismiss_menu_if_open()
         self.cancel_pending_settings_navigation()
         self._hide_courses_view()
         self._hide_roadmap()

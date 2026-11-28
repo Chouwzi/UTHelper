@@ -5,8 +5,9 @@ from dataclasses import field
 import ipaddress
 import json
 import re
+import secrets
 import socket
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 import flet as ft
@@ -151,12 +152,46 @@ def _validate_app_webview_url(url: str) -> str:
     raise ValueError("url must be an HTTPS URL or explicit 127.0.0.1/localhost port URL")
 
 
+_PORTAL_USER_SCRIPT_ORIGIN = "https://portal.ut.edu.vn"
+
+
+def _validate_app_webview_origin(origin: str) -> str:
+    raw = str(origin or "").strip()
+    if not raw or raw == "*" or _UNSAFE_URL_RE.search(raw):
+        raise ValueError("allowed origin must be https://portal.ut.edu.vn")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("allowed origin must be https://portal.ut.edu.vn") from exc
+    raw_auth_match = _RAW_AUTHORITY_RE.match(raw)
+    raw_auth = raw_auth_match.group(1) if raw_auth_match else ""
+    if (
+        parsed.scheme.lower() != "https"
+        or port is not None
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or not raw_auth
+        or "@" in raw_auth
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or not _is_public_https_host(parsed.hostname)
+    ):
+        raise ValueError("allowed origin must be https://portal.ut.edu.vn")
+    canonical = f"https://{parsed.hostname.rstrip('.').casefold()}"
+    if canonical != _PORTAL_USER_SCRIPT_ORIGIN:
+        raise ValueError("allowed origin must be https://portal.ut.edu.vn")
+    return canonical
+
+
 @control("UthAppWebView", kw_only=True)
 class UthAppWebView(LayoutControl):
     """General-purpose embedded InAppWebView control for mobile document & web panes.
 
-    Cookies travel exclusively over Flet's private ``DataChannel`` so session
-    tokens never appear in control properties or ``_invoke_method`` diagnostics.
+    Cookies and dynamic auth scripts travel over Flet's private ``DataChannel``
+    so session tokens never appear in ``_invoke_method`` diagnostics.
     """
 
     url: str = ""
@@ -166,6 +201,9 @@ class UthAppWebView(LayoutControl):
     viewer_locked: bool = False
     allowed_loopback_ports: list[int] = field(default_factory=list)
     require_initial_cookies: bool = False
+    block_uth_lms: bool = False
+    initial_user_script: Optional[str] = None
+    initial_user_script_allowed_origin: Optional[str] = None
     expand: bool | int | None = True
     on_page_started: Optional[ft.ControlEventHandler["UthAppWebView"]] = None
     on_page_ended: Optional[ft.ControlEventHandler["UthAppWebView"]] = None
@@ -179,14 +217,37 @@ class UthAppWebView(LayoutControl):
 
     def __post_init__(self, ref: object | None = None) -> None:
         super().__post_init__(ref)
+        if self.key is None:
+            self.key = f"uth-app-wv-{secrets.token_hex(8)}"
         if self.url:
             self.url = _validate_app_webview_url(self.url)
         if self.base_url:
             self.base_url = _validate_app_webview_url(self.base_url)
+        if self.initial_user_script and str(self.initial_user_script).strip():
+            self.initial_user_script_allowed_origin = _validate_app_webview_origin(
+                self.initial_user_script_allowed_origin or ""
+            )
+        elif (
+            self.initial_user_script_allowed_origin
+            and str(self.initial_user_script_allowed_origin).strip()
+        ):
+            self.initial_user_script_allowed_origin = _validate_app_webview_origin(
+                self.initial_user_script_allowed_origin
+            )
         self._cookie_channel: ft.DataChannel | None = None
         self._cookie_channel_id: int | None = None
         self._cookie_channel_ready = asyncio.Event()
+        self._consumed_channel_ids: set[int] = set()
+        self._bootstrap_in_flight = False
+        self._initial_bootstrap_done = False
+        self._on_rebootstrap_requested: Optional[Callable[[], None]] = None
         self.on_data_channel_open = self._handle_data_channel_open
+
+    def will_unmount(self) -> None:
+        super().will_unmount()
+        self._cookie_channel = None
+        self._cookie_channel_id = None
+        self._cookie_channel_ready.clear()
 
     def _handle_data_channel_open(self, event: ft.DataChannelOpenEvent) -> None:
         if getattr(event, "channel_name", None) != "app_webview_cookies":
@@ -194,15 +255,46 @@ class UthAppWebView(LayoutControl):
         self._cookie_channel_id = event.channel_id
         self._cookie_channel = self.get_data_channel(event.channel_id)
         self._cookie_channel_ready.set()
+        if (
+            self._initial_bootstrap_done
+            and not self._bootstrap_in_flight
+            and event.channel_id not in self._consumed_channel_ids
+            and callable(self._on_rebootstrap_requested)
+        ):
+            self._on_rebootstrap_requested()
 
-    async def bootstrap_cookies(
-        self,
+    async def abort_cookie_bootstrap(self) -> bool:
+        """Release Dart's initial cookie wait immediately when cookies are no longer needed."""
+        self._bootstrap_in_flight = True
+        channel_id: int | None = None
+        try:
+            await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=3.0)
+            channel_id = self._cookie_channel_id
+            if channel_id is None:
+                return False
+            return bool(
+                await self._invoke_method(
+                    "bootstrap_cookies",
+                    {"channel_id": channel_id, "abort": True},
+                    timeout=5,
+                )
+            )
+        except Exception:
+            return False
+        finally:
+            self._bootstrap_in_flight = False
+            self._initial_bootstrap_done = True
+            if channel_id is not None:
+                self._consumed_channel_ids.add(channel_id)
+
+    @staticmethod
+    def _encode_auth_payload(
         cookies: list[dict[str, Any]],
         *,
-        target_url: Optional[str] = None,
-    ) -> bool:
-        """Send cookies privately over DataChannel before initial URL load."""
-        resolved_target = _validate_app_webview_url(target_url or self.url)
+        resolved_target: str,
+        init_script: str = "",
+        init_script_allowed_origin: str = "",
+    ) -> bytes:
         safe_cookies: list[dict[str, Any]] = []
         for item in (cookies or ())[:_MAX_COOKIES]:
             if not isinstance(item, dict):
@@ -224,25 +316,57 @@ class UthAppWebView(LayoutControl):
                     "expires": item.get("expires"),
                 }
             )
-        payload = json.dumps(
-            {"target_url": resolved_target, "cookies": safe_cookies},
+        clean_script = str(init_script or "").strip()
+        validated_origin = (
+            _validate_app_webview_origin(init_script_allowed_origin)
+            if clean_script
+            else ""
+        )
+        body: dict[str, Any] = {
+            "target_url": resolved_target,
+            "cookies": safe_cookies,
+        }
+        if clean_script:
+            body["init_script"] = clean_script
+            body["init_script_allowed_origin"] = validated_origin
+        return json.dumps(
+            body,
             separators=(",", ":"),
             ensure_ascii=True,
         ).encode("utf-8")
-        if len(payload) > _COOKIE_PAYLOAD_LIMIT:
-            try:
-                await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=2.0)
-                channel_id = self._cookie_channel_id
-                if channel_id is not None:
-                    await self._invoke_method(
-                        "bootstrap_cookies",
-                        {"channel_id": channel_id, "abort": True},
-                        timeout=5,
-                    )
-            except Exception:
-                pass
-            return False
+
+    async def bootstrap_cookies(
+        self,
+        cookies: list[dict[str, Any]],
+        *,
+        target_url: Optional[str] = None,
+        init_script: str = "",
+        init_script_allowed_origin: str = "",
+    ) -> bool:
+        """Send cookies and/or origin-pinned UserScript privately over DataChannel before initial load."""
+        self._bootstrap_in_flight = True
+        channel_id: int | None = None
         try:
+            resolved_target = _validate_app_webview_url(target_url or self.url)
+            payload = self._encode_auth_payload(
+                cookies,
+                resolved_target=resolved_target,
+                init_script=init_script,
+                init_script_allowed_origin=init_script_allowed_origin,
+            )
+            if len(payload) > _COOKIE_PAYLOAD_LIMIT:
+                try:
+                    await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=2.0)
+                    channel_id = self._cookie_channel_id
+                    if channel_id is not None:
+                        await self._invoke_method(
+                            "bootstrap_cookies",
+                            {"channel_id": channel_id, "abort": True},
+                            timeout=5,
+                        )
+                except Exception:
+                    pass
+                return False
             await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=5.0)
             channel = self._cookie_channel
             channel_id = self._cookie_channel_id
@@ -257,6 +381,68 @@ class UthAppWebView(LayoutControl):
             return bool(res)
         except Exception:
             return False
+        finally:
+            self._bootstrap_in_flight = False
+            self._initial_bootstrap_done = True
+            if channel_id is not None:
+                self._consumed_channel_ids.add(channel_id)
+
+    async def apply_auth_and_navigate(
+        self,
+        cookies: list[dict[str, Any]],
+        url: str,
+        *,
+        init_script: str = "",
+        init_script_allowed_origin: str = "",
+    ) -> bool:
+        """Atomically update mobile cookies/UserScript over private DataChannel and navigate."""
+        self._bootstrap_in_flight = True
+        channel_id: int | None = None
+        try:
+            resolved_target = _validate_app_webview_url(url)
+            payload = self._encode_auth_payload(
+                cookies,
+                resolved_target=resolved_target,
+                init_script=init_script,
+                init_script_allowed_origin=init_script_allowed_origin,
+            )
+            if len(payload) > _COOKIE_PAYLOAD_LIMIT:
+                return False
+            if not self._cookie_channel_ready.is_set() or self._cookie_channel is None:
+                ensured_id = await self._invoke_method(
+                    "ensure_auth_channel",
+                    None,
+                    timeout=5,
+                )
+                if (
+                    isinstance(ensured_id, int)
+                    and not isinstance(ensured_id, bool)
+                    and not self._cookie_channel_ready.is_set()
+                ):
+                    ch = self.get_data_channel(ensured_id)
+                    if ch is not None:
+                        self._cookie_channel_id = ensured_id
+                        self._cookie_channel = ch
+                        self._cookie_channel_ready.set()
+            await asyncio.wait_for(self._cookie_channel_ready.wait(), timeout=5.0)
+            channel = self._cookie_channel
+            channel_id = self._cookie_channel_id
+            if channel is None or channel_id is None:
+                return False
+            self.url = resolved_target
+            channel.send(payload)
+            res = await self._invoke_method(
+                "apply_auth_and_navigate",
+                {"channel_id": channel_id},
+                timeout=10,
+            )
+            return bool(res)
+        except Exception:
+            return False
+        finally:
+            self._bootstrap_in_flight = False
+            if channel_id is not None:
+                self._consumed_channel_ids.add(channel_id)
 
     async def load_request(self, url: str) -> bool:
         safe_url = _validate_app_webview_url(url)

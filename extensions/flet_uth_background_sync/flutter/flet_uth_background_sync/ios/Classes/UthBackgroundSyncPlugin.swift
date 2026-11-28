@@ -37,10 +37,22 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "configure":
             let arguments = call.arguments as? [String: Any]
             let settings = arguments?["settings"] as? [String: Any] ?? [:]
+            let enabled = bool(settings["enabled"], default: true)
             defaults.set(settings, forKey: Self.settingsKey)
+            guard enabled else {
+                clearDeadlineNotifications()
+                finish(result, [
+                    "enabled": false,
+                    "permission_granted": false,
+                    "scheduled": 0,
+                    "cancelled": 0,
+                    "error": "",
+                ])
+                return
+            }
             center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
                 self.finish(result, [
-                    "enabled": self.bool(settings["enabled"], default: true),
+                    "enabled": true,
                     "permission_granted": granted,
                     "scheduled": 0,
                     "cancelled": 0,
@@ -140,6 +152,32 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         case "request_exact_alarm_access":
             // Calendar notifications do not have Android's exact-alarm permission.
             result(true)
+
+        case "launch_external_intent":
+            let arguments = call.arguments as? [String: Any]
+            let rawUri = text(arguments?["uri"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let allowedSchemes: Set<String> = [
+                "zalo", "zoomus", "zoomphonecall", "zoom", "msteams",
+                "mailto", "tel", "sms", "tg", "fb-messenger", "whatsapp",
+                "viber", "skype", "slack", "discord", "googledocs",
+                "googlesheets", "googleslides", "googlemeet", "googleclassroom",
+                "googledrive", "vnd.youtube", "ms-word", "ms-excel",
+                "ms-powerpoint", "ms-onenote", "ms-outlook", "onedrive"
+            ]
+            guard !rawUri.isEmpty,
+                  !rawUri.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7F }),
+                  let url = URL(string: rawUri),
+                  let scheme = url.scheme?.lowercased(),
+                  allowedSchemes.contains(scheme)
+            else {
+                result(false)
+                return
+            }
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { ok in
+                    self.finish(result, ok)
+                }
+            }
 
         case "schedule_periodic":
             result(["scheduled": false, "reason": "ios_foreground_snapshot_only"])
@@ -451,6 +489,103 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         }
     }
 
+    private static let completedStatuses: Set<String> = [
+        "submitted",
+        "graded",
+        "finished",
+        "submitted for grading",
+        "đã nộp",
+        "đã nộp, chờ chấm",
+        "đã làm",
+        "đã hoàn thành",
+        "đã chấm",
+        "đã chấm điểm",
+        "đã công bố",
+        "released",
+    ]
+
+    private func isThnnActivity(_ activity: [String: Any]) -> Bool {
+        let explicitKey = text(activity["activity_key"]).lowercased()
+        if explicitKey.hasPrefix("thnn:") { return true }
+        let site = text(activity["site_identity"] ?? activity["site"] ?? activity["moodle_site"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let source = text(activity["source"] ?? activity["source_kind"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if site == "thnn" || source == "thnn_sync" { return true }
+        let rawUrl = text(activity["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let host = URL(string: rawUrl)?.host?.lowercased(),
+           host == "thnn.ut.edu.vn" || host.hasSuffix(".thnn.ut.edu.vn") {
+            return true
+        }
+        return false
+    }
+
+    private func isCoursesActivity(_ activity: [String: Any]) -> Bool {
+        if isThnnActivity(activity) { return false }
+        let site = text(activity["site_identity"] ?? activity["site"] ?? activity["moodle_site"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let source = text(activity["source"] ?? activity["source_kind"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if site == "courses" || ["ws_api", "ws_assign_api", "ws_quiz_calendar_api"].contains(source) {
+            return true
+        }
+        let rawUrl = text(activity["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let host = URL(string: rawUrl)?.host?.lowercased(),
+           host == "courses.ut.edu.vn" || host == "elearning.ut.edu.vn" {
+            return true
+        }
+        return false
+    }
+
+    private func normalizedSubmissionStatus(_ activity: [String: Any]) -> String {
+        if bool(activity["graded"], default: false) { return "graded" }
+        let rawTop = text(activity["submission_status"], default: "unknown")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if Self.completedStatuses.contains(rawTop) { return rawTop }
+        if let details = activity["details"] as? [String: Any] {
+            if let statusData = details["status_data"] as? [String: Any] {
+                for key in ["Chấm điểm", "Grading status", "Trạng thái chấm"] {
+                    let gVal = text(statusData[key]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if ["graded", "released", "đã chấm", "đã chấm điểm", "đã công bố"].contains(gVal) {
+                        return "graded"
+                    }
+                }
+                for key in ["Trạng thái nộp bài", "Submission status", "Trạng thái"] {
+                    let sVal = text(statusData[key]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if Self.completedStatuses.contains(sVal) { return sVal }
+                }
+            }
+            let quizAtt = text(details["quiz_attempt_status"]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if Self.completedStatuses.contains(quizAtt) { return quizAtt }
+        }
+        return rawTop.isEmpty ? "unknown" : rawTop
+    }
+
+    private func isWsVerifiableCoursesModule(_ activity: [String: Any], eventType: String) -> Bool {
+        let keyCandidate = text(activity["activity_key"] ?? activity["id"] ?? activity["activity_id"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        for nonWsPrefix in ["scorm:", "scorm_", "lesson:", "lesson_"] {
+            if keyCandidate.hasPrefix(nonWsPrefix) { return false }
+        }
+        let rawUrl = text(activity["url"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let path = URL(string: rawUrl)?.path.lowercased(), path.contains("/mod/") {
+            if path.contains("/mod/assign/") || path.contains("/mod/quiz/") {
+                return true
+            }
+            return false
+        }
+        return ["assignment", "assign", "quiz"].contains(eventType.lowercased())
+    }
+
     private func accepts(_ activity: [String: Any], settings: [String: Any]) -> Bool {
         let muted = Set(stringArray(settings["muted_courses"]).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -460,13 +595,20 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         if muted.contains(course) {
             return false
         }
-        let status = text(activity["submission_status"], default: "unknown").lowercased()
-        if bool(settings["ignore_submitted"], default: true),
-           ["submitted", "graded", "đã nộp", "đã chấm"].contains(status) {
-            return false
+        let eventType = text(activity["event_type"] ?? activity["type"])
+        if bool(settings["ignore_submitted"], default: true) {
+            let status = normalizedSubmissionStatus(activity)
+            if Self.completedStatuses.contains(status) {
+                return false
+            }
+            // Block unverified Courses assign/quiz items; keep SCORM/Lesson and THNN "unknown" eligible.
+            if (status == "unknown" || status.isEmpty),
+               isCoursesActivity(activity),
+               isWsVerifiableCoursesModule(activity, eventType: eventType) {
+                return false
+            }
         }
         let allowedTypes = Set(stringArray(settings["notify_types"]))
-        let eventType = text(activity["event_type"] ?? activity["type"])
         return allowedTypes.isEmpty || eventType.isEmpty || allowedTypes.contains(eventType)
     }
 
@@ -511,11 +653,17 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     }
 
     private func activityKey(_ activity: [String: Any]) -> String {
-        for name in ["activity_key", "id", "activity_id", "url"] {
+        let explicitKey = text(activity["activity_key"])
+        if !explicitKey.isEmpty { return explicitKey }
+        let thnn = isThnnActivity(activity)
+        for name in ["id", "activity_id", "url"] {
             let value = text(activity[name])
-            if !value.isEmpty { return value }
+            if !value.isEmpty {
+                return thnn && !value.lowercased().hasPrefix("thnn:") ? "thnn:\(value)" : value
+            }
         }
-        return "\(text(activity["course_id"]))|\(text(activity["title"]))"
+        let fallback = "\(text(activity["course_id"]))|\(text(activity["title"]))"
+        return thnn ? "thnn:\(fallback)" : fallback
     }
 
     private func parseDate(_ value: Any?) -> Date? {

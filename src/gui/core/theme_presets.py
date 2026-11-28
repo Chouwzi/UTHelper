@@ -1,5 +1,7 @@
 """UTHelper Theme Presets - Configured palettes for visual options."""
 
+DEFAULT_THEME = "steel_light"
+
 THEME_PRESETS = {
     "material_graphite": {
         "label": "Material Graphite",
@@ -29,7 +31,7 @@ THEME_PRESETS = {
     },
     "midnight_blue": {
         "label": "Midnight Blue",
-        "description": "Deep navy - mặc định",
+        "description": "Deep navy - dịu mắt ban đêm",
         "bg":             "#0B0F1A",
         "surface":        "#141B2D",
         "surface_hover":  "#1A2340",
@@ -130,7 +132,7 @@ THEME_PRESETS = {
         "surface_hover":  "#0D4150",
         "accent":         "#2AA2E8",
         "text_primary":   "#FDF6E3",
-        "text_secondary": "#93A1A1",
+        "text_secondary": "#9EAFAF",
         "border":         "#586E75",
         "critical": "#FF7B72",
         "warning":  "#FFD166",
@@ -143,7 +145,7 @@ THEME_PRESETS = {
     },
     "steel_light": {
         "label": "Steel Light",
-        "description": "Cool slate - dynamic blue",
+        "description": "Cool slate - mặc định",
         "mode": "light",
         "bg":             "#F8FAFC",
         "surface":        "#FFFFFF",
@@ -184,7 +186,7 @@ THEME_PRESETS = {
 }
 
 THEME_ORDER = [
+    "steel_light", "rose_light",
     "material_graphite", "midnight_blue", "ocean_teal", "sakura_pink",
     "nord_frost", "monokai_pro", "solarized_dark",
-    "steel_light", "rose_light",
 ]

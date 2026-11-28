@@ -40,27 +40,31 @@ UTHelper là dự án độc lập dành cho sinh viên. Dự án không đại 
 Đại học Giao thông vận tải Thành phố Hồ Chí Minh và không thay thế các cổng
 thông tin chính thức của trường.
 
-Phiên bản mã nguồn hiện tại là `2.5.1`. UI, runtime package và số build nền tảng
+Phiên bản mã nguồn hiện tại là `2.7.0`. UI, runtime package và số build nền tảng
 đều được sinh từ version canonical trong `pyproject.toml`; không chỉnh version
 riêng trong từng nền tảng.
 
-Bản Android ARM64 nhẹ dùng tệp `UTHelper-2.5.0-arm64-v8a.apk`; bản universal
-`UTHelper-2.5.0.apk` dành cho các kiến trúc còn lại và tương thích cập nhật cũ.
-Windows tiếp tục dùng bộ cài EXE/MSI đã ký, với phần đóng gói được tinh gọn.
+Bản Android ARM64 nhẹ dùng tệp `UTHelper-2.7.0-arm64-v8a.apk`; bản universal
+`UTHelper-2.7.0.apk` dành cho các kiến trúc còn lại (mã gói thống nhất
+`io.github.chouwzi.uthelper`). Windows tiếp tục dùng bộ cài EXE/MSI đã ký
+(`UTHelper-Setup-2.7.0.exe`, `UTHelper-2.7.0.msi`), bên cạnh hai kênh cửa hàng
+độc lập trên Google Play (`.aab`) và Microsoft Store (`.msix`).
 
 ## Tính năng
 
 | Nhóm | Khả năng |
 |---|---|
-| Hoạt động học tập | Đồng bộ bài tập, quiz và điểm danh từ các Moodle site được hỗ trợ |
+| Hoạt động học tập | Đồng bộ bài tập, quiz và điểm danh từ các Moodle site được hỗ trợ (`courses`, `thnn`) |
+| Môn học & Tài liệu | Workspace `Môn học` hợp nhất Courses & THNN, lọc kỳ hiện tại từ Portal, đọc ngoại tuyến PDF (`PDF.js`), Word (`.docx`), Slide (`.pptx`) và kho nén |
+| Quiz trong ứng dụng | Làm bài quiz trực tiếp qua WebView cô lập phiên (`flet_uth_quiz`), phát hiện SEB/khóa bài và xem lại chi tiết câu hỏi đã chấm |
 | Bài nộp | Xem trạng thái, tải lên, thêm, thay thế, đổi tên và xóa tệp khi Moodle cho phép |
-| Lịch học | Hiển thị môn, khung giờ, phòng, cơ sở và trạng thái buổi học trong ngày |
-| Điểm | Theo dõi thay đổi điểm và phát thông báo khi phát hiện dữ liệu mới |
+| Lịch học | Hiển thị thời khóa biểu tuần/ngày, khung giờ, phòng, cơ sở và nhắc lịch học từ UTH Portal |
+| Điểm & Academic Radar | Biểu đồ `Academic Radar` 6 trục, tính GPA mục tiêu, chi tiết điểm 2 tab (`Portal` \| `Course`) và thông báo khi có điểm mới |
 | Nhắc hạn | Phân loại hoạt động theo mức khẩn cấp và mốc thời gian cấu hình được |
-| Thông báo | Windows Toast, thông báo di động, Discord, Telegram và email |
-| Làm việc ngoại tuyến | Đọc snapshot gần nhất trong lúc dịch vụ trường hoặc mạng không khả dụng |
-| Cập nhật | Kiểm tra package đúng nền tảng, xác minh metadata và yêu cầu xác nhận trước khi cài |
-| Giao diện | Sáu theme, bộ lọc theo môn và loại hoạt động, tìm kiếm, lịch và system tray trên Windows |
+| Thông báo | Windows Toast, thông báo & báo thức di động, Discord, Telegram và email |
+| Làm việc ngoại tuyến | Đọc snapshot và tài liệu đã lưu cache trong lúc dịch vụ trường hoặc mạng không khả dụng |
+| Cập nhật & Phân phối | Tách biệt kênh cửa hàng (`chplay`, `msstore`) và kênh GitHub Releases LTS (`apk_lts`, `exe_lts`) có xác minh chữ ký/SHA-256 |
+| Giao diện | Chín preset giao diện sáng/tối, điều hướng thích ứng 5 tab, bộ lọc, tìm kiếm và system tray trên Windows |
 
 Khả năng sửa bài nộp phụ thuộc cấu hình, thời hạn và quyền do Moodle trả về.
 Các thao tác bị khóa, bài nhóm hoặc loại bài không được hỗ trợ sẽ mở luồng web
@@ -70,9 +74,9 @@ thay vì cố ghi dữ liệu qua API.
 
 | Nền tảng | Trạng thái | Gói phân phối |
 |---|---|---|
-| Windows 10/11 | Đường sử dụng chính | MSI và installer EXE |
-| Android 8 trở lên | Được build và kiểm tra bằng CI | APK |
-| iOS | Gói thiết bị không ký; người dùng phải tự ký lại | IPA không ký |
+| Windows 10/11 | Đường sử dụng chính | MSI và installer EXE (`exe_lts`), Microsoft Store MSIX (`msstore`) |
+| Android 8 trở lên | Được build và kiểm tra bằng CI | APK ARM64 & universal (`apk_lts`), Google Play AAB (`chplay`) |
+| iOS | Gói thiết bị không ký; người dùng phải tự ký lại | IPA không ký (`Sideloadly` / `AltStore`) |
 | Web | Dùng cho phát triển và chẩn đoán | Chạy từ source |
 
 Tải bản phát hành tại [GitHub Releases](https://github.com/Chouwzi/UTHelper/releases).
@@ -182,7 +186,8 @@ src/
 └── main.py           bootstrap, single-instance và Flet host
 
 extensions/
-└── flet_uth_background_sync/   bridge native cho đồng bộ và thông báo
+├── flet_uth_background_sync/   bridge native cho đồng bộ, báo thức và thông báo
+└── flet_uth_quiz/              WebView cô lập phiên cho làm quiz và xem tài liệu
 ```
 
 Luồng phụ thuộc mong muốn là `gui -> core use cases -> service/adapters`. Core

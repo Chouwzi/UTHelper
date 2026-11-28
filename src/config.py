@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import sys
 import logging
-import tempfile
 import platform
 import threading
 # Secure storage import chain
@@ -52,6 +51,15 @@ def _is_real_android() -> bool:
         or "android" in sys.platform.lower()
     )
 
+
+def _is_real_ios() -> bool:
+    return bool(getattr(sys, "_IOS_", False)) or sys.platform == "ios"
+
+
+def _requires_native_secret_backend() -> bool:
+    return _is_real_android() or _is_real_ios()
+
+
 def is_windows():
     return sys.platform == 'win32'
 
@@ -66,7 +74,12 @@ def _get_android_data_dir() -> Path:
     return Path.home() / ".uthelper"
 
 def _get_linux_data_dir() -> Path:
-    return Path(tempfile.gettempdir()) / "UTHelper"
+    xdg_data = os.getenv("XDG_DATA_HOME", "").strip()
+    if xdg_data:
+        candidate = Path(xdg_data)
+        if candidate.is_absolute():
+            return candidate / "UTHelper"
+    return Path.home() / ".local" / "share" / "UTHelper"
 
 def _get_macos_data_dir() -> Path:
     return Path.home() / "Library" / "Application Support" / "UTHelper"
@@ -81,8 +94,18 @@ def get_data_dir() -> Path:
         return _get_macos_data_dir()
     return _get_linux_data_dir()
 
+
+def _ensure_private_data_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
 _USER_DATA_DIR = get_data_dir()
-_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_ensure_private_data_dir(_USER_DATA_DIR)
 CONFIG_FILE = _USER_DATA_DIR / "settings.json"
 
 KEYRING_SERVICE_NAME = "UTHelper"
@@ -109,17 +132,59 @@ class SecretStoreBackend(Protocol):
 
 
 _secret_backend: SecretStoreBackend | None = None
+_secret_backend_factory: Callable[[], SecretStoreBackend | None] | None = None
 _pending_plaintext_migration: dict[str, str] = {}
+_loaded_had_ws_token_username: bool = True
 
 
 def register_secret_backend(backend: SecretStoreBackend | None) -> None:
-    """Register or clear a runtime native secret storage backend (e.g. AndroidKeyStore)."""
-    global _secret_backend
+    """Register or clear a runtime native secret storage backend (e.g. AndroidKeyStore/iOS Keychain)."""
+    global _secret_backend, _secret_backend_factory
     with _settings_save_lock:
         _secret_backend = backend
+        if backend is None:
+            _secret_backend_factory = None
 
 
-def hydrate_secrets(values: Mapping[str, str]) -> None:
+def register_secret_backend_factory(
+    factory: Callable[[], SecretStoreBackend | None] | None,
+) -> None:
+    """Register a lazy factory to recover a native secret backend after transient startup failures."""
+    global _secret_backend_factory
+    with _settings_save_lock:
+        _secret_backend_factory = factory
+
+
+def _resolve_secret_backend() -> SecretStoreBackend | None:
+    """Return active backend, invoking lazy recovery factory outside the in-memory state lock."""
+    global _secret_backend
+    with _settings_save_lock:
+        if _secret_backend is not None:
+            return _secret_backend
+        factory = _secret_backend_factory
+    if factory is None:
+        return None
+    try:
+        candidate = factory()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Lazy native secret backend initialization failed: %s",
+            type(exc).__name__,
+        )
+        return None
+    if candidate is None:
+        return None
+    with _settings_save_lock:
+        if _secret_backend is None:
+            _secret_backend = candidate
+        return _secret_backend
+
+
+def hydrate_secrets(
+    values: Mapping[str, str],
+    *,
+    overwrite_non_empty: bool = True,
+) -> None:
     """Populate in-memory settings secret attributes from a secure-store mapping."""
     with _settings_save_lock:
         for attr, key_suffix in _SECRET_FIELDS.items():
@@ -129,7 +194,20 @@ def hydrate_secrets(values: Mapping[str, str]) -> None:
                 raw = values[attr]
             else:
                 continue
-            setattr(settings, attr, str(raw) if raw else "")
+            new_val = str(raw) if raw else ""
+            if not overwrite_non_empty and (getattr(settings, attr, "") or not new_val):
+                continue
+            setattr(settings, attr, new_val)
+        if (
+            not _loaded_had_ws_token_username
+            and not str(getattr(settings, "MOODLE_WS_TOKEN_USERNAME", "") or "").strip()
+            and str(getattr(settings, "MOODLE_WS_TOKEN", "") or "").strip()
+            and str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+        ):
+            from core.demo_sandbox import is_demo_account as _is_demo_account
+
+            if not _is_demo_account(settings.UTH_USERNAME):
+                settings.MOODLE_WS_TOKEN_USERNAME = settings.UTH_USERNAME.strip()
 
 
 def pop_pending_plaintext_migration() -> dict[str, str]:
@@ -198,6 +276,7 @@ def _has_any_secure_backend() -> bool:
 
 
 _settings_save_lock = threading.RLock()
+_settings_io_lock = threading.RLock()
 _settings_subscriber_lock = threading.RLock()
 _settings_saved_subscribers: dict[object, Callable[[], None]] = {}
 
@@ -294,6 +373,7 @@ class Settings(BaseModel):
     MOODLE_SESSION: str = Field(default="", description="Session cookie dể giữ đăng nhập", exclude=True)
     MOODLE_WS_TOKEN: str = Field(default="", description="Web Services API token (stateless, valid ~30 ngày)", exclude=True)
     MOODLE_WS_TOKEN_ORIGIN: str = Field(default="", description="Trusted Moodle origin that issued the Web Services token", exclude=True)
+    MOODLE_WS_TOKEN_USERNAME: str = Field(default="", description="Username (MSSV) that owns the cached Web Services token")
 
     # Địa chỉ mấy trang web của trường mình
     MOODLE_BASE_URL: str = "https://courses.ut.edu.vn"
@@ -357,15 +437,15 @@ class Settings(BaseModel):
     # Hiển thị
     ALWAYS_ON_TOP: bool = Field(default=False, description="Luôn hiển thị cửa sổ trên cùng")
 
-    # Tùy chỉnh màu sắc
-    COLOR_CRITICAL: str = Field(default="#EF4444", description="Màu cảnh báo quá hạn/cấp bách")
-    COLOR_WARNING: str = Field(default="#F59E0B", description="Màu cảnh báo sắp tới")
-    COLOR_SAFE: str = Field(default="#10B981", description="Màu an toàn")
+    # Tùy chỉnh màu sắc (mặc định theo preset sáng steel_light)
+    COLOR_CRITICAL: str = Field(default="#DC2626", description="Màu cảnh báo quá hạn/cấp bách")
+    COLOR_WARNING: str = Field(default="#9A6700", description="Màu cảnh báo sắp tới")
+    COLOR_SAFE: str = Field(default="#147D3F", description="Màu an toàn")
     COLOR_QUIZ: str = Field(default="#7C3AED", description="Màu tag Quiz")
     COLOR_ASSIGNMENT: str = Field(default="#2563EB", description="Màu tag Bài tập")
-    COLOR_ATTENDANCE: str = Field(default="#D97706", description="Màu tag Điểm danh")
-    COLOR_OPEN: str = Field(default="#0891B2", description="Màu tag Sắp mở")
-    COLOR_OTHER: str = Field(default="#6B7280", description="Màu tag Sự kiện khác")
+    COLOR_ATTENDANCE: str = Field(default="#8A6100", description="Màu tag Điểm danh")
+    COLOR_OPEN: str = Field(default="#087F73", description="Màu tag Sắp mở")
+    COLOR_OTHER: str = Field(default="#57534E", description="Màu tag Sự kiện khác")
 
 
     # Debug
@@ -454,6 +534,34 @@ def migrate_settings_data(raw: dict) -> dict:
             data["NOTIFY_MILESTONES_MINUTES"] = sorted(converted, reverse=True)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_ENABLED", False)
     data.setdefault("NOTIFY_CLASS_SCHEDULE_LEAD_HOURS", [1])
+    if data.get("THEME", "steel_light") == "steel_light":
+        legacy_dark_defaults = {
+            "COLOR_CRITICAL": "#EF4444",
+            "COLOR_WARNING": "#F59E0B",
+            "COLOR_SAFE": "#10B981",
+            "COLOR_QUIZ": "#7C3AED",
+            "COLOR_ASSIGNMENT": "#2563EB",
+            "COLOR_ATTENDANCE": "#D97706",
+            "COLOR_OPEN": "#0891B2",
+            "COLOR_OTHER": "#6B7280",
+        }
+        light_defaults = {
+            "COLOR_CRITICAL": "#DC2626",
+            "COLOR_WARNING": "#9A6700",
+            "COLOR_SAFE": "#147D3F",
+            "COLOR_QUIZ": "#7C3AED",
+            "COLOR_ASSIGNMENT": "#2563EB",
+            "COLOR_ATTENDANCE": "#8A6100",
+            "COLOR_OPEN": "#087F73",
+            "COLOR_OTHER": "#57534E",
+        }
+        present_color_keys = [k for k in legacy_dark_defaults if k in data]
+        if present_color_keys and all(
+            str(data.get(k, "")).strip().upper() == legacy_dark_defaults[k]
+            for k in present_color_keys
+        ):
+            for k in present_color_keys:
+                data[k] = light_defaults[k]
     data["SETTINGS_SCHEMA_VERSION"] = 5
     return data
 
@@ -469,14 +577,17 @@ def get_sync_interval_minutes(value=None) -> int:
 
 # Đọc đống cài đặt từ file JSON lên để dùng
 def load_settings() -> Settings:
+    global _loaded_had_ws_token_username
     _logger = logging.getLogger(__name__)
     s = Settings()
     json_secrets: dict[str, str] = {}
+    had_ws_token_username = True
 
     from core.safe_file_io import SafeFileIO
     data = SafeFileIO.read_json_safe(CONFIG_FILE, dict)
     
     if data:
+        had_ws_token_username = "MOODLE_WS_TOKEN_USERNAME" in data
         try:
             # Trích xuất secrets trước khi xác thực Pydantic
             for key in _SECRET_FIELDS:
@@ -487,18 +598,21 @@ def load_settings() -> Settings:
         except Exception as e:
             _logger.warning(f"Failed to parse settings values: {e}")
 
+    with _settings_save_lock:
+        _loaded_had_ws_token_username = had_ws_token_username
+
     # Khôi phục secrets từ secure storage (keyring → tier 2 JSON fallback)
     for attr, key_suffix in _SECRET_FIELDS.items():
         val = _read_secret(key_suffix)
         if val:
             setattr(s, attr, val)
 
-    # Tier 2 fallback: restore secrets từ JSON (trên Android chỉ giữ trong RAM để migrate)
+    # Tier 2 fallback: restore secrets từ JSON (trên Android/iOS chỉ giữ trong RAM để migrate)
     if not _has_any_secure_backend():
         for attr, val in json_secrets.items():
             if not getattr(s, attr, ''):
                 setattr(s, attr, val)
-        if _is_real_android():
+        if _requires_native_secret_backend():
             with _settings_save_lock:
                 _pending_plaintext_migration.clear()
                 for attr, val in json_secrets.items():
@@ -517,29 +631,58 @@ def load_settings() -> Settings:
             import logging as _fb_log
             _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
 
+    if (
+        not had_ws_token_username
+        and not s.MOODLE_WS_TOKEN_USERNAME.strip()
+        and s.MOODLE_WS_TOKEN.strip()
+        and s.UTH_USERNAME.strip()
+    ):
+        from core.demo_sandbox import is_demo_account as _is_demo_account
+
+        if not _is_demo_account(s.UTH_USERNAME):
+            s.MOODLE_WS_TOKEN_USERNAME = s.UTH_USERNAME.strip()
+
     return s
 
 settings = load_settings()
+if os.environ.get("UTH_TEST_MODE") == "1":
+    # Prevent host developer AppData MSSV from leaking into unit tests that mock UTH_USERNAME + MOODLE_WS_TOKEN
+    settings.MOODLE_WS_TOKEN_USERNAME = ""
 
 def save_settings() -> bool:
-    """Persist settings transactionally across secure storage and JSON storage."""
+    """Persist settings transactionally across secure storage and JSON storage.
+
+    Fast in-memory state reads hold ``_settings_save_lock`` briefly, while all
+    blocking secure-store and filesystem I/O runs under ``_settings_io_lock``
+    only — preventing AB-BA lock inversion with event-loop callbacks such as
+    ``hydrate_secrets()`` or ``register_secret_backend()``.
+    """
     _logger = logging.getLogger(__name__)
-    with _settings_save_lock:
-        has_secure = _has_any_secure_backend()
-        data = settings.model_dump()
+    with _settings_io_lock:
+        backend = _resolve_secret_backend()
+        with _settings_save_lock:
+            has_secure = _has_any_secure_backend()
+            if backend is None:
+                backend = _secret_backend
+            data = settings.model_dump()
+            desired_secrets = {
+                key_suffix: getattr(settings, attr, "")
+                for attr, key_suffix in _SECRET_FIELDS.items()
+            }
+            raw_secret_attrs = {
+                attr: getattr(settings, attr, "") for attr in _SECRET_FIELDS
+            }
+
         if not has_secure:
-            if _is_real_android():
-                has_non_empty_secret = any(
-                    bool(getattr(settings, attr, "")) for attr in _SECRET_FIELDS
-                )
+            if _requires_native_secret_backend():
+                has_non_empty_secret = any(bool(v) for v in raw_secret_attrs.values())
                 if has_non_empty_secret:
                     _logger.warning(
-                        "Refusing to persist plaintext secrets on Android without a secure backend"
+                        "Refusing to persist plaintext secrets on mobile without a secure backend"
                     )
                     return False
             else:
-                for attr in _SECRET_FIELDS:
-                    value = getattr(settings, attr, "")
+                for attr, value in raw_secret_attrs.items():
                     if value:
                         data[attr] = value
                 _logger.warning(
@@ -551,14 +694,10 @@ def save_settings() -> bool:
             previous_secrets = _snapshot_secure_secrets()
             if previous_secrets is None:
                 return False
-            if _secret_backend is not None:
-                desired_secrets = {
-                    key_suffix: getattr(settings, attr, "")
-                    for attr, key_suffix in _SECRET_FIELDS.items()
-                }
+            if backend is not None:
                 if desired_secrets != previous_secrets:
                     try:
-                        wrote = bool(_secret_backend.write_all(desired_secrets))
+                        wrote = bool(backend.write_all(desired_secrets))
                     except Exception as exc:
                         _logger.warning(
                             "Native secret backend batch write failed: %s",
@@ -566,11 +705,11 @@ def save_settings() -> bool:
                         )
                         wrote = False
                     if not wrote:
-                        _restore_secure_secrets(previous_secrets)
+                        if not getattr(backend, "atomic_batch_write", False):
+                            _restore_secure_secrets(previous_secrets)
                         return False
             else:
-                for attr, key_suffix in _SECRET_FIELDS.items():
-                    value = getattr(settings, attr, "")
+                for key_suffix, value in desired_secrets.items():
                     if previous_secrets.get(key_suffix, "") == value:
                         continue
                     if not _write_secret(key_suffix, value):
@@ -580,6 +719,7 @@ def save_settings() -> bool:
         try:
             from core.safe_file_io import SafeFileIO
 
+            _ensure_private_data_dir(CONFIG_FILE.parent)
             json_ok = bool(SafeFileIO.write_json_atomic(CONFIG_FILE, data))
         except Exception as exc:
             json_ok = False
@@ -590,5 +730,56 @@ def save_settings() -> bool:
     if json_ok:
         _notify_settings_saved()
     return json_ok
+
+
+def clear_persisted_secrets() -> bool:
+    """Erase all persisted secrets from secure storage and in-memory settings."""
+    _logger = logging.getLogger(__name__)
+    ok = True
+    with _settings_io_lock:
+        backend = _resolve_secret_backend()
+        with _settings_save_lock:
+            if backend is None:
+                backend = _secret_backend
+            prev_username = str(getattr(settings, "UTH_USERNAME", "") or "").strip()
+            _pending_plaintext_migration.clear()
+            for attr in _SECRET_FIELDS:
+                setattr(settings, attr, "")
+            settings.MOODLE_WS_TOKEN_USERNAME = ""
+            settings.UTH_CREDENTIALS_ORIGIN = ""
+
+        empty_secrets = {key_suffix: "" for key_suffix in _SECRET_FIELDS.values()}
+        if backend is not None:
+            try:
+                if not bool(backend.write_all(empty_secrets)):
+                    ok = False
+            except Exception as exc:
+                _logger.warning(
+                    "Native secret backend clear failed: %s",
+                    type(exc).__name__,
+                )
+                for key_suffix in _SECRET_FIELDS.values():
+                    try:
+                        if not bool(backend.write_secret(key_suffix, "")):
+                            ok = False
+                    except Exception:
+                        ok = False
+        if _HAS_KEYRING:
+            for key_suffix in _SECRET_FIELDS.values():
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, key_suffix)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception as exc:
+                    _logger.warning("Keyring delete failed for %s: %s", key_suffix, exc)
+                    ok = False
+            if prev_username:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, prev_username)
+                except keyring.errors.PasswordDeleteError:
+                    pass
+                except Exception:
+                    pass
+    return ok
 
 

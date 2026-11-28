@@ -4,6 +4,7 @@ from core.distribution import (
     DistributionProfile,
     resolve_distribution_channel,
 )
+from core.version import APP_VERSION
 from gui.core.theme import C
 from config import settings
 import platform_utils as _pu
@@ -16,9 +17,20 @@ def _get_distribution_profile(view) -> DistributionProfile:
     return resolve_distribution_channel()
 
 
+def _format_system_version_label(profile: DistributionProfile) -> str:
+    if profile.supports_github_self_update or not profile.store_display_name:
+        return f"Phiên bản hiện tại: v{APP_VERSION}"
+    return f"Phiên bản hiện tại: v{APP_VERSION} · {profile.store_display_name}"
+
+
 def init_system_controls(view):
     """Khởi tạo các control cấu hình vòng đời ứng dụng và tần suất đồng bộ trên hệ điều hành."""
     profile = _get_distribution_profile(view)
+    view._system_version_text = ft.Text(
+        _format_system_version_label(profile),
+        size=12,
+        color=C.TEXT_SECONDARY,
+    )
     view._sw_auto_update = ft.Switch(
         value=getattr(settings, "AUTO_UPDATE_ENABLED", True),
         active_color=C.ACCENT,
@@ -157,6 +169,18 @@ def build_system_section(view) -> ft.Control:
         ])
 
     controls.append(view._make_themed_label("Cập nhật"))
+    system_version_text = getattr(view, "_system_version_text", None)
+    if system_version_text is None:
+        system_version_text = ft.Text(
+            _format_system_version_label(profile),
+            size=12,
+            color=C.TEXT_SECONDARY,
+        )
+        view._system_version_text = system_version_text
+    else:
+        system_version_text.value = _format_system_version_label(profile)
+        system_version_text.color = C.TEXT_SECONDARY
+    controls.append(system_version_text)
     if profile.supports_github_self_update:
         controls.extend([
             view._sw_auto_update,
