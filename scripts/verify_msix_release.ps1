@@ -11,7 +11,8 @@ param(
     [switch]$RunWack,
     [string]$WackReportPath = "",
     [int]$WackTimeoutSeconds = 900,
-    [switch]$RequireOfficeViewer
+    [switch]$RequireOfficeViewer,
+    [switch]$RequireDiagnosticsConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -112,6 +113,303 @@ function Format-WindowsArgument([string]$Value) {
         return $Value
     }
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Test-DisallowedPublicIpAddress([System.Net.IPAddress]$IpAddress) {
+    $targetIps = @($IpAddress)
+    if ($IpAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and $IpAddress.IsIPv4MappedToIPv6) {
+        $targetIps += $IpAddress.MapToIPv4()
+    }
+    foreach ($candidate in $targetIps) {
+        if ([System.Net.IPAddress]::IsLoopback($candidate)) {
+            return $true
+        }
+        $bytes = $candidate.GetAddressBytes()
+        if ($candidate.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            $b0 = [int]$bytes[0]
+            $b1 = [int]$bytes[1]
+            $b2 = [int]$bytes[2]
+            # 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+            # 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16,
+            # 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4
+            if ($b0 -eq 0 -or $b0 -eq 10 -or $b0 -eq 127 -or $b0 -ge 224) { return $true }
+            if ($b0 -eq 100 -and $b1 -ge 64 -and $b1 -le 127) { return $true }
+            if ($b0 -eq 169 -and $b1 -eq 254) { return $true }
+            if ($b0 -eq 172 -and $b1 -ge 16 -and $b1 -le 31) { return $true }
+            if ($b0 -eq 192 -and $b1 -eq 0 -and ($b2 -eq 0 -or $b2 -eq 2)) { return $true }
+            if ($b0 -eq 192 -and $b1 -eq 168) { return $true }
+            if ($b0 -eq 198 -and ($b1 -eq 18 -or $b1 -eq 19)) { return $true }
+            if ($b0 -eq 198 -and $b1 -eq 51 -and $b2 -eq 100) { return $true }
+            if ($b0 -eq 203 -and $b1 -eq 0 -and $b2 -eq 113) { return $true }
+        }
+        elseif ($candidate.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+            if ($candidate.Equals([System.Net.IPAddress]::IPv6None) -or
+                $candidate.IsIPv6LinkLocal -or
+                $candidate.IsIPv6SiteLocal -or
+                $candidate.IsIPv6Multicast) {
+                return $true
+            }
+            $firstByte = [int]$bytes[0]
+            $secondByte = [int]$bytes[1]
+            # fc00::/7 Unique Local, 2001:db8::/32 documentation
+            if (($firstByte -band 0xFE) -eq 0xFC) { return $true }
+            if ($firstByte -eq 0x20 -and $secondByte -eq 0x01 -and [int]$bytes[2] -eq 0x0D -and [int]$bytes[3] -eq 0xB8) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Assert-ValidSentryDsn([string]$DsnValue) {
+    if ($DsnValue.Length -gt 2048) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn exceeds length limit"
+    }
+    if ($DsnValue -cne $DsnValue.Trim()) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn contains leading/trailing whitespace"
+    }
+    foreach ($ch in $DsnValue.ToCharArray()) {
+        if ([int]$ch -lt 0x21) {
+            throw "MSIX verification failed: diagnostics-config.json sentry_dsn contains whitespace or control characters"
+        }
+    }
+    $decodedLower = ([Uri]::UnescapeDataString($DsnValue)).ToLowerInvariant()
+    foreach ($marker in @("auth_token", "authtoken", "management_token", "management-token", "sentry_auth_token", "sntrys_")) {
+        if ($decodedLower.Contains($marker)) {
+            throw "MSIX verification failed: diagnostics-config.json sentry_dsn contains forbidden token marker '$marker'"
+        }
+    }
+    if ($DsnValue.Contains("?") -or $DsnValue.Contains("#")) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn must not contain query or fragment"
+    }
+    $uri = $null
+    if (-not [Uri]::TryCreate($DsnValue, [UriKind]::Absolute, [ref]$uri)) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn is not a valid URL"
+    }
+    if ($uri.Scheme -cne "https") {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn must use https"
+    }
+    if ([string]::IsNullOrEmpty($uri.UserInfo) -or $uri.UserInfo.Contains(":")) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn must carry only a public key without password"
+    }
+    if ($uri.UserInfo -cnotmatch '^[A-Za-z0-9_-]{8,128}$') {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn public key is invalid"
+    }
+    $rawAfterScheme = $DsnValue.Substring(8)
+    $slashIdx = $rawAfterScheme.IndexOf("/")
+    $rawNetloc = if ($slashIdx -ge 0) { $rawAfterScheme.Substring(0, $slashIdx) } else { $rawAfterScheme }
+    $atIdx = $rawNetloc.LastIndexOf("@")
+    $rawHostPort = if ($atIdx -ge 0) { $rawNetloc.Substring($atIdx + 1) } else { $rawNetloc }
+    if ([string]::IsNullOrEmpty($uri.Host) -or $rawHostPort -cne $rawHostPort.ToLowerInvariant()) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn host must be canonical lowercase"
+    }
+    $pathParts = @(([Uri]::UnescapeDataString($uri.AbsolutePath)).Split("/") | Where-Object { $_ -ne "" })
+    if ($pathParts.Count -eq 0 -or $pathParts[$pathParts.Count - 1] -cnotmatch '^[0-9]{1,20}$') {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn must end in a numeric project id"
+    }
+    foreach ($part in $pathParts) {
+        if ($part -eq "." -or $part -eq "..") {
+            throw "MSIX verification failed: diagnostics-config.json sentry_dsn path contains dot segments"
+        }
+    }
+}
+
+function Assert-ValidPosthogKey([string]$KeyValue) {
+    if ($KeyValue -cne $KeyValue.Trim()) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_project_api_key contains whitespace"
+    }
+    foreach ($ch in $KeyValue.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -lt 0x21 -or $code -gt 0x7E) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_project_api_key contains invalid characters"
+        }
+    }
+    $lower = $KeyValue.ToLowerInvariant()
+    $decoded = ([Uri]::UnescapeDataString($KeyValue)).ToLowerInvariant()
+    foreach ($marker in @(
+        "phx_", "phs_", "sntrys_", "secret", "auth_token", "authtoken",
+        "personal", "management_token", "management-token", "sentry_auth_token", "bearer"
+    )) {
+        if ($lower.Contains($marker) -or $decoded.Contains($marker)) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_project_api_key contains forbidden secret/token marker '$marker'"
+        }
+    }
+    if ($KeyValue -cnotmatch '^phc_[A-Za-z0-9_-]{20,128}$') {
+        throw "MSIX verification failed: diagnostics-config.json posthog_project_api_key must match phc_<20..128 chars>"
+    }
+}
+
+function Assert-ValidPosthogHost([string]$HostValue) {
+    if ($HostValue.Length -gt 512) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host exceeds length limit"
+    }
+    if ($HostValue -cne $HostValue.Trim()) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host contains whitespace"
+    }
+    foreach ($ch in $HostValue.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -lt 0x21 -or $code -gt 0x7E) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_host contains invalid characters"
+        }
+    }
+    if ($HostValue.Contains("\") -or $HostValue.Contains("?") -or $HostValue.Contains("#") -or $HostValue.Contains("@")) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host must not contain credentials, query, fragment, or backslashes"
+    }
+    $decodedFull = ([Uri]::UnescapeDataString($HostValue)).ToLowerInvariant()
+    foreach ($marker in @("phx_", "phs_", "sntrys_", "auth_token", "authtoken", "management_token", "management-token", "sentry_auth_token")) {
+        if ($decodedFull.Contains($marker)) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_host contains forbidden token marker"
+        }
+    }
+    if (-not $HostValue.StartsWith("https://", [StringComparison]::Ordinal)) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host must start with https://"
+    }
+    $afterScheme = $HostValue.Substring(8)
+    $slashIdx = $afterScheme.IndexOf("/")
+    $rawNetloc = if ($slashIdx -ge 0) { $afterScheme.Substring(0, $slashIdx) } else { $afterScheme }
+    $rawPath = if ($slashIdx -ge 0) { $afterScheme.Substring($slashIdx) } else { "" }
+    if ([string]::IsNullOrEmpty($rawNetloc) -or $rawNetloc -cne $rawNetloc.ToLowerInvariant()) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host authority must be canonical lowercase"
+    }
+    $uri = $null
+    if (-not [Uri]::TryCreate($HostValue, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -cne "https" -or -not [string]::IsNullOrEmpty($uri.UserInfo)) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host is not a valid HTTPS URL"
+    }
+    $hostName = $uri.DnsSafeHost
+    if ([string]::IsNullOrEmpty($hostName) -or $hostName.Contains("%") -or $hostName.StartsWith(".") -or $hostName.EndsWith(".") -or $hostName.Contains("..")) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host hostname is invalid"
+    }
+    if (@("app.posthog.com", "us.posthog.com", "eu.posthog.com") -contains $hostName) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host must not target PostHog web UI host '$hostName'"
+    }
+    $ipObj = $null
+    $isLiteralIp = ($rawNetloc.StartsWith("[") -or ($hostName -cmatch '^[0-9.]+$')) -and [System.Net.IPAddress]::TryParse($hostName, [ref]$ipObj)
+    if ($isLiteralIp) {
+        if (Test-DisallowedPublicIpAddress $ipObj) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_host must not use loopback, private, or link-local IP '$hostName'"
+        }
+    }
+    else {
+        $tld = ($hostName -split '\.')[-1]
+        if ($hostName -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$' -or ($tld -cmatch '^[0-9]+$')) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_host domain '$hostName' is invalid"
+        }
+        if ($hostName -eq "localhost" -or $hostName.EndsWith(".localhost") -or $hostName.EndsWith(".local")) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_host must not use local host '$hostName'"
+        }
+    }
+    if ($rawPath.Contains(";") -or $rawPath.Contains("//")) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host path is invalid"
+    }
+    if ([Uri]::UnescapeDataString($rawPath) -cne $rawPath) {
+        throw "MSIX verification failed: diagnostics-config.json posthog_host path must not use percent-encoding"
+    }
+    $segments = @($rawPath.Split("/") | Where-Object { $_ -ne "" })
+    foreach ($seg in $segments) {
+        if ($seg -eq "." -or $seg -eq ".." -or $seg.Contains("..") -or ($seg -cnotmatch '^[A-Za-z0-9._-]+$')) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_host path segment '$seg' is invalid"
+        }
+    }
+}
+
+function Assert-ValidDiagnosticsConfigFile([IO.FileInfo]$ConfigFile) {
+    if (($ConfigFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "MSIX verification failed: diagnostics-config.json must not be a reparse point: $($ConfigFile.FullName)"
+    }
+    if ($ConfigFile.Length -le 0 -or $ConfigFile.Length -gt 4096) {
+        throw "MSIX verification failed: diagnostics-config.json size ($($ConfigFile.Length) bytes) is invalid: $($ConfigFile.FullName)"
+    }
+    $rawBytes = [IO.File]::ReadAllBytes($ConfigFile.FullName)
+    $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    try {
+        $rawText = $strictUtf8.GetString($rawBytes)
+    }
+    catch {
+        throw "MSIX verification failed: diagnostics-config.json is not valid UTF-8: $($ConfigFile.FullName)"
+    }
+    if (-not $rawText.Trim().StartsWith("{")) {
+        throw "MSIX verification failed: diagnostics-config.json must be a JSON object"
+    }
+    try {
+        $parsed = $rawText | ConvertFrom-Json
+    }
+    catch {
+        throw "MSIX verification failed: diagnostics-config.json is not valid JSON: $($ConfigFile.FullName)"
+    }
+    if ($null -eq $parsed -or $parsed -is [System.Array] -or $parsed -is [string] -or $parsed -is [ValueType]) {
+        throw "MSIX verification failed: diagnostics-config.json must be a JSON object"
+    }
+    $propMap = @{}
+    foreach ($prop in $parsed.PSObject.Properties) {
+        $propMap[$prop.Name] = $prop.Value
+    }
+    if (-not $propMap.ContainsKey("schema_version")) {
+        throw "MSIX verification failed: diagnostics-config.json missing schema_version"
+    }
+    $schemaVer = $propMap["schema_version"]
+    if ($schemaVer -is [bool] -or ($schemaVer -isnot [int] -and $schemaVer -isnot [long])) {
+        throw "MSIX verification failed: diagnostics-config.json schema_version must be an integer"
+    }
+    $validBuildEnvs = @("release", "develop", "development")
+    $validPkgFormats = @("aab", "apk", "msix", "exe_msi", "exe", "msi", "ipa", "ios_app", "source")
+
+    if ($schemaVer -eq 1) {
+        $expectedKeys = @("schema_version", "sentry_dsn")
+    }
+    elseif ($schemaVer -eq 2) {
+        $expectedKeys = @("schema_version", "sentry_dsn", "build_environment", "package_format")
+    }
+    elseif ($schemaVer -eq 3) {
+        $expectedKeys = @(
+            "schema_version", "sentry_dsn", "build_environment",
+            "package_format", "posthog_project_api_key", "posthog_host"
+        )
+    }
+    else {
+        throw "MSIX verification failed: unsupported schema_version '$schemaVer' in diagnostics-config.json"
+    }
+
+    if ($propMap.Count -ne $expectedKeys.Count) {
+        throw "MSIX verification failed: unexpected or missing keys in diagnostics-config.json (schema_version=$schemaVer)"
+    }
+    foreach ($reqKey in $expectedKeys) {
+        if (-not $propMap.ContainsKey($reqKey)) {
+            throw "MSIX verification failed: missing required key '$reqKey' in diagnostics-config.json"
+        }
+    }
+
+    $sentryDsn = $propMap["sentry_dsn"]
+    if ($sentryDsn -isnot [string]) {
+        throw "MSIX verification failed: diagnostics-config.json sentry_dsn must be a string"
+    }
+    if ($sentryDsn -ne "") {
+        Assert-ValidSentryDsn $sentryDsn
+    }
+
+    if ($schemaVer -ge 2) {
+        $buildEnv = $propMap["build_environment"]
+        $pkgFmt = $propMap["package_format"]
+        if ($buildEnv -isnot [string] -or ($validBuildEnvs -notcontains $buildEnv)) {
+            throw "MSIX verification failed: unsupported build_environment '$buildEnv' in diagnostics-config.json"
+        }
+        if ($pkgFmt -isnot [string] -or ($validPkgFormats -notcontains $pkgFmt)) {
+            throw "MSIX verification failed: unsupported package_format '$pkgFmt' in diagnostics-config.json"
+        }
+    }
+
+    if ($schemaVer -eq 3) {
+        $phKey = $propMap["posthog_project_api_key"]
+        $phHost = $propMap["posthog_host"]
+        if ($phKey -isnot [string] -or $phHost -isnot [string]) {
+            throw "MSIX verification failed: PostHog fields in diagnostics-config.json must be strings"
+        }
+        if ($phKey -ne "") {
+            Assert-ValidPosthogKey $phKey
+        }
+        if ($phHost -ne "") {
+            Assert-ValidPosthogHost $phHost
+        }
+    }
 }
 
 $resolvedInput = (Resolve-Path -LiteralPath $MsixPath).Path
@@ -377,6 +675,17 @@ try {
         if ($null -eq $observedProductId -and $null -ne $fileProductId) {
             $observedProductId = $fileProductId
         }
+    }
+
+    $diagnosticsFiles = @(
+        Get-ChildItem -LiteralPath $inspectRoot -Recurse -Force -Filter "diagnostics-config.json" |
+            Where-Object { -not $_.PSIsContainer }
+    )
+    if ($RequireDiagnosticsConfig -and $diagnosticsFiles.Count -eq 0) {
+        throw "MSIX verification failed: diagnostics-config.json is missing from MSIX package"
+    }
+    foreach ($diagFile in $diagnosticsFiles) {
+        Assert-ValidDiagnosticsConfigFile $diagFile
     }
 
     $officeViewerDir = Join-Path $inspectRoot "app\assets\office_viewer"

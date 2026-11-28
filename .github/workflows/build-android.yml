@@ -16,6 +16,7 @@ on:
       - 'scripts/generate_public_runtime_*.py'
       - '.github/workflows/build-android.yml'
       - 'src/core/distribution.py'
+      - 'src/diagnostics/release_config.py'
       - 'src/platform_utils/background_sync.py'
       - 'src/assets/office_viewer/**'
       - 'src/assets/pdf_viewer/**'
@@ -100,6 +101,8 @@ jobs:
       - name: 🔨 Build Android Artifact (${{ matrix.channel }})
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          POSTHOG_PROJECT_API_KEY: ${{ vars.POSTHOG_PROJECT_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
           CHANNEL: ${{ matrix.channel }}
           BUILD_TARGET: ${{ matrix.target }}
           LEGACY_FLAG: ${{ matrix.legacy_flag }}
@@ -218,7 +221,7 @@ jobs:
           # manifest removals, and 16 KB packaging before the final build pass.
           for build_attempt in 1 2 3; do
             python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --posthog-key "$POSTHOG_PROJECT_API_KEY" --posthog-host "$POSTHOG_HOST" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
             if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose || test -d build/flutter; then
               break
             fi
@@ -234,7 +237,7 @@ jobs:
           build_ok=0
           for build_attempt in 1 2 3; do
             python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$SENTRY_DSN" --posthog-key "$POSTHOG_PROJECT_API_KEY" --posthog-host "$POSTHOG_HOST" --build-environment "$BUILD_ENV" --package-format "$BUILD_TARGET" --output src/assets/diagnostics-config.json --distribution-channel "$CHANNEL" --distribution-output src/assets/distribution-channel.json --android-package-id "$APK_PACKAGE_ID"
             if flet build "$BUILD_TARGET" --build-version "$PROJECT_VERSION" --build-number "$BUILD_NUMBER" "${EXTRA_ARGS[@]}" --yes --verbose; then
               build_ok=1
               break
@@ -362,10 +365,12 @@ jobs:
           import sys
           import zipfile
           from scripts.verify_android_release import (
+              _verify_embedded_diagnostics_config,
               _verify_office_viewer_assets_in_app_zip,
               _verify_quiz_and_webview_packages,
           )
           with zipfile.ZipFile(sys.argv[1]) as archive:
+              _verify_embedded_diagnostics_config(archive, require=True)
               _verify_office_viewer_assets_in_app_zip(archive, require=True)
               _verify_quiz_and_webview_packages(archive, require=True)
           PY
@@ -452,6 +457,7 @@ jobs:
             --architecture universal \
             --require-office-viewer \
             --require-quiz-webview \
+            --require-diagnostics-config \
             --output "chplay-diagnostic.verification.json"
 
       - name: 📤 Upload unsigned diagnostic APK (apk_lts)
@@ -596,6 +602,7 @@ jobs:
             --architecture universal \
             --require-office-viewer \
             --require-quiz-webview \
+            --require-diagnostics-config \
             --output "chplay-upload-signed.verification.json"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
