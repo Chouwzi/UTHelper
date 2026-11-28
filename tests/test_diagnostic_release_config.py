@@ -643,3 +643,72 @@ def test_cli_supports_posthog_flags_empty_powershell_args_and_require_gate(
     assert exc_info.value.code == 2
     assert "PostHog" in capsys.readouterr().err
     assert not out_missing.exists()
+
+
+def test_posthog_generation_without_build_env_or_package_format_defaults_cleanly(
+    tmp_path,
+):
+    direct_out = tmp_path / "direct-default-v3.json"
+    generate_public_config(
+        direct_out,
+        VALID_DSN,
+        posthog_project_api_key=VALID_POSTHOG_KEY,
+        posthog_host="https://us.i.posthog.com/",
+    )
+    assert json.loads(direct_out.read_text(encoding="utf-8")) == {
+        "build_environment": "release",
+        "package_format": "source",
+        "posthog_host": "https://us.i.posthog.com",
+        "posthog_project_api_key": VALID_POSTHOG_KEY,
+        "schema_version": 3,
+        "sentry_dsn": VALID_DSN,
+    }
+    direct_loaded = load_public_config(direct_out, development=False, environ={})
+    assert direct_loaded == PublicDiagnosticsConfig(
+        dsn=VALID_DSN,
+        build_environment="release",
+        package_format="source",
+        posthog_project_api_key=VALID_POSTHOG_KEY,
+        posthog_host="https://us.i.posthog.com",
+    )
+    assert direct_loaded.posthog_configured is True
+
+    # Partial (only one of build_environment / package_format) still fails closed
+    for partial_kwargs in (
+        {"build_environment": "release", "package_format": None},
+        {"build_environment": None, "package_format": "apk"},
+    ):
+        with pytest.raises(PublicConfigError):
+            generate_public_config(
+                tmp_path / "partial.json",
+                VALID_DSN,
+                posthog_project_api_key=VALID_POSTHOG_KEY,
+                posthog_host=VALID_POSTHOG_HOST,
+                **partial_kwargs,
+            )
+
+    cli_out = tmp_path / "cli-default-v3.json"
+    assert (
+        generate_config_main(
+            [
+                "--sentry-dsn",
+                VALID_DSN,
+                "--posthog-key",
+                VALID_POSTHOG_KEY,
+                "--posthog-host",
+                "https://eu.i.posthog.com/",
+                "--output",
+                str(cli_out),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(cli_out.read_text(encoding="utf-8")) == {
+        "build_environment": "release",
+        "package_format": "source",
+        "posthog_host": "https://eu.i.posthog.com",
+        "posthog_project_api_key": VALID_POSTHOG_KEY,
+        "schema_version": 3,
+        "sentry_dsn": VALID_DSN,
+    }
+

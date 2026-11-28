@@ -602,10 +602,13 @@ def generate_public_config(
             "sentry_dsn": dsn,
         }
     else:
-        if build_environment is None or package_format is None:
+        if (build_environment is None) != (package_format is None):
             raise PublicConfigError(
                 "build_environment and package_format must be provided together"
             )
+        if build_environment is None and package_format is None:
+            build_environment = "release"
+            package_format = "source"
         if (
             not isinstance(build_environment, str)
             or build_environment not in VALID_BUILD_ENVIRONMENTS
