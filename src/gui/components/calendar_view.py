@@ -2356,9 +2356,9 @@ class CalendarView(ft.Container):
                         "Học bù",
                         size=9.5,
                         weight=ft.FontWeight.W_700,
-                        color="#FDC12A",
+                        color=C.MAKEUP_TEXT,
                     ),
-                    bgcolor=ft.Colors.with_opacity(0.25, "#FCF4A3"),
+                    bgcolor=ft.Colors.with_opacity(0.25, C.MAKEUP_BG),
                     border_radius=5,
                     padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
                 )

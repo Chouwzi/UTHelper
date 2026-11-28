@@ -1854,7 +1854,7 @@ class ScheduleWeekView(ft.Container):
             status_label, status_color = (
                 ("Tạm ngưng", C.CRITICAL)
                 if session.cancelled
-                else ("Học bù", "#FDC12A")
+                else ("Học bù", C.MAKEUP_TEXT)
             )
             status_watermark = ft.Container(
                 content=ft.Text(
@@ -1891,7 +1891,7 @@ class ScheduleWeekView(ft.Container):
             bgcolor=(
                 ft.Colors.with_opacity(0.16, C.CRITICAL)
                 if session.cancelled
-                else ft.Colors.with_opacity(0.25, "#FCF4A3")
+                else ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
                 if is_makeup_session
                 else C.SURFACE
             ),

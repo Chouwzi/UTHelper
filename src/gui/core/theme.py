@@ -37,6 +37,8 @@ class C:
     CRITICAL       = "#DC2626"
     WARNING        = "#9A6700"
     SAFE           = "#147D3F"
+    MAKEUP_BG      = "#FCF4A3"
+    MAKEUP_TEXT    = "#FDC12A"
     TEXT_PRIMARY   = "#0F172A"
     TEXT_SECONDARY = "#475569"
     BORDER         = "#E2E8F0"
@@ -61,6 +63,8 @@ _SEMANTIC_COLOR_NAMES = (
     "CRITICAL",
     "WARNING",
     "SAFE",
+    "MAKEUP_BG",
+    "MAKEUP_TEXT",
     "TEXT_PRIMARY",
     "TEXT_SECONDARY",
     "BORDER",
