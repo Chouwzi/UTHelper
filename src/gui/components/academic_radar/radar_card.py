@@ -466,6 +466,7 @@ class AcademicRadarCard(ft.Container):
             spacing=8,
         )
 
+        self.content = None
         self.content = ft.Column(
             controls=[
                 header_row,

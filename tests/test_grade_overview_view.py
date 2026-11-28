@@ -300,8 +300,15 @@ def test_grade_overview_header_prevents_wrapping_and_keeps_touch_targets():
     assert view._title.no_wrap is True
     assert view._title.overflow == ft.TextOverflow.ELLIPSIS
     assert view._header.spacing <= 4
-    assert view._courses_btn.height == 44
-    assert view._courses_btn.style.padding == ft.Padding.symmetric(horizontal=8, vertical=0)
+    assert "Môn học" not in _collect_texts(view._header)
+    semantic_labels = [
+        c.label for c in view._header.controls if isinstance(c, ft.Semantics)
+    ]
+    assert semantic_labels == [
+        "Quay lại",
+        "Tính GPA mong muốn",
+        "Làm mới bảng điểm từ Portal",
+    ]
 
     view.set_width(320)
     assert view._title.size == 15
@@ -1413,5 +1420,148 @@ def test_synthetic_zero_scroll_during_post_scroll_to_20ms_cooldown_triggers_foll
         assert gv._saved_scroll_offset == 580.0
 
     asyncio.run(scenario())
+
+
+def test_live_flet_session_semester_gpa_target_and_graduation_inputs_update_mounted_dialog_controls():
+    import asyncio
+    import msgpack
+    from core.academic_radar.gpa_planner import CreditProgress
+    from core.academic_radar.models import CourseEligibility
+    from flet.controls.base_control import BaseControl
+    from flet.messaging.connection import Connection
+    from flet.messaging.protocol import configure_encode_object_for_msgpack
+    from flet.messaging.session import Session
+    from flet.pubsub.pubsub_hub import PubSubHub
+
+    async def scenario():
+        sent_frames: list[tuple[object, bytes]] = []
+
+        class _LivePackConn(Connection):
+            def __init__(self):
+                super().__init__()
+                self.pubsubhub = PubSubHub()
+
+            def send_message(self, msg):
+                packed = msgpack.packb(
+                    [msg.action, msg.body],
+                    default=configure_encode_object_for_msgpack(BaseControl),
+                )
+                sent_frames.append((msg, packed))
+
+        conn = _LivePackConn()
+        sess = Session(conn)
+        page = sess.page
+        msgpack.packb(
+            sess.get_page_patch(),
+            default=configure_encode_object_for_msgpack(BaseControl),
+        )
+
+        active_sem = SemesterGradeData(
+            id=77,
+            name="Học kỳ 1 năm học 2026-2027",
+            summary={},
+            courses=[
+                CourseGradeItem(
+                    "1",
+                    "0120001",
+                    "Trí tuệ nhân tạo",
+                    3.0,
+                    8.5,
+                    9.0,
+                    8.8,
+                    4.0,
+                    "A",
+                    eligibility=CourseEligibility(status="academic"),
+                ),
+                CourseGradeItem(
+                    "2",
+                    "0120002",
+                    "Quản trị doanh nghiệp CNTT",
+                    3.0,
+                    None,
+                    None,
+                    None,
+                    eligibility=CourseEligibility(status="academic"),
+                ),
+                CourseGradeItem(
+                    "3",
+                    "0120003",
+                    "Chủ nghĩa xã hội khoa học",
+                    2.0,
+                    None,
+                    None,
+                    None,
+                    eligibility=CourseEligibility(status="academic"),
+                ),
+            ],
+        )
+        prev_sem = _make_sample_semester(76, "Học kỳ 2 năm học 2025-2026")
+        p1 = calculate_radar_profile(active_sem, previous_semester=prev_sem)
+        p2 = calculate_radar_profile(prev_sem)
+
+        gv = GradeOverviewView(page=page)
+        page.add(gv)
+        gv.update_academic_data([active_sem, prev_sem], [p1, p2])
+        page.update()
+
+        gv._open_planner(None)
+        dialog = gv._planner_dialog
+        assert dialog is not None
+
+        # Walk the ACTUAL mounted dialog subtree sent to Flutter
+        mounted_text_fields = [
+            ctrl for ctrl in _walk_controls(dialog) if isinstance(ctrl, ft.TextField)
+        ]
+        assert len(mounted_text_fields) == 2
+        # _walk_controls uses LIFO stack, so find by label explicitly
+        mounted_sem_tf = next(
+            tf for tf in mounted_text_fields if tf.label == "GPA hệ 4 mục tiêu"
+        )
+        mounted_grad_tf = next(
+            tf for tf in mounted_text_fields if tf.label == "GPA ra trường hệ 4"
+        )
+
+        assert mounted_sem_tf is gv._gpa_target_card._target_field
+        assert mounted_grad_tf is gv._graduation_card._target_field
+        assert mounted_sem_tf._i in sess.index
+        assert gv._gpa_target_card._result_col._i in sess.index
+        assert mounted_grad_tf._i in sess.index
+        assert gv._graduation_card._result_col._i in sess.index
+        assert any(
+            "Học kỳ 1 năm học 2026-2027" in txt for txt in _collect_texts(dialog)
+        )
+
+        # 1. Type "3.5" into the mounted semester GPA TextField -> must emit PATCH_CONTROL and render course targets!
+        sess.apply_patch(mounted_sem_tf._i, {"value": "3.5"})
+        sent_frames.clear()
+        await sess.dispatch_event(mounted_sem_tf._i, "change", "3.5")
+
+        assert len(sent_frames) >= 1
+        dialog_texts = _collect_texts(dialog)
+        assert any("Cần trung bình ≥" in t for t in dialog_texts)
+        assert "Quản trị doanh nghiệp CNTT" in dialog_texts
+        assert "Chủ nghĩa xã hội khoa học" in dialog_texts
+
+        # 2. Even if dispatch_event arrives with data="3,8" before apply_patch, it still parses & updates!
+        sent_frames.clear()
+        await sess.dispatch_event(mounted_sem_tf._i, "change", "3,8")
+        assert len(sent_frames) >= 1
+        assert gv._gpa_target_card._target_text == "3,8"
+
+        # 3. CreditProgress arrives asynchronously while planner dialog is open -> updates mounted graduation card in-place!
+        gv.set_credit_progress(CreditProgress(required_credits=120.0, earned_credits=60.0))
+        assert mounted_grad_tf is gv._graduation_card._target_field
+        sess.apply_patch(mounted_grad_tf._i, {"value": "3.6"})
+        sent_frames.clear()
+        await sess.dispatch_event(mounted_grad_tf._i, "change", "3.6")
+        assert len(sent_frames) >= 1
+        grad_texts = _collect_texts(dialog)
+        assert any("Đã tích lũy 60/120 TC" in t for t in grad_texts)
+        assert any("Cần GPA ≥" in t for t in grad_texts)
+
+        sess.close()
+
+    asyncio.run(scenario())
+
 
 

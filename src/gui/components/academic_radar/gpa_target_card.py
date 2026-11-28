@@ -10,32 +10,57 @@ from gui.core.theme import C
 class GpaTargetCard(ft.Container):
     """Nhập GPA hệ 4 mong muốn của học kỳ -> hiển thị điểm cần đạt ở các môn chưa có điểm."""
 
-    def __init__(self, target_text: str = "", **kwargs) -> None:
+    def __init__(
+        self,
+        target_text: str = "",
+        *,
+        semester: SemesterGradeData | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
-        self._semester: SemesterGradeData | None = None
+        self._semester: SemesterGradeData | None = semester
         self._target_text = target_text
         self.bgcolor = C.SURFACE
         self.border_radius = 16
         self.border = ft.Border.all(1, C.BORDER)
         self.padding = ft.Padding.all(16)
-        self._build_ui()
+        self._init_controls()
 
     # ---------- public API ----------
     def set_semester(self, semester: SemesterGradeData | None) -> None:
         self._semester = semester
-        self._build_ui()
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._hint_text.value = self._format_hint()
+        self._result_col.controls = self._build_result_controls()
+        for ctrl in (self._hint_text, self._result_col, self):
+            try:
+                ctrl.update()
+                break
+            except Exception:
+                continue
 
     def rebuild(self) -> None:
-        """Dựng lại UI (dùng khi đổi theme)."""
+        """Cập nhật lại màu sắc và kết quả tại chỗ (dùng khi đổi theme)."""
         self.bgcolor = C.SURFACE
         self.border = ft.Border.all(1, C.BORDER)
-        self._build_ui()
+        self._title_icon.color = C.ACCENT
+        self._title_text.color = C.TEXT_PRIMARY
+        self._hint_text.color = C.TEXT_SECONDARY
+        self._hint_text.value = self._format_hint()
+        self._target_field.border_color = C.BORDER
+        self._target_field.focused_border_color = C.ACCENT
+        self._target_field.bgcolor = C.BG
+        self._target_field.color = C.TEXT_PRIMARY
+        self._target_field.cursor_color = C.ACCENT
+        self._target_field.label_style = ft.TextStyle(size=12, color=C.TEXT_SECONDARY)
+        self._result_col.controls = self._build_result_controls()
 
     # ---------- internals ----------
+    def _format_hint(self) -> str:
+        base = "Nhập GPA hệ 4 muốn đạt (VD: 3.5) để xem các môn chưa có điểm cần đạt bao nhiêu."
+        if self._semester is not None and self._semester.name:
+            return f"Kỳ đang tính: {self._semester.name} · {base}"
+        return base
+
     def _parse_target(self) -> float | None:
         raw = (self._target_text or "").strip().replace(",", ".")
         if not raw:
@@ -46,34 +71,47 @@ class GpaTargetCard(ft.Container):
             return -1.0  # đánh dấu không hợp lệ
 
     def _on_target_change(self, e: ft.ControlEvent) -> None:
-        self._target_text = e.control.value or ""
+        data_val = getattr(e, "data", None)
+        if isinstance(data_val, str):
+            raw_val = data_val
+        else:
+            ctrl = getattr(e, "control", None)
+            ctrl_val = getattr(ctrl, "value", None)
+            raw_val = str(ctrl_val) if ctrl_val is not None else ""
+        self._target_text = raw_val
+        if self._target_field.value != raw_val:
+            self._target_field.value = raw_val
         self._refresh_result()
 
     def _refresh_result(self) -> None:
         self._result_col.controls = self._build_result_controls()
-        try:
-            self._result_col.update()
-        except Exception:
-            pass
+        for ctrl in (self._result_col, self):
+            try:
+                ctrl.update()
+                return
+            except Exception:
+                continue
 
-    def _build_ui(self) -> None:
+    def _init_controls(self) -> None:
+        self._title_icon = ft.Icon(
+            ft.Icons.TRACK_CHANGES_ROUNDED, size=18, color=C.ACCENT
+        )
+        self._title_text = ft.Text(
+            "GPA mong muốn trong kỳ",
+            size=16,
+            weight=ft.FontWeight.W_700,
+            color=C.TEXT_PRIMARY,
+            expand=True,
+        )
         title = ft.Row(
-            controls=[
-                ft.Icon(ft.Icons.TRACK_CHANGES_ROUNDED, size=18, color=C.ACCENT),
-                ft.Text(
-                    "GPA mong muốn trong kỳ",
-                    size=16,
-                    weight=ft.FontWeight.W_700,
-                    color=C.TEXT_PRIMARY,
-                    expand=True,
-                ),
-            ],
+            controls=[self._title_icon, self._title_text],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        hint = ft.Text(
-            "Nhập GPA hệ 4 muốn đạt (VD: 4.0) để xem các môn chưa có điểm cần đạt bao nhiêu.",
-            size=12, color=C.TEXT_SECONDARY,
+        self._hint_text = ft.Text(
+            self._format_hint(),
+            size=12,
+            color=C.TEXT_SECONDARY,
         )
         self._target_field = ft.TextField(
             value=self._target_text,
@@ -96,7 +134,12 @@ class GpaTargetCard(ft.Container):
         )
         self._result_col = ft.Column(controls=self._build_result_controls(), spacing=8)
         self.content = ft.Column(
-            controls=[title, hint, ft.Row(controls=[self._target_field]), self._result_col],
+            controls=[
+                title,
+                self._hint_text,
+                ft.Row(controls=[self._target_field]),
+                self._result_col,
+            ],
             spacing=10,
         )
 
