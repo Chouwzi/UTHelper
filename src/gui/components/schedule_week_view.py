@@ -1891,7 +1891,7 @@ class ScheduleWeekView(ft.Container):
             bgcolor=(
                 ft.Colors.with_opacity(0.16, C.CRITICAL)
                 if session.cancelled
-                else ft.Colors.with_opacity(0.50, "#FCF4A3")
+                else ft.Colors.with_opacity(0.25, "#FCF4A3")
                 if is_makeup_session
                 else C.SURFACE
             ),
