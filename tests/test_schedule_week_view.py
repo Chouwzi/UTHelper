@@ -858,8 +858,8 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     assert card_long.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
 
     assert isinstance(card_long.content, ft.Stack)
-    card_body = card_long.content.controls[0]
-    watermark = card_long.content.controls[1]
+    watermark = card_long.content.controls[0]
+    card_body = card_long.content.controls[1]
     assert watermark.width == 120
     assert watermark.height == 24
     assert watermark.left is None
@@ -870,7 +870,7 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     watermark_text = watermark.content
     assert watermark_text.size == 16
     assert watermark_text.weight == ft.FontWeight.W_800
-    assert watermark_text.color == ft.Colors.with_opacity(0.68, C.CRITICAL)
+    assert watermark_text.color == ft.Colors.with_opacity(0.70, C.CRITICAL)
 
     assert card_body.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
     summary_col = card_body.controls[0]

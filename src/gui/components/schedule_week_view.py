@@ -1854,14 +1854,14 @@ class ScheduleWeekView(ft.Container):
             status_label, status_color = (
                 ("Tạm ngưng", C.CRITICAL)
                 if session.cancelled
-                else ("Học bù", C.WARNING)
+                else ("Học bù", "#FCE205")
             )
             status_watermark = ft.Container(
                 content=ft.Text(
                     status_label,
                     size=16,
                     weight=ft.FontWeight.W_800,
-                    color=ft.Colors.with_opacity(0.88, status_color),
+                    color=ft.Colors.with_opacity(0.70, status_color),
                     text_align=ft.TextAlign.CENTER,
                     no_wrap=True,
                 ),
@@ -1876,8 +1876,8 @@ class ScheduleWeekView(ft.Container):
             )
             card_content = ft.Stack(
                 controls=[
-                    card_content,
                     status_watermark,
+                    card_content,
                 ],
                 alignment=ft.Alignment.CENTER,
                 fit=ft.StackFit.EXPAND,
@@ -1891,7 +1891,7 @@ class ScheduleWeekView(ft.Container):
             bgcolor=(
                 ft.Colors.with_opacity(0.16, C.CRITICAL)
                 if session.cancelled
-                else ft.Colors.with_opacity(0.14, C.WARNING)
+                else "#FCF4A3"
                 if is_makeup_session
                 else C.SURFACE
             ),
