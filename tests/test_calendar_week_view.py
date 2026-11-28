@@ -248,6 +248,7 @@ def test_missing_dismiss_event_is_rearmed_by_bounded_recovery():
 
 def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
     view = CalendarView(_page_stub())
+    today = date.today()
     view._toggle_view_mode("month")
     view._year, view._month = 2026, 8
     view._seed_period_pages()
@@ -271,7 +272,7 @@ def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
             )
         )
     )
-    assert (view._year, view._month) == (2026, 8)
+    assert (view._year, view._month) == (today.year, today.month)
     assert view._period_dismissible is current_source
 
     event = SimpleNamespace(
@@ -283,7 +284,10 @@ def test_mode_roundtrip_discards_late_dismiss_without_reverting_month():
         asyncio.run(view._on_desktop_period_confirm(event))
     confirm_dismiss.assert_awaited_once_with(True)
     asyncio.run(view._on_desktop_period_dismiss(event))
-    assert (view._year, view._month) == (2026, 9)
+    expected_next_month = (
+        (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+    )
+    assert (view._year, view._month) == expected_next_month
 
 
 def test_current_swipe_heals_orphaned_pending_control():
@@ -1027,6 +1031,7 @@ def test_shift_bars_and_compact_room_badge_handle_cancelled_only_vs_mixed_shifts
 
     # Switch to week mode and inspect shift_bars (morning=active, afternoon=mixed->ACCENT, evening=cancelled-only->CRITICAL 0.45)
     cal._toggle_view_mode("week")
+    cal._on_absolute_date_click(monday)
     mon_week_cell = cal._period_pages[1].week_cells[0]
     wed_week_cell = cal._period_pages[1].week_cells[2]
     assert set(mon_week_cell.data.keys()) >= {
