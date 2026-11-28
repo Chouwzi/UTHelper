@@ -52,7 +52,7 @@ class ViewManager:
         self._pending_nav_source = nav_source
 
     def _emit_screen_telemetry(self, screen: str, default_source: str = "tab_bar") -> None:
-        source = self._pending_nav_source or default_source
+        source = getattr(self, "_pending_nav_source", None) or default_source
         self._pending_nav_source = None
         cb = getattr(self, "_on_screen_telemetry", None)
         if callable(cb):
@@ -424,6 +424,7 @@ class ViewManager:
             self.grade_overview_view.update_theme()
         if self.course_grades_view is None:
             self._sync_nav_buttons(active_nav)
+        self._emit_screen_telemetry(active_nav, "back")
         self.page.update()
 
     def show_courses_loading(self):

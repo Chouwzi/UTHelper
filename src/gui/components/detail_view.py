@@ -170,6 +170,8 @@ class DetailView(ft.Container):
         self._on_telemetry_submission = on_telemetry_submission
         self._on_telemetry_quiz_action = on_telemetry_quiz_action
         self._quiz_launch_target = None
+        self._quiz_player_state: str | None = None
+        self._quiz_blocked_telemetry_emitted: bool = False
         self._selected_files = []          
         self._is_uploading  = False
         self._submission_snapshot: SubmissionSnapshot | None = None
@@ -238,6 +240,8 @@ class DetailView(ft.Container):
         self._current_url = ""
         self._current_data = {}
         self._quiz_launch_target = None
+        self._quiz_player_state = None
+        self._quiz_blocked_telemetry_emitted = False
         self._last_server_status = ""
         for coll_attr in (
             "_selected_files",
@@ -1252,10 +1256,12 @@ class DetailView(ft.Container):
         sync_resp = getattr(self, "_sync_responsive_layout", None)
         if callable(sync_resp):
             sync_resp()
+        prev_url = getattr(self, "_current_url", "")
+        new_url = data.get("url", "")
         self._loading_bar.visible  = False
         self._error_banner.visible = False
         self._title_text.value     = data.get("title", "Không có tiêu đề")
-        self._current_url          = data.get("url", "")
+        self._current_url          = new_url
         self._current_data         = data
         browser_available = self._is_safe_browser_url(self._current_url)
         self._open_btn.visible = browser_available
@@ -1269,6 +1275,9 @@ class DetailView(ft.Container):
         self._quiz_auth_btn.visible = False
         self._quiz_runtime_notice.visible = False
         self._quiz_launch_target = None
+        self._quiz_player_state = None
+        if new_url != prev_url:
+            self._quiz_blocked_telemetry_emitted = False
         self._content_col.controls.clear()
 
         badge_text, badge_color = get_urgency_badge(data.get("urgency", "safe"))
@@ -1504,21 +1513,22 @@ class DetailView(ft.Container):
                 self._quiz_open_btn.tooltip = self._quiz_open_btn.content
                 self._quiz_open_btn.visible = True
             elif target is not None and player_state == "player_unavailable":
+                self._quiz_player_state = "player_unavailable"
                 self._quiz_runtime_notice.value = (
                     "Trình xem bài chưa sẵn sàng. "
                     "Hãy mở trong ứng dụng hoặc dùng nút mở bằng trình duyệt ngoài."
                 )
                 self._quiz_runtime_notice.visible = True
-                DetailView._emit_quiz_telemetry(self, "player_unavailable", data)
             elif target is not None and player_state == "unsupported_runtime":
-                DetailView._emit_quiz_telemetry(self, "player_unavailable", data)
+                self._quiz_player_state = "unsupported_runtime"
             elif player_state == "requires_safe_exam_browser":
+                self._quiz_player_state = "requires_safe_exam_browser"
                 self._quiz_runtime_notice.value = (
                     "Bài kiểm tra yêu cầu Safe Exam Browser. Hãy mở bằng trình duyệt."
                 )
                 self._quiz_runtime_notice.visible = True
-                DetailView._emit_quiz_telemetry(self, "player_blocked_seb", data)
             elif player_state == "missing_account":
+                self._quiz_player_state = "missing_account"
                 self._quiz_auth_btn.visible = True
 
         details = data.get("details")
@@ -1869,11 +1879,29 @@ class DetailView(ft.Container):
             ], spacing=6),
         )
 
+    def _emit_blocked_quiz_launch_telemetry_once(self) -> None:
+        current_data = getattr(self, "_current_data", None)
+        if not isinstance(current_data, Mapping):
+            return
+        if str(current_data.get("type", "")).casefold() != "quiz":
+            return
+        if getattr(self, "_quiz_blocked_telemetry_emitted", False):
+            return
+        state = getattr(self, "_quiz_player_state", None)
+        if state == "requires_safe_exam_browser":
+            self._quiz_blocked_telemetry_emitted = True
+            DetailView._emit_quiz_telemetry(self, "player_blocked_seb", current_data)
+        elif state in {"player_unavailable", "unsupported_runtime"}:
+            self._quiz_blocked_telemetry_emitted = True
+            DetailView._emit_quiz_telemetry(self, "player_unavailable", current_data)
+
     async def _open_in_app(self, e=None):
+        DetailView._emit_blocked_quiz_launch_telemetry_once(self)
         title = str(self._current_data.get("title", "") or "")
         self._open_url_in_app(self._current_url, title)
 
     async def _open_external(self, e=None):
+        DetailView._emit_blocked_quiz_launch_telemetry_once(self)
         validated = validate_https_url(self._current_url)
         if validated is None:
             return
@@ -1895,6 +1923,7 @@ class DetailView(ft.Container):
             return
         target = self._quiz_launch_target
         if target is None or self._quiz_player_view is None:
+            DetailView._emit_blocked_quiz_launch_telemetry_once(self)
             return
         account_id = ""
         if callable(self._get_quiz_account_id):
@@ -1918,6 +1947,13 @@ class DetailView(ft.Container):
         else:
             opened = self._quiz_player_view.open_activity(target, self._current_data)
         if not opened and not self._quiz_player_view.visible:
+            if not callable(
+                getattr(self._quiz_player_view, "_on_telemetry_quiz_action", None)
+            ):
+                DetailView._emit_quiz_telemetry(
+                    self, "player_unavailable", self._current_data
+                )
+            self._quiz_blocked_telemetry_emitted = True
             self._open_btn.visible = True
             self._quiz_open_btn.visible = False
             self._quiz_open_btn.disabled = False
@@ -1936,6 +1972,13 @@ class DetailView(ft.Container):
         activity_url = activity.get("url") if isinstance(activity, Mapping) else None
         if activity_url and activity_url != self._current_url:
             return
+        if reason in {
+            "requires_safe_exam_browser",
+            "quiz_unavailable",
+            "unsupported_action",
+            "entry_not_opened",
+        }:
+            self._quiz_blocked_telemetry_emitted = True
         if reason == "attempts_exhausted":
             updated = dict(self._current_data or {})
             details = updated.get("details")

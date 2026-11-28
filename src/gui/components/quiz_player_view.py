@@ -934,9 +934,10 @@ class QuizPlayerView(ft.Container):
                 ),
             )
             self._player_host.content = self._player
+            open_mono = getattr(self, "_telemetry_open_mono", None)
             prep_elapsed = (
-                max(0.0, time.monotonic() - self._telemetry_open_mono)
-                if self._telemetry_open_mono is not None
+                max(0.0, time.monotonic() - open_mono)
+                if open_mono is not None
                 else None
             )
             self._telemetry_started_mono = time.monotonic()

@@ -53,10 +53,12 @@ from core.use_cases.submission_workflow import SubmissionMutationResult
 from gui.app_controller import AppController
 from gui.components.calendar_view import CalendarView
 from gui.components.courses.activity_views import QuizActivityView
+from gui.components.courses.course_list_pane import CourseListPane
 from gui.components.courses.courses_tab_view import CoursesTabView
 from gui.components.detail_view import DetailView
 from gui.components.grade_overview_view import GradeOverviewView
 from gui.components.quiz_player_view import QuizPlayerView
+from gui.components.settings_view import SettingsView
 from gui.controllers.courses_coordinator import CoursesCoordinator
 from gui.controllers.telemetry_bridge import TelemetryBridge
 from gui.view_manager import ViewManager
@@ -541,24 +543,32 @@ def test_foreground_authenticated_flow_emits_all_12_allowlisted_events_without_p
     runtime.poll_timers()
 
     courses_tab = CoursesTabView.__new__(CoursesTabView)
+    courses_tab._svc = SimpleNamespace()
     courses_tab._state = SimpleNamespace(
         semester_filter="all",
         search_query="",
         courses=[SimpleNamespace(id=1), SimpleNamespace(id=2)],
         offline_notice="",
     )
-    courses_tab._list_pane = SimpleNamespace(_on_filter_change=None, _on_refresh=None)
 
     def _fake_courses_filter(sem: str, q: str) -> None:
         courses_tab._state.semester_filter = sem
         courses_tab._state.search_query = q
 
+    scheduled_catalog_refreshes: list[Any] = []
+
     async def _fake_refresh_catalog(_inc: bool = True) -> None:
         clock.advance(0.3)
 
     courses_tab._handle_filter_change = _fake_courses_filter
-    courses_tab.refresh = lambda: None
+    courses_tab.refresh = lambda: scheduled_catalog_refreshes.append(
+        courses_tab.refresh_catalog_async(True)
+    )
     courses_tab.refresh_catalog_async = _fake_refresh_catalog
+    courses_tab._list_pane = CourseListPane(
+        on_filter_change=courses_tab._handle_filter_change,
+        on_refresh_catalog=courses_tab.refresh,
+    )
     ctrl._telemetry.attach_courses_view(courses_tab)
     courses_tab._handle_filter_change("HK1 2026-2027", "Mạng máy tính")
     clock.advance(2.5)
@@ -604,8 +614,9 @@ def test_foreground_authenticated_flow_emits_all_12_allowlisted_events_without_p
         )
     )
 
-    courses_tab.refresh()
-    asyncio.run(courses_tab.refresh_catalog_async(True))
+    courses_tab._list_pane._refresh_btn.on_click(None)
+    assert len(scheduled_catalog_refreshes) == 1
+    asyncio.run(scheduled_catalog_refreshes.pop(0))
 
     ctrl._academic_grade_service = SimpleNamespace(
         load_academic_data=lambda **_kw: [
@@ -614,6 +625,7 @@ def test_foreground_authenticated_flow_emits_all_12_allowlisted_events_without_p
         get_radar_profiles=lambda _s: [SimpleNamespace()],
         load_credit_progress=lambda **_kw: None,
         last_maintenance_notice=None,
+        last_load_source="live",
     )
     asyncio.run(ctrl._show_grades(force_refresh=True))
 
@@ -858,6 +870,14 @@ def test_foreground_authenticated_flow_emits_all_12_allowlisted_events_without_p
         "courses_catalog",
         "academic_grades",
     }
+    courses_sync = [
+        ev
+        for ev in all_events
+        if ev["event"] == EventName.SYNC_COMPLETED.value
+        and ev["properties"]["provider"] == "courses_catalog"
+    ]
+    assert len(courses_sync) == 1
+    assert courses_sync[0]["properties"]["trigger"] == "manual"
 
 
 # ── (d) 30m Background Resume vs Expiry & Midnight Boundary Stamping ──
@@ -1368,5 +1388,831 @@ def test_cold_visible_boot_with_consent_disabled_sets_foreground_and_live_opt_in
     assert install_path.is_file()
     events = _drain_spooled_events(runtime)
     assert [e["event"] for e in events] == [EventName.SESSION_STARTED.value]
+
+
+# ── Remediation Audit Verdict #39 Regression Suite ──
+
+
+def test_verdict_h01_h02_bridge_never_mutates_tracker_consent_and_settings_save_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace as dc_replace
+    import gui.components.settings_view as settings_view_mod
+    from gui.view_models.settings_form import SettingsFormSnapshot
+
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+    install_path = tmp_path / "analytics" / "installation.json"
+    assert install_path.is_file()
+
+    # [VERDICT-H01] Part 1: TelemetryBridge._sync_tracker_consent must NEVER call
+    # tracker.set_consent(...) directly (even if consent_gate and tracker transiently differ).
+    orig_tracker_set_consent = runtime.tracker.set_consent
+    direct_tracker_calls: list[Any] = []
+
+    def _forbid_direct_tracker_set_consent(value: Any) -> Any:
+        direct_tracker_calls.append(value)
+        return orig_tracker_set_consent(value)
+
+    monkeypatch.setattr(
+        runtime.tracker, "set_consent", _forbid_direct_tracker_set_consent
+    )
+
+    # Simulate split-lock window where gate already flipped to DISABLED while tracker saw ENABLED
+    runtime.consent_gate._consent = AnalyticsConsent.DISABLED
+    assert ctrl._telemetry._sync_tracker_consent() is False
+    ctrl._telemetry.record_grades_interaction("semester_switched")
+    assert direct_tracker_calls == []
+
+    # Restore clean opt-out via runtime
+    runtime.consent_gate._consent = AnalyticsConsent.ENABLED
+    runtime.set_consent("disabled")
+    direct_tracker_calls.clear()
+    assert runtime.tracker.consent is AnalyticsConsent.DISABLED
+    assert not install_path.exists()
+
+    ctrl._telemetry.on_window_restored(screen="home")
+    ctrl._telemetry.record_interaction(screen="home")
+    assert direct_tracker_calls == []
+    assert runtime.tracker.consent is AnalyticsConsent.DISABLED
+    assert not install_path.exists()
+
+    # [VERDICT-H02] GUI Side:
+    # 1) Unchanged analytics_consent on SettingsView._save invokes apply_analytics_consent 0 times.
+    # 2) Changed analytics_consent already applied by subscribe_settings_saved does not double-call runtime.set_consent.
+    runtime.set_consent("enabled")
+    set_consent_calls: list[Any] = []
+    orig_rt_set_consent = runtime.set_consent
+
+    def _spy_rt_set_consent(val: Any) -> None:
+        set_consent_calls.append(val)
+        orig_rt_set_consent(val)
+
+    monkeypatch.setattr(runtime, "set_consent", _spy_rt_set_consent)
+
+    baseline = SettingsFormSnapshot.from_form_values(
+        {"analytics_consent": "enabled", "theme": "midnight_blue"}
+    )
+    fake_settings = SimpleNamespace(
+        **baseline.to_settings_values(),
+        UTH_CREDENTIALS_ORIGIN="",
+        MOODLE_WS_TOKEN="",
+        MOODLE_WS_TOKEN_ORIGIN="",
+    )
+    monkeypatch.setattr(settings_view_mod, "settings", fake_settings)
+    monkeypatch.setattr(settings_view_mod._pu, "IS_MOBILE", True)
+
+    sv = SettingsView(
+        ctrl.page,
+        SimpleNamespace(
+            client=SimpleNamespace(), get_cached_details_snapshot=lambda: {}
+        ),
+        lambda: None,
+        autostart_coordinator=None,
+        controller=ctrl,
+        on_analytics_consent_changed=ctrl.apply_analytics_consent,
+    )
+    sv.update = lambda: None
+    sv._apply_snapshot_to_controls(baseline)
+    sv._baseline_snapshot = baseline
+
+    # Save with ONLY theme changed (analytics_consent remains "enabled")
+    monkeypatch.setattr(settings_view_mod, "save_settings", lambda: True)
+    sv._selected_theme = "steel_light"
+    assert asyncio.run(sv._save(None)) is True
+    assert set_consent_calls == []
+
+    # Save with analytics_consent changed to "disabled" while save_settings listener already updates runtime
+    def _save_with_listener() -> bool:
+        runtime.set_consent(fake_settings.ANALYTICS_CONSENT)
+        return True
+
+    monkeypatch.setattr(settings_view_mod, "save_settings", _save_with_listener)
+    sv._dd_analytics_consent.value = "disabled"
+    assert sv._baseline_snapshot == dc_replace(baseline, theme="steel_light")
+    assert asyncio.run(sv._save(None)) is True
+    # Invoked once by save_settings listener; TelemetryBridge.apply_consent short-circuits duplicate!
+    assert len(set_consent_calls) == 1
+
+
+def test_verdict_h03_today_schedule_retry_consumes_flag_preserves_idle_expiry_and_maintenance(
+    tmp_path: Path,
+) -> None:
+    from core.maintenance import MaintenanceNotice, UthMaintenanceError
+    from core.today_schedule import TodayScheduleCache, TodayScheduleCoordinator
+
+    start = datetime(2026, 11, 28, 23, 30, 0, tzinfo=UTC)
+    clock = _DeterministicClock(start_utc=start)
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+
+    maint_user_initiated: list[bool] = []
+    fetch_behavior: dict[str, Any] = {"mode": "error"}
+
+    def _fetch_day(_day, _u, _p):
+        mode = fetch_behavior["mode"]
+        if mode == "error":
+            raise ConnectionError("portal offline")
+        if mode == "maintenance":
+            raise UthMaintenanceError(
+                MaintenanceNotice(
+                    source="portal",
+                    window_text="01h00 - 04h00",
+                    reopen_text="04h00",
+                )
+            )
+        return ()
+
+    coord = TodayScheduleCoordinator(
+        fetch_day=_fetch_day,
+        cache=TodayScheduleCache(cache_dir=tmp_path, namespace="ns"),
+        credentials_provider=lambda: ("2251120001", "secret-pass"),
+        state_sink=ctrl._on_today_schedule_state,
+        now_provider=lambda: clock.now_utc.replace(tzinfo=None),
+        on_maintenance=lambda _notice: maint_user_initiated.append(
+            ctrl._consume_manual_today_schedule_flag()
+        ),
+    )
+    ctrl._today_schedule_coordinator = coord
+    scheduled_tasks: list[Any] = []
+    ctrl._safe_run_task = lambda fn, *a, **kw: scheduled_tasks.append((fn, a, kw))
+
+    # 1. Initial startup schedule load fails -> status is ERROR
+    asyncio.run(coord.refresh("startup"))
+    assert coord.state.status is ScheduleLoadStatus.ERROR
+    scheduled_tasks.clear()
+
+    # 2. User manually retries -> hits maintenance -> BOTH telemetry ("manual") AND on_maintenance (user_initiated=True) work!
+    fetch_behavior["mode"] = "maintenance"
+    ctrl._request_today_schedule()
+    assert ctrl._manual_today_schedule_requested is True
+    fn, args, kwargs = scheduled_tasks.pop(0)
+    asyncio.run(fn(*args, **kwargs))
+    assert maint_user_initiated == [True]
+    assert ctrl._manual_today_schedule_requested is False
+    assert ctrl._manual_today_schedule_maintenance is False
+
+    # 3. User manually retries again -> succeeds (READY) at 23:35:00Z -> flag consumed!
+    clock.advance(5 * 60.0)  # 23:35:00Z
+    fetch_behavior["mode"] = "ok"
+    ctrl._request_today_schedule()
+    fn, args, kwargs = scheduled_tasks.pop(0)
+    asyncio.run(fn(*args, **kwargs))
+    assert ctrl._manual_today_schedule_requested is False
+
+    # 4. Unattended window sits idle across 30m timeout AND UTC midnight (35m -> 00:10:00Z next day),
+    #    then a scheduled background poll runs at 00:10:00Z.
+    last_human_utc = clock.now_utc  # 2026-11-28T23:35:00Z
+    clock.advance(35 * 60.0)  # 2026-11-29T00:10:00Z
+    runtime.poll_timers()
+    assert runtime.active_session_id is None
+
+    # Scheduled background poll while window is left open unattended after midnight:
+    # Must NOT be treated as manual human_interaction and must NOT wake a fake session!
+    asyncio.run(coord.refresh("scheduled"))
+    assert runtime.active_session_id is None
+
+    # Scheduled maintenance while unattended must report user_initiated=False
+    fetch_behavior["mode"] = "maintenance"
+    asyncio.run(coord.refresh("scheduled"))
+    assert maint_user_initiated == [True, False]
+
+    events = _drain_spooled_events(runtime)
+    sched_syncs = [
+        e
+        for e in events
+        if e["event"] == EventName.SYNC_COMPLETED.value
+        and e["properties"]["provider"] == "today_schedule"
+    ]
+    assert [s["properties"]["trigger"] for s in sched_syncs] == [
+        "startup_fg",
+        "manual",
+        "manual",
+    ]
+    ended = [e for e in events if e["event"] == EventName.SESSION_ENDED.value]
+    assert len(ended) == 1
+    assert ended[0]["properties"]["end_reason"] == "idle_timeout"
+    assert ended[0]["timestamp"] == last_human_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def test_verdict_m01_part4_debug_reset_clears_auth_and_blocks_post_reset_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import config
+    import flet as ft
+
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+
+    ctrl._telemetry.sync_account_state(
+        username=settings.UTH_USERNAME,
+        has_credentials=ctrl._has_sync_credentials(),
+        account_changed=False,
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+    install_path = tmp_path / "analytics" / "installation.json"
+    assert install_path.is_file()
+    assert runtime.tracker.authenticated_non_demo is True
+
+    # Execute SettingsView._do_reset_settings confirmation flow
+    tasks: list[Any] = []
+    reset_page = SimpleNamespace(
+        overlay=[],
+        update=lambda: None,
+        run_task=lambda fn, *a, **k: tasks.append((fn, a, k)),
+    )
+    settings_json = tmp_path / "settings.json"
+    settings_json.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(config, "_USER_DATA_DIR", tmp_path)
+
+    def _fake_clear_secrets() -> bool:
+        settings.UTH_PASSWORD = ""
+        settings.MOODLE_WS_TOKEN = ""
+        settings.MOODLE_WS_TOKEN_USERNAME = ""
+        return True
+
+    monkeypatch.setattr(config, "clear_persisted_secrets", _fake_clear_secrets)
+
+    reset_view = SimpleNamespace(
+        _page=reset_page,
+        _controller=ctrl,
+        _debug_info_text=ft.Text(),
+    )
+    SettingsView._do_reset_settings(reset_view)
+    coro_fn, args, kwargs = tasks[0]
+
+    async def _drive_reset() -> None:
+        t = asyncio.create_task(coro_fn(*args, **kwargs))
+        await asyncio.sleep(0.02)
+        dlg = reset_page.overlay[-1]
+        yes_btn = next(
+            b
+            for b in dlg.actions
+            if getattr(b, "content", None) == "Reset"
+            or getattr(b, "text", None) == "Reset"
+        )
+        yes_btn.on_click(None)
+        await t
+
+    asyncio.run(_drive_reset())
+
+    assert not install_path.exists()
+    assert runtime.spool.pending() == ()
+    assert runtime.tracker.authenticated_non_demo is False
+    assert runtime.active_session_id is None
+
+    # Subsequent UI restore and interactions after Debug Reset must emit 0 events and mint no UUID!
+    ctrl._telemetry.on_window_restored(screen="home")
+    ctrl._telemetry.record_grades_interaction("gpa_planner_opened")
+    assert not install_path.exists()
+    assert runtime.active_session_id is None
+    assert _drain_spooled_events(runtime) == []
+
+
+def test_verdict_m04_real_course_list_pane_refresh_early_abort_and_account_switch_reset(
+    tmp_path: Path,
+) -> None:
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="courses",
+    )
+
+    scheduled_coros: list[Any] = []
+    courses_page = _FakePage(visible=True)
+    courses_page.run_task = lambda fn, *a, **kw: scheduled_coros.append(fn(*a, **kw))
+
+    courses_tab = CoursesTabView(page=courses_page, catalog_service=None)
+    assert isinstance(courses_tab._list_pane, CourseListPane)
+    ctrl._telemetry.attach_courses_view(courses_tab)
+
+    # 1. Early abort when _svc is None -> 0 sync events
+    asyncio.run(courses_tab.refresh_catalog_async(True))
+    sync_events = [
+        e
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.SYNC_COMPLETED.value
+    ]
+    assert sync_events == []
+
+    # 2. Superseded mid-flight _catalog_request_seq -> Call 1 suppressed, Call 2 emits "startup_fg"
+    sample_courses = [
+        CourseSummary(
+            id=11,
+            source="courses",
+            fullname="Hệ điều hành",
+            shortname="OS101",
+            display_name="Hệ điều hành",
+        )
+    ]
+    call_counter = {"n": 0}
+
+    def _refresh_catalog_sync(_inc: bool = True):
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            import time as _t
+
+            _t.sleep(0.05)
+        return sample_courses
+
+    courses_tab._svc = SimpleNamespace(
+        refresh_catalog=_refresh_catalog_sync,
+        load_cached_catalog=lambda: (sample_courses, [], "2026-11-28T09:00:00Z"),
+        has_portal_current_term=False,
+        last_courses_error="",
+        last_thnn_error="",
+    )
+
+    _drain_spooled_events(runtime)
+    runtime.spool.clear()
+
+    async def _run_overlapping() -> None:
+        t1 = asyncio.create_task(courses_tab.refresh_catalog_async(True))
+        await asyncio.sleep(0.01)
+        t2 = asyncio.create_task(courses_tab.refresh_catalog_async(True))
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(_run_overlapping())
+    sync_events = [
+        e
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.SYNC_COMPLETED.value
+        and e["properties"]["provider"] == "courses_catalog"
+    ]
+    assert len(sync_events) == 1
+    assert sync_events[0]["properties"]["trigger"] == "startup_fg"
+    runtime.spool.clear()
+
+    # 3. Real CourseListPane._refresh_btn.on_click(None) emits trigger="manual" with human_interaction=True!
+    clock.advance(20 * 60.0)  # 20m since session start (< 30m)
+    courses_tab._list_pane._refresh_btn.on_click(None)
+    assert len(scheduled_coros) == 1
+    asyncio.run(scheduled_coros.pop(0))
+
+    # Because manual refresh recorded human_interaction=True at +20m, advancing another +20m
+    # (40m total, but only 20m since manual click) must NOT trigger 30m idle_timeout!
+    clock.advance(20 * 60.0)
+    runtime.poll_timers()
+    assert runtime.active_session_id is not None
+
+    manual_syncs = [
+        e
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.SYNC_COMPLETED.value
+        and e["properties"]["provider"] == "courses_catalog"
+    ]
+    assert [e["properties"]["trigger"] for e in manual_syncs] == ["manual"]
+    runtime.spool.clear()
+
+    # 4. Account switch resets both today_schedule and courses_catalog back to "startup_fg"
+    ctrl._on_today_schedule_state(TodayScheduleViewState(status=ScheduleLoadStatus.LOADING))
+    ctrl._on_today_schedule_state(
+        TodayScheduleViewState(
+            status=ScheduleLoadStatus.READY,
+            snapshot=TodayScheduleSnapshot(
+                schedule_date=clock.now_utc.date(),
+                fetched_at=clock.now_utc,
+                sessions=(),
+            ),
+        )
+    )
+    runtime.spool.clear()
+
+    courses_tab.reset_for_account_switch()
+    ctrl._telemetry.sync_account_state(
+        username="2251120099", has_credentials=True, account_changed=True
+    )
+    runtime.spool.clear()
+
+    asyncio.run(courses_tab.refresh_catalog_async(True))
+    ctrl._on_today_schedule_state(TodayScheduleViewState(status=ScheduleLoadStatus.LOADING))
+    ctrl._on_today_schedule_state(
+        TodayScheduleViewState(
+            status=ScheduleLoadStatus.READY,
+            snapshot=TodayScheduleSnapshot(
+                schedule_date=clock.now_utc.date(),
+                fetched_at=clock.now_utc,
+                sessions=(),
+            ),
+        )
+    )
+    switched_syncs = {
+        e["properties"]["provider"]: e["properties"]["trigger"]
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.SYNC_COMPLETED.value
+    }
+    assert switched_syncs == {
+        "courses_catalog": "startup_fg",
+        "today_schedule": "startup_fg",
+    }
+
+
+def test_verdict_m05_and_l04_back_nav_source_cleanup_close_course_grades_and_shortcut_nav(
+    tmp_path: Path,
+) -> None:
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+    runtime.spool.clear()
+
+    # 1. Intra-Settings sub-page Back does NOT leak "back" onto subsequent rail navigation
+    ctrl._nav_shell.rail_visible = True
+    ctrl.settings_view.visible = True
+    ctrl.settings_view._handle_back = lambda _e: asyncio.sleep(0)  # stays in Settings hub
+    asyncio.run(ctrl._navigate_back())
+    assert ctrl.view_manager._pending_nav_source is None
+
+    ctrl.settings_view.visible = False
+    asyncio.run(ctrl._perform_destination_navigation("calendar"))
+    clock.advance(2.0)
+    runtime.poll_timers()
+
+    # 2. GradeOverviewView modal handle_back() == True does NOT leak "back" onto tab_bar click
+    ctrl._nav_shell.rail_visible = False
+    ctrl.calendar_view.visible = False
+    ctrl.grade_overview_view.visible = True
+    ctrl.grade_overview_view.handle_back = lambda: True
+    assert asyncio.run(ctrl._navigate_back()) is True
+    assert ctrl.view_manager._pending_nav_source is None
+
+    asyncio.run(ctrl._perform_destination_navigation("courses"))
+    clock.advance(2.0)
+    runtime.poll_timers()
+
+    # 3. Home Escape no-op does NOT leak "back"
+    ctrl.view_manager.show_dashboard()
+    clock.advance(2.0)
+    runtime.poll_timers()
+    assert asyncio.run(ctrl._navigate_back()) is False
+    assert ctrl.view_manager._pending_nav_source is None
+
+    # 4. close_course_grades emits ("grades", "back")
+    ctrl.course_grades_view.visible = True
+    asyncio.run(ctrl.view_manager.close_course_grades())
+    clock.advance(2.0)
+    runtime.poll_timers()
+
+    # 5. Keyboard shortcut Ctrl+3 navigates to "calendar" with NavSource.SHORTCUT ("shortcut")
+    asyncio.run(
+        ctrl._on_keyboard_event(
+            SimpleNamespace(key="3", ctrl=True, meta=False, alt=False, shift=False)
+        )
+    )
+    clock.advance(2.0)
+    runtime.poll_timers()
+
+    screen_events = [
+        (e["properties"]["screen"], e["properties"]["nav_source"])
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.SCREEN_VIEWED.value
+    ]
+    assert screen_events == [
+        ("calendar", "rail"),
+        ("courses", "tab_bar"),
+        ("home", "tab_bar"),
+        ("grades", "back"),
+        ("calendar", "shortcut"),
+    ]
+
+
+def test_verdict_m06_academic_grades_sync_classification_and_triggers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+    from core.academic_radar import AcademicGradeService
+    from core.portal_client import PortalAuthenticationError
+
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+    _drain_spooled_events(runtime)
+    runtime.spool.clear()
+
+    portal_mock = MagicMock()
+    sample_raw = [
+        {
+            "id": 75,
+            "tenDot": "HK1 2026-2027",
+            "tongKetDot": {"diemTBHocLuc": 8.5},
+            "diems": [
+                {"maHocPhan": "IT01", "tenMonHoc": "Mạng", "soTinChi": 3, "diemTongKet": 8.5}
+            ],
+        }
+    ]
+    portal_mock.fetch_full_transcript.return_value = sample_raw
+    portal_mock.fetch_credit_progress.return_value = None
+
+    svc = AcademicGradeService(portal_client=portal_mock, cache_dir=tmp_path / "grades_cache")
+    ctrl._academic_grade_service = svc
+
+    def _grade_syncs() -> list[dict[str, Any]]:
+        out = [
+            e["properties"]
+            for e in _drain_spooled_events(runtime)
+            if e["event"] == EventName.SYNC_COMPLETED.value
+            and e["properties"]["provider"] == "academic_grades"
+        ]
+        runtime.spool.clear()
+        return out
+
+    # 1. First live fetch -> last_load_source == "live", trigger == "startup_fg", outcome == "succeeded"
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "live"
+    s1 = _grade_syncs()
+    assert len(s1) == 1
+    assert (
+        s1[0]["trigger"],
+        s1[0]["outcome"],
+        s1[0]["item_count_bucket"],
+    ) == (
+        "startup_fg",
+        "succeeded",
+        "1_10",
+    )
+
+    # 2. Same-day cache hit -> last_load_source == "daily_cache" -> 0 telemetry events!
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "daily_cache"
+    assert _grade_syncs() == []
+
+    # 3. Age cache date to yesterday + network offline -> "stale_cache" -> trigger="foreground_poll", outcome="offline_cached"
+    cache_file, _ = svc._cache_paths("2251120001")
+    cached_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    cached_payload["cached_date"] = "2026-01-01"
+    cache_file.write_text(json.dumps(cached_payload), encoding="utf-8")
+    portal_mock.fetch_full_transcript.side_effect = ConnectionError("offline")
+
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "stale_cache"
+    s3 = _grade_syncs()
+    assert len(s3) == 1
+    assert (s3[0]["trigger"], s3[0]["outcome"]) == ("foreground_poll", "offline_cached")
+
+    # 4. PortalAuthenticationError -> mapped to "auth_error" (and manual trigger when force_refresh=True)
+    portal_mock.fetch_full_transcript.side_effect = PortalAuthenticationError("expired")
+    asyncio.run(ctrl._show_grades(force_refresh=True))
+    assert svc.last_load_source == "empty"
+    s4 = _grade_syncs()
+    assert len(s4) == 1
+    assert (s4[0]["trigger"], s4[0]["outcome"]) == ("manual", "auth_error")
+
+    # 5. Portal RuntimeError + no cache + userid=None -> last_load_source == "failed" -> outcome == "failed"
+    cache_file.unlink(missing_ok=True)
+    portal_mock.fetch_full_transcript.side_effect = RuntimeError("portal 502")
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "failed"
+    s5 = _grade_syncs()
+    assert len(s5) == 1
+    assert (
+        s5[0]["trigger"],
+        s5[0]["outcome"],
+        s5[0]["item_count_bucket"],
+    ) == ("foreground_poll", "failed", "0")
+
+    # 6. Portal [] ("live_empty") + live Moodle fetch_all_grades (userid=42) -> outcome == "succeeded", item_count > 0
+    portal_mock.fetch_full_transcript.side_effect = None
+    portal_mock.fetch_full_transcript.return_value = []
+    ctrl.orchestrator._get_userid = lambda: 42
+    ctrl.orchestrator.moodle_service.fetch_all_grades = lambda _uid: (
+        [
+            {"courseid": 101, "coursename": "Hệ điều hành", "shortname": "OS101", "grade": "8.5"},
+            {"courseid": 102, "coursename": "Mạng máy tính", "shortname": "NET102", "grade": "9.0"},
+        ],
+        {},
+    )
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "live_empty"
+    s6 = _grade_syncs()
+    assert len(s6) == 1
+    assert (
+        s6[0]["trigger"],
+        s6[0]["outcome"],
+        s6[0]["item_count_bucket"],
+    ) == ("foreground_poll", "succeeded", "1_10")
+
+    # 7. Empty / logged-out load -> "empty" -> 0 telemetry events
+    monkeypatch.setattr(settings, "UTH_USERNAME", "")
+    monkeypatch.setattr(settings, "UTH_PASSWORD", "")
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "empty"
+    assert _grade_syncs() == []
+
+
+def test_verdict_m07_and_l03_detail_view_passive_quiz_no_telemetry_and_partial_doubles(
+    tmp_path: Path,
+) -> None:
+    clock = _DeterministicClock()
+    runtime = _make_runtime(tmp_path, clock)
+    ctrl = _build_lightweight_controller(runtime, clock, visible=True)
+    ctrl._telemetry.sync_account_state(
+        username="2251120001", has_credentials=True, account_changed=False
+    )
+    ctrl._telemetry.on_startup_visibility(
+        is_autostart=False,
+        force_visible=False,
+        window_hidden_or_minimized=False,
+        screen="home",
+    )
+    _drain_spooled_events(runtime)
+    runtime.spool.clear()
+
+    # [VERDICT-L03] 1. ViewManager.__new__ without _pending_nav_source must not raise AttributeError
+    bare_vm = ViewManager.__new__(ViewManager)
+    emitted_bare: list[tuple[str, str]] = []
+    bare_vm._on_screen_telemetry = lambda s, src: emitted_bare.append((s, src))
+    bare_vm._emit_screen_telemetry("home", "tab_bar")
+    assert emitted_bare == [("home", "tab_bar")]
+
+    # [VERDICT-L03] 2. QuizPlayerView instance without _telemetry_open_mono must not raise AttributeError
+    qp_actions: list[tuple[str, str, Any]] = []
+    bare_qp = QuizPlayerView(
+        ctrl.page,
+        player_factory=lambda **_kw: SimpleNamespace(),
+        on_telemetry_quiz_action=lambda a, s, d=None: qp_actions.append((a, s, d)),
+    )
+    del bare_qp._telemetry_open_mono
+    assert not hasattr(bare_qp, "_telemetry_open_mono")
+    bare_qp.visible = True
+    bare_qp._generation = 1
+    bare_qp._entry_mode = "start"
+    bare_qp._activity = {"url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=99"}
+    bare_qp._target = SimpleNamespace(
+        url="https://courses.ut.edu.vn/mod/quiz/view.php?id=99",
+        session_key="sk",
+        site_identity="courses",
+    )
+    bare_qp._lease = SimpleNamespace(release=lambda: None)
+    bare_qp._prepared_entry = SimpleNamespace(
+        secure_window=False,
+        enter=lambda **_kw: SimpleNamespace(
+            launch_url="https://courses.ut.edu.vn/mod/quiz/attempt.php?attempt=1",
+            secure_window=False,
+            to_native_cookies=lambda: [{"name": "MoodleSession", "value": "abc"}],
+        ),
+        close=lambda: None,
+    )
+    bare_qp._run_task = lambda *_a, **_kw: True
+    asyncio.run(
+        bare_qp._enter_prepared_entry(
+            1,
+            lambda **_kw: SimpleNamespace(),
+            password=None,
+            confirmed=True,
+        )
+    )
+    assert qp_actions == [("player_started", "courses", None)]
+
+    # [VERDICT-M07] Passive DetailView.update_detail / show_detail_error / update_theme emit 0 quiz telemetry!
+    quiz_state_box = {"state": "requires_safe_exam_browser", "target": object()}
+    fake_qp = SimpleNamespace(
+        visible=False,
+        prepare_activity=lambda _d, _acc: (
+            quiz_state_box["target"],
+            quiz_state_box["state"],
+        ),
+        open_activity_for_account=lambda *_a, **_kw: False,
+        _on_telemetry_quiz_action=ctrl._on_quiz_telemetry,
+    )
+    dv = DetailView(
+        ctrl.page,
+        on_close=lambda: None,
+        get_client=lambda: None,
+        quiz_player_view=fake_qp,
+        get_quiz_account_id=lambda: "2251120001",
+        on_open_url=lambda *_a: None,
+        on_open_external=lambda *_a: None,
+        on_telemetry_quiz_action=ctrl._on_quiz_telemetry,
+    )
+    seb_quiz = {
+        "title": "Quiz SEB",
+        "type": "quiz",
+        "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=888",
+        "course": "An toàn thông tin",
+    }
+    dv.update_detail(seb_quiz)
+    dv.show_error_banner()
+    dv.update_theme()
+
+    quiz_state_box["state"] = "player_unavailable"
+    unavail_quiz = {
+        "title": "Quiz Unavail",
+        "type": "quiz",
+        "url": "https://thnn.ut.edu.vn/mod/quiz/view.php?id=889",
+        "course": "Anh văn",
+    }
+    dv.update_detail(unavail_quiz)
+    dv.update_theme()
+
+    passive_quiz_events = [
+        e
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.QUIZ_ACTION.value
+    ]
+    assert passive_quiz_events == []
+
+    # Explicit user launch click on blocked/unavailable quiz emits once (and does not duplicate on repeat click)
+    asyncio.run(dv._open_in_app())
+    asyncio.run(dv._open_in_app())
+
+    quiz_state_box["state"] = "requires_safe_exam_browser"
+    dv.update_detail(seb_quiz)
+    asyncio.run(dv._open_external())
+    asyncio.run(dv._open_external())
+
+    # Deduplication against QuizPlayerView when open_activity_for_account fails synchronously:
+    # QuizPlayerView._show_mount_error emits once -> DetailView._open_quiz must NOT emit a second copy!
+    real_qp = QuizPlayerView(
+        ctrl.page,
+        player_factory=None,
+        on_telemetry_quiz_action=ctrl._on_quiz_telemetry,
+    )
+    real_qp._resolve_player_factory = lambda: None
+    dv2 = DetailView(
+        ctrl.page,
+        on_close=lambda: None,
+        get_client=lambda: None,
+        quiz_player_view=real_qp,
+        get_quiz_account_id=lambda: "2251120001",
+        on_telemetry_quiz_action=ctrl._on_quiz_telemetry,
+    )
+    dv2._current_data = {
+        "title": "Quiz Mount Fail",
+        "type": "quiz",
+        "url": "https://courses.ut.edu.vn/mod/quiz/view.php?id=890",
+    }
+    dv2._current_url = dv2._current_data["url"]
+    dv2._quiz_launch_target = SimpleNamespace(
+        url=dv2._current_url, session_key="sk2", site_identity="courses"
+    )
+    dv2._quiz_open_btn.visible = True
+    dv2._quiz_open_btn.disabled = False
+    asyncio.run(dv2._open_quiz())
+
+    active_quiz_events = [
+        (e["properties"]["action"], e["properties"]["source_site"])
+        for e in _drain_spooled_events(runtime)
+        if e["event"] == EventName.QUIZ_ACTION.value
+    ]
+    assert active_quiz_events == [
+        ("player_unavailable", "thnn"),
+        ("player_blocked_seb", "courses"),
+        ("player_unavailable", "courses"),
+    ]
+
 
 

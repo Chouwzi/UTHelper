@@ -528,6 +528,8 @@ class AppController:
         self._maintenance_dialog: ft.AlertDialog | None = None
         self._manual_sync_requested: bool = False
         self._manual_today_schedule_requested: bool = False
+        self._manual_today_schedule_maintenance: bool = False
+        self._grades_sync_seen_in_session: bool = False
         self._today_schedule_coordinator = TodayScheduleCoordinator(
             fetch_day=self._portal_client.fetch_day,
             cache=TodayScheduleCache(namespace=schedule_namespace),
@@ -678,6 +680,12 @@ class AppController:
         telemetry = getattr(self, "_telemetry", None)
         if telemetry is not None:
             telemetry.reset_state()
+            telemetry.sync_account_state(
+                username=settings.UTH_USERNAME,
+                has_credentials=self._has_sync_credentials(),
+                account_changed=False,
+                start_session=False,
+            )
 
     def _telemetry_current_screen(self) -> str:
         quiz_player = getattr(self, "quiz_player_view", None)
@@ -1342,6 +1350,9 @@ class AppController:
             self._course_grades_request_epoch = (
                 getattr(self, "_course_grades_request_epoch", 0) + 1
             )
+            self._grades_sync_seen_in_session = False
+            self._manual_today_schedule_requested = False
+            self._manual_today_schedule_maintenance = False
         else:
             self._account_epoch = getattr(self, "_account_epoch", 0)
         self._sync_generation = getattr(self, "_sync_generation", 0) + 1
@@ -2665,14 +2676,42 @@ class AppController:
         if key == "Escape":
             await self._navigate_back()
             return
+        ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
+        alt = bool(getattr(e, "alt", False))
+        shift = bool(getattr(e, "shift", False))
+        if ctrl and not alt and not shift and not app_wv_open:
+            shortcut_map = {
+                "1": "home",
+                "digit1": "home",
+                "2": "courses",
+                "digit2": "courses",
+                "3": "calendar",
+                "digit3": "calendar",
+                "4": "grades",
+                "digit4": "grades",
+                "5": "settings",
+                "digit5": "settings",
+            }
+            shortcut_dest = shortcut_map.get(key.strip().casefold())
+            if shortcut_dest is not None:
+                telemetry = getattr(self, "_telemetry", None)
+                if telemetry is not None:
+                    telemetry.record_interaction(
+                        screen=self._telemetry_current_screen()
+                    )
+                if shortcut_dest == self._current_section() and not detail_open:
+                    return
+                await self._navigate_destination(
+                    shortcut_dest, nav_source="shortcut"
+                )
+                return
         if (
             courses_view is not None
             and getattr(courses_view, "visible", False)
             and not detail_open
             and not app_wv_open
         ):
-            ctrl = bool(getattr(e, "ctrl", False) or getattr(e, "meta", False))
-            if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not getattr(e, "alt", False)):
+            if (ctrl and key in ("\\", "Backslash")) or (key == "F11" and not alt):
                 toggle_expand = getattr(courses_view, "toggle_pane3_expanded", None)
                 if callable(toggle_expand):
                     telemetry = getattr(self, "_telemetry", None)
@@ -2682,7 +2721,7 @@ class AppController:
                     return
             if (ctrl and key.lower() == "k") or (
                 not ctrl
-                and not getattr(e, "alt", False)
+                and not alt
                 and key in ("/", "Slash")
             ):
                 focus_search = getattr(courses_view, "focus_search", None)
@@ -2725,7 +2764,8 @@ class AppController:
     async def _navigate_back(self) -> bool:
         """Shared back-navigation logic. Returns True if a view was closed."""
         quiz_player_view = getattr(self, "quiz_player_view", None)
-        if quiz_player_view is not None and quiz_player_view.handle_back():
+        qp_handle_back = getattr(quiz_player_view, "handle_back", None)
+        if callable(qp_handle_back) and qp_handle_back():
             return True
         app_wv_host = getattr(self, "_app_webview_host", None)
         app_wv_pane = getattr(self, "_app_webview_pane", None)
@@ -2764,32 +2804,36 @@ class AppController:
         set_nav_src = getattr(vm, "set_next_nav_source", None)
         if callable(set_nav_src):
             set_nav_src("back")
-        course_grades_view = getattr(self, "course_grades_view", None)
-        if self.settings_view.visible:
-            await self.settings_view._handle_back(None)
-            handled = True
-        elif self.detail_view.visible:
-            await self._close_detail()
-            handled = True
-        elif course_grades_view is not None and course_grades_view.visible:
-            await self._close_course_grades()
-            handled = True
-        elif self.calendar_view.visible:
-            await self._close_calendar()
-            handled = True
-        elif self.grade_overview_view.visible:
-            grade_handle_back = getattr(self.grade_overview_view, "handle_back", None)
-            if callable(grade_handle_back) and grade_handle_back():
-                self._sweep_closed_modal_dialogs()
-                return True
-            await self._close_grades()
-            handled = True
-        elif courses_view is not None and getattr(courses_view, "visible", False):
-            await self._close_courses()
-            handled = True
-        self._sweep_closed_modal_dialogs()
-        self._sync_rail_active()
-        return handled
+        try:
+            course_grades_view = getattr(self, "course_grades_view", None)
+            if self.settings_view.visible:
+                await self.settings_view._handle_back(None)
+                handled = True
+            elif self.detail_view.visible:
+                await self._close_detail()
+                handled = True
+            elif course_grades_view is not None and course_grades_view.visible:
+                await self._close_course_grades()
+                handled = True
+            elif self.calendar_view.visible:
+                await self._close_calendar()
+                handled = True
+            elif self.grade_overview_view.visible:
+                grade_handle_back = getattr(self.grade_overview_view, "handle_back", None)
+                if callable(grade_handle_back) and grade_handle_back():
+                    self._sweep_closed_modal_dialogs()
+                    return True
+                await self._close_grades()
+                handled = True
+            elif courses_view is not None and getattr(courses_view, "visible", False):
+                await self._close_courses()
+                handled = True
+            self._sweep_closed_modal_dialogs()
+            self._sync_rail_active()
+            return handled
+        finally:
+            if callable(set_nav_src):
+                set_nav_src(None)
 
     def _init_ui(self):
         self._skeleton_visible = True
@@ -3009,8 +3053,11 @@ class AppController:
         )
 
     def _consume_manual_today_schedule_flag(self) -> bool:
-        flagged = bool(getattr(self, "_manual_today_schedule_requested", False))
-        self._manual_today_schedule_requested = False
+        flagged = bool(
+            getattr(self, "_manual_today_schedule_maintenance", False)
+            or getattr(self, "_manual_today_schedule_requested", False)
+        )
+        self._manual_today_schedule_maintenance = False
         return flagged
 
     def _on_maintenance_detail_click(self, _event=None) -> None:
@@ -3023,6 +3070,8 @@ class AppController:
         if today_coord is not None and getattr(
             getattr(today_coord, "state", None), "error_code", ""
         ) == "maintenance":
+            self._manual_today_schedule_requested = True
+            self._manual_today_schedule_maintenance = True
             self._safe_run_task(today_coord.refresh, "retry")
         self._safe_run_task(self._load_data_async, "manual")
 
@@ -4167,7 +4216,9 @@ class AppController:
             }
         self._show_detail(activity_data)
 
-    async def _navigate_destination(self, key: str) -> None:
+    async def _navigate_destination(
+        self, key: str, *, nav_source: str | None = None
+    ) -> None:
         player_view = getattr(self, "quiz_player_view", None)
         if player_view is not None and getattr(player_view, "visible", False):
             self._sync_rail_active()
@@ -4176,8 +4227,18 @@ class AppController:
             except Exception:
                 pass
             player_view.request_close(
-                after_close=lambda k=key: self._safe_run_task(
-                    self._navigate_destination, k
+                after_close=(
+                    (
+                        lambda k=key, ns=nav_source: self._safe_run_task(
+                            lambda: self._navigate_destination(k, nav_source=ns)
+                        )
+                    )
+                    if nav_source is not None
+                    else (
+                        lambda k=key: self._safe_run_task(
+                            self._navigate_destination, k
+                        )
+                    )
                 )
             )
             return
@@ -4202,22 +4263,42 @@ class AppController:
                 request_close = getattr(settings_view, "request_close", None)
                 if callable(request_close):
                     await request_close(
-                        on_closed=lambda target=key: self._safe_run_task(
-                            self._leave_settings_and_navigate, target
+                        on_closed=(
+                            (
+                                lambda target=key, ns=nav_source: self._safe_run_task(
+                                    lambda: self._leave_settings_and_navigate(
+                                        target, nav_source=ns
+                                    )
+                                )
+                            )
+                            if nav_source is not None
+                            else (
+                                lambda target=key: self._safe_run_task(
+                                    self._leave_settings_and_navigate, target
+                                )
+                            )
                         )
                     )
                 else:
                     await settings_view._handle_back(None)
                 return
-            await self._leave_settings_and_navigate(key)
+            if nav_source is not None:
+                await self._leave_settings_and_navigate(key, nav_source=nav_source)
+            else:
+                await self._leave_settings_and_navigate(key)
             return
-        await self._perform_destination_navigation(key)
+        if nav_source is not None:
+            await self._perform_destination_navigation(key, nav_source=nav_source)
+        else:
+            await self._perform_destination_navigation(key)
 
-    async def _perform_destination_navigation(self, key: str) -> None:
+    async def _perform_destination_navigation(
+        self, key: str, *, nav_source: str | None = None
+    ) -> None:
         vm = getattr(self, "view_manager", None)
         set_nav_src = getattr(vm, "set_next_nav_source", None)
-        if callable(set_nav_src) and getattr(vm, "_pending_nav_source", None) is None:
-            set_nav_src(self._nav_shell_telemetry_source())
+        if callable(set_nav_src):
+            set_nav_src(nav_source or self._nav_shell_telemetry_source())
         if key == "home":
             self.view_manager.show_dashboard()
             if hasattr(self, "_diag_screen"):
@@ -5153,6 +5234,7 @@ class AppController:
         coordinator = self._today_schedule_coordinator
         if coordinator.state.status is ScheduleLoadStatus.ERROR:
             self._manual_today_schedule_requested = True
+            self._manual_today_schedule_maintenance = True
             self._safe_run_task(coordinator.refresh, "retry")
         else:
             self._safe_run_task(coordinator.ensure_today)
@@ -5220,13 +5302,32 @@ class AppController:
 
     def _on_today_schedule_state(self, state: TodayScheduleViewState) -> None:
         self._today_schedule_state = state
+        manual_requested = bool(
+            getattr(self, "_manual_today_schedule_requested", False)
+        )
+        if state.status is ScheduleLoadStatus.LOADING:
+            self._manual_today_schedule_maintenance = manual_requested
+        else:
+            self._manual_today_schedule_requested = False
+            is_maint_error = (
+                state.status is ScheduleLoadStatus.ERROR
+                and (
+                    getattr(state, "maintenance_notice", None) is not None
+                    or str(getattr(state, "error_code", "") or "")
+                    .strip()
+                    .casefold()
+                    == "maintenance"
+                )
+            )
+            if not is_maint_error:
+                self._manual_today_schedule_maintenance = False
+            elif manual_requested:
+                self._manual_today_schedule_maintenance = True
         telemetry = getattr(self, "_telemetry", None)
         if telemetry is not None:
             telemetry.on_today_schedule_state(
                 state,
-                manual_requested=bool(
-                    getattr(self, "_manual_today_schedule_requested", False)
-                ),
+                manual_requested=manual_requested,
             )
         if state.status is ScheduleLoadStatus.READY and state.snapshot is not None:
             # Reconcile from the Portal snapshot already fetched for the dashboard.
@@ -6988,7 +7089,12 @@ class AppController:
         import time as _grades_time
 
         grades_mono_start = _grades_time.monotonic()
-        grades_trigger = "manual" if force_refresh else "startup_fg"
+        seen_grades_sync = bool(getattr(self, "_grades_sync_seen_in_session", False))
+        grades_trigger = (
+            "manual"
+            if force_refresh
+            else ("foreground_poll" if seen_grades_sync else "startup_fg")
+        )
         try:
             from core.academic_radar import AcademicGradeService
             service = getattr(self, "_academic_grade_service", None)
@@ -7007,6 +7113,9 @@ class AppController:
             )
             if not _is_current():
                 return
+            load_source = getattr(service, "last_load_source", None)
+            if load_source is None:
+                load_source = "live" if semesters else "empty"
             if semesters:
                 profiles = service.get_radar_profiles(semesters)
                 # Hiện bảng điểm ngay, không chờ API tiến độ tín chỉ
@@ -7029,22 +7138,26 @@ class AppController:
                     self._handle_uth_maintenance(
                         svc_maint, user_initiated=force_refresh
                     )
-                telemetry_grades = getattr(self, "_telemetry", None)
-                if telemetry_grades is not None:
-                    course_total = sum(
-                        len(getattr(s, "courses", ()) or ()) for s in semesters
-                    )
-                    telemetry_grades.record_sync_completed(
-                        provider="academic_grades",
-                        trigger=grades_trigger,
-                        outcome=(
-                            "maintenance"
-                            if isinstance(svc_maint, MaintenanceNotice)
-                            else "succeeded"
-                        ),
-                        duration_seconds=_grades_time.monotonic() - grades_mono_start,
-                        item_count=course_total,
-                    )
+                if load_source not in {"daily_cache", "demo", "empty"}:
+                    self._grades_sync_seen_in_session = True
+                    telemetry_grades = getattr(self, "_telemetry", None)
+                    if telemetry_grades is not None:
+                        course_total = sum(
+                            len(getattr(s, "courses", ()) or ()) for s in semesters
+                        )
+                        if isinstance(svc_maint, MaintenanceNotice):
+                            grades_outcome = "maintenance"
+                        elif load_source == "stale_cache":
+                            grades_outcome = "offline_cached"
+                        else:
+                            grades_outcome = "succeeded"
+                        telemetry_grades.record_sync_completed(
+                            provider="academic_grades",
+                            trigger=grades_trigger,
+                            outcome=grades_outcome,
+                            duration_seconds=_grades_time.monotonic() - grades_mono_start,
+                            item_count=course_total,
+                        )
             else:
                 # Fallback to Moodle grades if Portal returned no semesters
                 userid = await asyncio.to_thread(
@@ -7074,15 +7187,22 @@ class AppController:
                         fallback_count = len(courses_grades or ())
                 else:
                     self.view_manager.show_academic_radar_data([], [])
-                telemetry_grades = getattr(self, "_telemetry", None)
-                if telemetry_grades is not None:
-                    telemetry_grades.record_sync_completed(
-                        provider="academic_grades",
-                        trigger=grades_trigger,
-                        outcome="succeeded",
-                        duration_seconds=_grades_time.monotonic() - grades_mono_start,
-                        item_count=fallback_count,
-                    )
+                if load_source not in {"daily_cache", "demo", "empty"}:
+                    self._grades_sync_seen_in_session = True
+                    telemetry_grades = getattr(self, "_telemetry", None)
+                    if telemetry_grades is not None:
+                        fallback_outcome = (
+                            "succeeded"
+                            if userid or load_source == "live_empty"
+                            else "failed"
+                        )
+                        telemetry_grades.record_sync_completed(
+                            provider="academic_grades",
+                            trigger=grades_trigger,
+                            outcome=fallback_outcome,
+                            duration_seconds=_grades_time.monotonic() - grades_mono_start,
+                            item_count=fallback_count,
+                        )
         except UthMaintenanceError as maint_exc:
             if not _is_current():
                 return
@@ -7097,6 +7217,7 @@ class AppController:
             self._handle_uth_maintenance(
                 maint_exc.notice, user_initiated=force_refresh
             )
+            self._grades_sync_seen_in_session = True
             telemetry_grades = getattr(self, "_telemetry", None)
             if telemetry_grades is not None:
                 telemetry_grades.record_sync_completed(
@@ -7113,12 +7234,18 @@ class AppController:
             self.view_manager.show_grades_error(
                 "Không tải được bảng điểm từ Portal.\nKiểm tra kết nối/tài khoản rồi bấm thử lại."
             )
+            self._grades_sync_seen_in_session = True
             telemetry_grades = getattr(self, "_telemetry", None)
             if telemetry_grades is not None:
+                from core.portal_client import PortalAuthenticationError as _PortalAuthErr
+
+                grades_err_outcome = (
+                    "auth_error" if isinstance(e, _PortalAuthErr) else "failed"
+                )
                 telemetry_grades.record_sync_completed(
                     provider="academic_grades",
                     trigger=grades_trigger,
-                    outcome="failed",
+                    outcome=grades_err_outcome,
                     duration_seconds=_grades_time.monotonic() - grades_mono_start,
                     item_count=0,
                 )
@@ -7534,7 +7661,9 @@ class AppController:
             with data_lock:
                 self.all_data = data_copy
 
-    async def _leave_settings_and_navigate(self, target: str) -> None:
+    async def _leave_settings_and_navigate(
+        self, target: str, *, nav_source: str | None = None
+    ) -> None:
         """Exit Settings cleanly (after clean check, save, or discard) and open ``target``.
 
         Important Flet invariant: never set ``settings_view.visible = False`` or call
@@ -7543,6 +7672,11 @@ class AppController:
         ``ValueError('AnimatedSwitcher.content must be provided and visible')``.
         """
         if target == "home":
+            if nav_source is not None:
+                vm = getattr(self, "view_manager", None)
+                set_nav_src = getattr(vm, "set_next_nav_source", None)
+                if callable(set_nav_src):
+                    set_nav_src(nav_source)
             await self._close_settings()
             return
         reconcile = self._reconcile_settings_after_exit
@@ -7567,7 +7701,10 @@ class AppController:
         if getattr(self, "_needs_reload", False):
             self._needs_reload = False
             self._safe_run_task(self._load_data_async)
-        await self._perform_destination_navigation(target)
+        if nav_source is not None:
+            await self._perform_destination_navigation(target, nav_source=nav_source)
+        else:
+            await self._perform_destination_navigation(target)
         settings_view = getattr(self, "settings_view", None)
         tab_switcher = getattr(self, "tab_switcher", None)
         if settings_view is not None and (
