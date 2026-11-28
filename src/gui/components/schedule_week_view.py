@@ -1815,20 +1815,6 @@ class ScheduleWeekView(ft.Container):
                     color=C.ACCENT,
                 ),
             ]
-            if session.cancelled:
-                time_header_controls.append(
-                    ft.Container(
-                        content=ft.Text(
-                            "Tạm ngưng",
-                            size=9.5,
-                            weight=ft.FontWeight.W_600,
-                            color=C.CRITICAL,
-                        ),
-                        bgcolor=ft.Colors.with_opacity(0.12, C.CRITICAL),
-                        border_radius=999,
-                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
-                    )
-                )
             time_header = ft.Row(
                 time_header_controls,
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1853,21 +1839,59 @@ class ScheduleWeekView(ft.Container):
                 item, return_focus=details_button
             ),
         )
+        card_content: ft.Control = ft.Column(
+            [summary, details_button],
+            alignment=(
+                ft.MainAxisAlignment.START
+                if narrow
+                else ft.MainAxisAlignment.SPACE_BETWEEN
+            ),
+            spacing=4,
+        )
+        if session.cancelled:
+            suspended_watermark = ft.Container(
+                content=ft.Text(
+                    "Tạm ngưng",
+                    size=14,
+                    weight=ft.FontWeight.W_700,
+                    color=ft.Colors.with_opacity(0.28, C.CRITICAL),
+                    text_align=ft.TextAlign.CENTER,
+                    no_wrap=True,
+                ),
+                width=220,
+                height=30,
+                alignment=ft.Alignment.CENTER,
+                bgcolor="#FCE4E8",
+                border_radius=5,
+                rotate=ft.Rotate(
+                    angle=-0.32,
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ignore_interactions=True,
+            )
+            card_content = ft.Stack(
+                controls=[
+                    ft.Container(
+                        content=suspended_watermark,
+                        alignment=ft.Alignment.CENTER,
+                        expand=True,
+                        ignore_interactions=True,
+                    ),
+                    card_content,
+                ],
+                alignment=ft.Alignment.CENTER,
+                fit=ft.StackFit.EXPAND,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                expand=True,
+            )
         return ft.Container(
             height=None if narrow else 172,
-            content=ft.Column(
-                [summary, details_button],
-                alignment=(
-                    ft.MainAxisAlignment.START
-                    if narrow
-                    else ft.MainAxisAlignment.SPACE_BETWEEN
-                ),
-                spacing=4,
-            ),
+            content=card_content,
             padding=ft.Padding.all(8 if not narrow else 10),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),
             border_radius=8,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
 
     def _show_session_details(
