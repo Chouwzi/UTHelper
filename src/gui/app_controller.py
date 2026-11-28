@@ -82,6 +82,7 @@ from gui.components.course_grade_table import (
     match_portal_course_to_summary,
 )
 from gui.components.grade_overview_view import GradeOverviewView
+from core.learning_roadmap.plan_store import PlanStore
 from gui.components.learning_roadmap_view import LearningRoadmapView
 from gui.components.courses_view import CoursesView
 from gui.components.today_schedule_panel import TodaySchedulePanel
@@ -1683,6 +1684,7 @@ class AppController:
             on_close=lambda: self._safe_run_task(self._close_roadmap),
             on_refresh=lambda: self._safe_run_task(lambda: self._show_roadmap(force_refresh=True)),
             page=self.page,
+            plan_store=PlanStore(),
         )
 
         courses_namespace = (
@@ -4377,6 +4379,7 @@ class AppController:
         except Exception as e:
             logger.error("Learning roadmap load failed: %s", e, exc_info=True)
             result = RoadmapLoadResult(None, SOURCE_NONE, None, "Lỗi không xác định")
+        self.roadmap_view.set_plan_owner(settings.UTH_USERNAME or settings.MOODLE_USERNAME or "")
         self.view_manager.show_roadmap_result(result)
 
     async def _close_roadmap(self):

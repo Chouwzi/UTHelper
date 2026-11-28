@@ -133,6 +133,15 @@ class ViewTests(unittest.TestCase):
         self.view._on_search(types.SimpleNamespace(control=types.SimpleNamespace(value="triet")))
         self.assertIs(self.view._search_field, field)       # identity kept -> focus kept
 
+    def test_requirement_progress_renders_with_x_of_4(self):
+        from tests.test_learning_roadmap import _progress_bundle, GDQP_4
+        snap = build_snapshot(_progress_bundle(
+            passed_english=(1, 2), passed_gdqp=tuple(c for c, _, _ in GDQP_4[:3])))
+        self.view.show_result(RoadmapLoadResult(snap, SOURCE_NETWORK, datetime(2026, 11, 25, 9, 30)))
+        by_key = {r.key: r.progress_text for r in snap.requirements}
+        self.assertEqual((by_key["english"], by_key["defense"]), ("2/4", "3/4"))
+        self.assertIsNotNone(self.view._summary.content)   # rendered without error
+
     def test_offline_result_shows_warning_banner(self):
         self.view.show_result(RoadmapLoadResult(
             build_snapshot(bundle()), SOURCE_OFFLINE_CACHE, datetime(2026, 11, 20, 8, 0),

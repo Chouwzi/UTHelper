@@ -62,6 +62,22 @@ class GraduationRequirement:
     label: str
     status: RequirementStatus
     detail: str = ""
+    progress_done: int | None = None    # e.g. 3 of "3/4" (English levels, GDQP courses)
+    progress_total: int | None = None   # e.g. 4
+
+    @property
+    def has_progress(self) -> bool:
+        return self.progress_done is not None and bool(self.progress_total)
+
+    @property
+    def progress_text(self) -> str:
+        return f"{self.progress_done}/{self.progress_total}" if self.has_progress else ""
+
+    @property
+    def progress_ratio(self) -> float:
+        if not self.has_progress:
+            return 0.0
+        return max(0.0, min(1.0, self.progress_done / self.progress_total))
 
 
 @dataclass(frozen=True)
@@ -86,6 +102,10 @@ class RoadmapSnapshot:
     portal_message: str = ""
     endpoint_errors: dict[str, str] = field(default_factory=dict)
     generated_at: datetime | None = None
+    anchor_term: str | None = None       # "2025-1": latest Portal semester (planner key)
+    anchor_name: str = ""                # its raw Portal name, for display
+    entry_year: int | None = None        # start year of the student's first semester
+    history: tuple[RoadmapSemester, ...] = ()   # finished terms, newest first
 
     def all_courses(self) -> list[RoadmapCourse]:
         return [c for s in self.semesters for c in s.courses]

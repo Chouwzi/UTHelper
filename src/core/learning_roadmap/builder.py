@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
 from core.academic_radar.eligibility_resolver import (
     KNOWN_CONDITIONAL_CODES,
@@ -25,6 +25,7 @@ from core.academic_radar.eligibility_resolver import (
 from core.academic_radar.models import CourseGradeItem, SemesterGradeData
 from core.academic_radar.normalizer import SemesterNormalizer
 from core.learning_roadmap import parsers as P
+from core.learning_roadmap.planner import Term, parse_term, term_range
 from core.learning_roadmap.models import (
     CourseStatus,
     CreditProgress,
@@ -125,16 +126,21 @@ class _ReqSpec:
     flag_tokens: tuple[str, ...]        # tokens in folded Portal-info keys
     code_pattern: str | None            # regex over upper-case raw code
     name_patterns: tuple[str, ...]      # regex over folded course name
+    unit_label: str = ""                # "cấp" / "môn": enables an "x/N" progress count
 
 
 REQUIREMENT_SPECS: tuple[_ReqSpec, ...] = (
     _ReqSpec(
         "english", "Chuẩn đầu ra tiếng Anh",
-        (r"tieng anh", r"\bielts\b", r"\btoeic\b", r"\btoefl\b", r"\bvstep\b", r"\baptis\b",
-         r"\bcambridge\b", r"\benglish\b", r"ngoai ngu", r"\b(a2|b1|b2|c1)\b"),
+        # Only real external English certificates exempt the General English
+        # courses; generic words ("Tiếng Anh", "English") also match program
+        # certificates and would wrongly fill the 4/4 bar.
+        (r"\bielts\b", r"\btoeic\b", r"\btoefl\b", r"\bvstep\b", r"\baptis\b",
+         r"\bcambridge\b", r"\b(a2|b1|b2|c1)\b"),
         ("ngoaingu", "tienganh", "anhvan", "english"),
         r"^TT0\d$",
         (r"general english", r"\bchuan dau ra tieng anh\b"),
+        unit_label="cấp",
     ),
     _ReqSpec(
         "it", "Chuẩn tin học",
@@ -147,8 +153,9 @@ REQUIREMENT_SPECS: tuple[_ReqSpec, ...] = (
         "defense", "Giáo dục quốc phòng - an ninh",
         (r"quoc phong", r"\bgdqp\b"),
         ("quocphong", "gdqp"),
-        r"^GDQP",
+        r"^GDQP|^012000720[1-4]$",
         (r"quoc phong",),
+        unit_label="môn",
     ),
     _ReqSpec(
         "pe", "Giáo dục thể chất",
@@ -158,6 +165,104 @@ REQUIREMENT_SPECS: tuple[_ReqSpec, ...] = (
         (r"giao duc the chat",),
     ),
 )
+
+
+# ---- fixed-size requirements shown as "x/N" ---------------------------------
+ENGLISH_LEVELS = 4                                   # General English 1..4
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4}
+# over the folded name: "general english 3", "general english level 3", "... iii"
+_ENGLISH_NAME = re.compile(
+    r"\b(?:general english|tieng anh tong quat|anh van tong quat)(?: level| cap do| lop)? ?(\d+|iv|iii|ii|i)\b"
+)
+# over the upper-case code; also finds it inside class codes like 251_TT03_01
+_ENGLISH_CODE = re.compile(r"(?<![A-Z0-9])TT0(\d)(?![0-9])")
+
+# The 4 Giáo dục quốc phòng - an ninh courses: (unit id, code, folded-name regex)
+DEFENSE_UNITS: tuple[tuple[str, str, str], ...] = (
+    ("1", "0120007201", r"^duong loi quoc phong va an ninh"),
+    ("2", "0120007202", r"^cong tac quoc phong va an ninh"),
+    ("3", "0120007203", r"^quan su chung$"),
+    ("4", "0120007204", r"^ky thuat chien dau bo binh va chien thuat"),
+)
+
+
+def _english_level(course: RoadmapCourse) -> str | None:
+    m = _ENGLISH_NAME.search(P.fold(course.name))
+    raw = m.group(1) if m else None
+    if raw is None:
+        mc = _ENGLISH_CODE.search(course.code.strip().upper())
+        raw = mc.group(1) if mc else None
+    if raw is None:
+        return None
+    n = _ROMAN.get(raw) or int(raw)
+    return str(n) if 1 <= n <= ENGLISH_LEVELS else None
+
+
+def _defense_unit(course: RoadmapCourse) -> str | None:
+    code = course.code.strip().upper()
+    folded = P.fold(course.name)
+    for unit, ucode, name_re in DEFENSE_UNITS:
+        if ucode in code or re.search(name_re, folded):
+            return unit
+    return None
+
+
+_UNIT_MATCHERS = {
+    "english": (_english_level, ENGLISH_LEVELS),
+    "defense": (_defense_unit, len(DEFENSE_UNITS)),
+}
+_STATUS_RANK = {
+    CourseStatus.COMPLETED: 3, CourseStatus.IN_PROGRESS: 2,
+    CourseStatus.FAILED: 1, CourseStatus.NOT_TAKEN: 0,
+}
+
+
+@dataclass(frozen=True)
+class _UnitProgress:
+    done: int          # shown as "done/total"
+    running: int
+    total: int
+    seen: int          # how many distinct units appear in the data at all
+    met: bool          # requirement fully satisfied
+    detail: str
+
+
+def _unit_progress(spec: _ReqSpec, courses: Iterable[RoadmapCourse]) -> _UnitProgress | None:
+    """Progress out of a fixed total, so a missing course counts as not done.
+
+    * defense: number of the 4 courses completed.
+    * english: General English levels run in sequence, so being in (or past)
+      level N means levels 1..N-1 are behind you -> progress = highest level
+      reached (completed or in progress); met only when level 4 is completed.
+    """
+    matcher = _UNIT_MATCHERS.get(spec.key)
+    if matcher is None:
+        return None
+    fn, total = matcher
+    best: dict[str, CourseStatus] = {}
+    for c in courses:
+        unit = fn(c)
+        if unit is None:
+            continue
+        if unit not in best or _STATUS_RANK[c.status] > _STATUS_RANK[best[unit]]:
+            best[unit] = c.status
+    completed = {int(u) for u, st in best.items() if st is CourseStatus.COMPLETED}
+    running = {int(u) for u, st in best.items() if st is CourseStatus.IN_PROGRESS}
+    if spec.key == "english":
+        reached = max(completed | running, default=0)
+        met = total in completed
+        if met:
+            detail = f"Đã hoàn thành General English {total}"
+        elif running:
+            detail = f"Đang học General English {max(running)} · cần hoàn thành cấp {total}"
+        elif completed:
+            detail = f"Đã hoàn thành đến General English {max(completed)} · cần cấp {total}"
+        else:
+            detail = f"Chưa học General English · cần hoàn thành cấp {total}"
+        return _UnitProgress(reached, len(running), total, len(best), met, detail)
+    done = len(completed)
+    detail = f"Hoàn thành {done}/{total} {spec.unit_label}"
+    return _UnitProgress(done, len(running), total, len(best), done == total, detail)
 
 
 def _matches_spec(spec: _ReqSpec, course: RoadmapCourse) -> bool:
@@ -171,18 +276,36 @@ def evaluate_requirements(
     courses: list[RoadmapCourse],
     certificates: list[P.Certificate],
     graduation_info: Any,
+    evidence: Iterable[RoadmapCourse] = (),
 ) -> tuple[GraduationRequirement, ...]:
-    """Precedence: Portal's explicit flag > certificate > course evidence > unknown."""
+    """Precedence: Portal's explicit flag > certificate > course evidence > unknown.
+
+    English (General English 1-4) and GDQP (4 courses) also carry an ``x/N``
+    progress count taken from the courses themselves. ``evidence`` is raw
+    transcript / exemption / registration rows, so the count does not depend on
+    how well a row matched the curriculum framework."""
     out: list[GraduationRequirement] = []
     valid_certs = [c for c in certificates if c.valid]
     for spec in REQUIREMENT_SPECS:
+        units = _unit_progress(spec, [*courses, *evidence])
+        total = units.total if units else None
+
+        def make(status, detail, done=None):
+            if units is None:
+                return GraduationRequirement(spec.key, spec.label, status, detail)
+            return GraduationRequirement(
+                spec.key, spec.label, status, detail,
+                progress_done=units.done if done is None else done,
+                progress_total=units.total,
+            )
+
         # 1. Portal is the authority when it states a verdict.
         flag = P.find_flag(graduation_info, spec.flag_tokens) if graduation_info else None
         if flag is not None:
-            out.append(GraduationRequirement(
-                spec.key, spec.label,
+            out.append(make(
                 RequirementStatus.MET if flag else RequirementStatus.NOT_MET,
                 "Theo Portal: " + ("đạt" if flag else "chưa đạt"),
+                done=total if flag else None,
             ))
             continue
         # 2. A matching certificate.
@@ -192,11 +315,18 @@ def evaluate_requirements(
             None,
         )
         if cert is not None:
-            out.append(GraduationRequirement(
-                spec.key, spec.label, RequirementStatus.MET, f"Chứng chỉ: {cert.label}"
-            ))
+            out.append(make(RequirementStatus.MET, f"Chứng chỉ: {cert.label}", done=total))
             continue
         # 3. Evidence from the courses themselves.
+        if units is not None and units.seen:
+            if units.met:
+                status = RequirementStatus.MET
+            elif units.running:
+                status = RequirementStatus.IN_PROGRESS
+            else:
+                status = RequirementStatus.NOT_MET
+            out.append(make(status, units.detail))
+            continue
         related = [c for c in courses if _matches_spec(spec, c)]
         if not related:
             out.append(GraduationRequirement(
@@ -206,15 +336,15 @@ def evaluate_requirements(
             continue
         done = sum(1 for c in related if c.status is CourseStatus.COMPLETED)
         running = sum(1 for c in related if c.status is CourseStatus.IN_PROGRESS)
-        total = len(related)
-        if done == total:
+        count = len(related)
+        if done == count:
             status = RequirementStatus.MET
         elif running:
             status = RequirementStatus.IN_PROGRESS
         else:
             status = RequirementStatus.NOT_MET
         out.append(GraduationRequirement(
-            spec.key, spec.label, status, f"Hoàn thành {done}/{total} học phần"
+            spec.key, spec.label, status, f"Hoàn thành {done}/{count} học phần"
         ))
     return tuple(out)
 
@@ -271,6 +401,83 @@ def _make_course(
     )
 
 
+_OUTCOME_STATUS = {
+    "pass": CourseStatus.COMPLETED,
+    "fail": CourseStatus.FAILED,
+    "pending": CourseStatus.IN_PROGRESS,
+}
+
+
+def _build_history(
+    transcript: list[SemesterGradeData],
+    ranks: list[int],
+    current_rank: int | None,
+    anchor: Any = None,
+    has_running: bool = False,
+) -> tuple[RoadmapSemester, ...]:
+    """Every finished term, newest first, plus empty main terms in between
+    (a gap in the transcript is shown, not silently skipped). The term that is
+    in progress is left out; it is shown as the current term."""
+    out: list[RoadmapSemester] = []
+    seen_terms: set = set()
+    for sem, rank in sorted(zip(transcript, ranks), key=lambda p: -p[1]):
+        if has_running and current_rank is not None and rank == current_rank:
+            continue
+        courses = tuple(
+            _make_course(
+                it.course_code, it.course_name, it.credits,
+                _Resolved(_OUTCOME_STATUS[attempt_outcome(it)], _grade_text(it)),
+                None, True,
+            )
+            for it in sem.courses
+        )
+        term = parse_term(sem.name)
+        if term is not None:
+            seen_terms.add(term)
+        if courses:
+            out.append(RoadmapSemester(f"past-{sem.id}", sem.name, rank, courses))
+
+    # Fill main terms (HK1/HK2) with no record between the first term and now.
+    if seen_terms:
+        first = min(seen_terms)
+        last = max(seen_terms)
+        if anchor is not None and has_running:
+            # everything strictly before the running term
+            prev = [t for t in term_range(first, anchor) if t < anchor]
+            end_terms = prev
+        else:
+            end_terms = term_range(first, last)
+        have = {parse_term(h.label) for h in out}
+        for t in end_terms:
+            if t.is_summer or t in have:
+                continue
+            out.append(RoadmapSemester(f"past-gap-{t.key}", t.label, -t.ordinal, ()))
+    out.sort(key=lambda h: (parse_term(h.label) or Term(0, 1)).ordinal, reverse=True)
+    return tuple(out)
+
+
+def _requirement_evidence(
+    transcript: list[SemesterGradeData], exemptions: Any, registered: Any,
+) -> list[RoadmapCourse]:
+    """Raw rows (transcript, exemptions, current registrations) as lightweight
+    courses, used only to count English levels / GDQP courses."""
+    out: list[RoadmapCourse] = []
+
+    def add(code: str, name: str, credits: float, status: CourseStatus) -> None:
+        out.append(RoadmapCourse(code=code or "", name=name or "", credits=credits, status=status))
+
+    for sem in transcript:
+        for it in sem.courses:
+            status = _OUTCOME_STATUS[attempt_outcome(it)]
+            for code in {it.course_code, it.subject_code}:
+                add(code, it.course_name, it.credits, status)
+    for ref in P.parse_course_refs(exemptions):
+        add(ref.code, ref.name, ref.credits, CourseStatus.COMPLETED)
+    for ref in P.parse_course_refs(registered):
+        add(ref.code, ref.name, ref.credits, CourseStatus.IN_PROGRESS)
+    return out
+
+
 def build_snapshot(bundle: dict[str, Any], *, now: datetime | None = None) -> RoadmapSnapshot:
     bodies: dict[str, Any] = bundle.get("bodies") or {}
     framework = P.parse_curriculum(bodies.get("curriculum"))
@@ -278,7 +485,14 @@ def build_snapshot(bundle: dict[str, Any], *, now: datetime | None = None) -> Ro
 
     transcript = SemesterNormalizer().normalize_transcript(bundle.get("transcript") or [])
     ranks = [_semester_rank(s, i, len(transcript)) for i, s in enumerate(transcript)]
-    latest_rank = max(ranks) if ranks else None
+    # The in-progress term is Portal's *current* semester. Only when that is
+    # unknown do we fall back to the newest term in the transcript.
+    current_pre = bundle.get("current_semester") or {}
+    cur_id = P.to_int_prefix(current_pre.get("id")) if current_pre.get("id") is not None else 0
+    if cur_id:
+        latest_rank = cur_id if cur_id in ranks else None
+    else:
+        latest_rank = max(ranks) if ranks else None
 
     # ---- attempts, keyed by framework index (or by identity for extras)
     attempts: dict[int, list[_Attempt]] = {}
@@ -367,10 +581,26 @@ def build_snapshot(bundle: dict[str, Any], *, now: datetime | None = None) -> Ro
         bodies.get("graduation_certificates")
     )
     grad_info = bodies.get("graduation_info")
-    requirements = evaluate_requirements(all_courses, certs, grad_info)
+    evidence = _requirement_evidence(
+        transcript, bodies.get("exemptions"), current.get("courses")
+    )
+    requirements = evaluate_requirements(all_courses, certs, grad_info, evidence)
 
     verdict = P.find_flag(grad_info, ("dudieukien", "dattotnghiep", "detotnghiep")) if grad_info else None
     message = P.find_message(grad_info, ("lydo", "ghichu", "thongbao")) if grad_info else ""
+
+    # ---- calendar anchor + history (feeds the graduation planner)
+    anchor_name = str(current.get("name") or "")
+    anchor = parse_term(anchor_name)
+    if anchor is None and ranks:
+        latest_sem = transcript[ranks.index(max(ranks))]
+        anchor_name = latest_sem.name
+        anchor = parse_term(latest_sem.name)
+    years = [t.year for t in (parse_term(s.name) for s in transcript) if t is not None]
+    if anchor is not None:
+        years.append(anchor.year)
+    has_running = any(c.status is CourseStatus.IN_PROGRESS for c in all_courses)
+    history = _build_history(transcript, ranks, latest_rank, anchor, has_running)
 
     return RoadmapSnapshot(
         semesters=tuple(semesters),
@@ -381,4 +611,8 @@ def build_snapshot(bundle: dict[str, Any], *, now: datetime | None = None) -> Ro
         portal_message=message,
         endpoint_errors=dict(bundle.get("errors") or {}),
         generated_at=now or datetime.now(),
+        anchor_term=anchor.key if anchor else None,
+        anchor_name=anchor_name,
+        entry_year=min(years) if years else None,
+        history=history,
     )
