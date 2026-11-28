@@ -386,7 +386,7 @@ class Settings(BaseModel):
         default="steel_light",
         description="Theme preset, including Material Graphite and light variants",
     )
-    SETTINGS_SCHEMA_VERSION: int = Field(default=5, description="Phiên bản schema cài đặt")
+    SETTINGS_SCHEMA_VERSION: int = Field(default=6, description="Phiên bản schema cài đặt")
     CHECK_INTERVAL_MINUTES: int = Field(default=60, description="Tần suất đồng bộ hoạt động (phút)")
     COURSES_SYNC_INTERVAL_HOURS: int = Field(default=6, description="Chu kỳ làm tươi nền danh mục môn học (giờ)")
     # Deprecated compatibility fields. Runtime scheduling uses only
@@ -420,6 +420,10 @@ class Settings(BaseModel):
     CRASH_REPORTING_CONSENT: Literal["not_asked", "enabled", "disabled"] = Field(
         default="enabled",
         description="Gửi chẩn đoán sự cố ẩn danh; người dùng có thể tắt",
+    )
+    ANALYTICS_CONSENT: Literal["not_asked", "enabled", "disabled"] = Field(
+        default="enabled",
+        description="Phân tích sử dụng ẩn danh; người dùng có thể tắt",
     )
 
     # Mấy kênh thông báo khác (đang phát triển)
@@ -504,6 +508,12 @@ def migrate_settings_data(raw: dict) -> dict:
     )
     if data.get("CRASH_REPORTING_CONSENT") in {None, "not_asked"}:
         data["CRASH_REPORTING_CONSENT"] = "enabled"
+    if data.get("ANALYTICS_CONSENT") is None:
+        data["ANALYTICS_CONSENT"] = (
+            "disabled"
+            if source.get("CRASH_REPORTING_CONSENT") == "disabled"
+            else "enabled"
+        )
     data.setdefault("AUTO_UPDATE_ENABLED", True)
     if "CHECK_INTERVAL_MINUTES" not in data:
         legacy_value = data.get("POLL_INTERVAL_MINUTES")
@@ -562,7 +572,7 @@ def migrate_settings_data(raw: dict) -> dict:
         ):
             for k in present_color_keys:
                 data[k] = light_defaults[k]
-    data["SETTINGS_SCHEMA_VERSION"] = 5
+    data["SETTINGS_SCHEMA_VERSION"] = 6
     return data
 
 

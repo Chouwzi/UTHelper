@@ -22,10 +22,14 @@ def test_activation_and_crash_reporting_defaults_round_trip_through_json():
     settings = Settings()
     assert settings.AUTO_UPDATE_ENABLED is True
     assert settings.CRASH_REPORTING_CONSENT == "enabled"
+    assert settings.ANALYTICS_CONSENT == "enabled"
+    assert settings.SETTINGS_SCHEMA_VERSION == 6
 
     restored = Settings.model_validate_json(settings.model_dump_json())
     assert restored.AUTO_UPDATE_ENABLED is True
     assert restored.CRASH_REPORTING_CONSENT == "enabled"
+    assert restored.ANALYTICS_CONSENT == "enabled"
+    assert restored.SETTINGS_SCHEMA_VERSION == 6
 
 
 @pytest.mark.parametrize("consent", ["not_asked", "enabled", "disabled"])
@@ -33,6 +37,7 @@ def test_crash_reporting_consent_accepts_supported_values(consent):
     from config import Settings
 
     assert Settings(CRASH_REPORTING_CONSENT=consent).CRASH_REPORTING_CONSENT == consent
+    assert Settings(ANALYTICS_CONSENT=consent).ANALYTICS_CONSENT == consent
 
 
 def test_crash_reporting_consent_rejects_unsupported_values():
@@ -40,6 +45,8 @@ def test_crash_reporting_consent_rejects_unsupported_values():
 
     with pytest.raises(Exception):
         Settings(CRASH_REPORTING_CONSENT="maybe")
+    with pytest.raises(Exception):
+        Settings(ANALYTICS_CONSENT="maybe")
 
 
 class TestLoadSettings:

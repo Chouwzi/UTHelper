@@ -100,6 +100,11 @@ class TestSettingsDefaults:
     def test_crash_diagnostics_default_to_enabled(self):
         assert Settings().CRASH_REPORTING_CONSENT == "enabled"
 
+    def test_analytics_consent_defaults_to_enabled_and_schema_v6(self):
+        s = Settings()
+        assert s.ANALYTICS_CONSENT == "enabled"
+        assert s.SETTINGS_SCHEMA_VERSION == 6
+
 
 class TestSettingsSecretExclusion:
     """Secret fields are excluded from JSON dumps."""
@@ -166,7 +171,7 @@ class TestSettingsSerialization:
     def test_legacy_poll_interval_migrates_when_check_missing(self):
         migrated = migrate_settings_data({"POLL_INTERVAL_MINUTES": 360})
         assert migrated["CHECK_INTERVAL_MINUTES"] == 360
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 6
 
     def test_legacy_notification_milestones_migrate_to_minutes(self):
         migrated = migrate_settings_data({
@@ -187,7 +192,7 @@ class TestSettingsSerialization:
         migrated = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 2})
 
         assert migrated["AUTO_UPDATE_ENABLED"] is True
-        assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
+        assert migrated["SETTINGS_SCHEMA_VERSION"] == 6
         assert Settings(**migrated).AUTO_UPDATE_ENABLED is True
         assert (
             Settings.model_fields["AUTO_UPDATE_ENABLED"].description
@@ -306,7 +311,31 @@ def test_class_schedule_reminder_settings_have_safe_defaults_and_migrate():
 
     assert migrated["NOTIFY_CLASS_SCHEDULE_ENABLED"] is False
     assert migrated["NOTIFY_CLASS_SCHEDULE_LEAD_HOURS"] == [1]
-    assert migrated["SETTINGS_SCHEMA_VERSION"] == 5
+    assert migrated["SETTINGS_SCHEMA_VERSION"] == 6
     settings = Settings(**migrated)
     assert settings.NOTIFY_CLASS_SCHEDULE_ENABLED is False
     assert settings.NOTIFY_CLASS_SCHEDULE_LEAD_HOURS == [1]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_analytics"),
+    [
+        ({}, "enabled"),
+        ({"SETTINGS_SCHEMA_VERSION": 5}, "enabled"),
+        ({"CRASH_REPORTING_CONSENT": "enabled"}, "enabled"),
+        ({"CRASH_REPORTING_CONSENT": "not_asked"}, "enabled"),
+        ({"CRASH_REPORTING_CONSENT": "disabled"}, "disabled"),
+        ({"CRASH_REPORTING_CONSENT": "disabled", "ANALYTICS_CONSENT": None}, "disabled"),
+        ({"CRASH_REPORTING_CONSENT": "enabled", "ANALYTICS_CONSENT": None}, "enabled"),
+        ({"CRASH_REPORTING_CONSENT": "disabled", "ANALYTICS_CONSENT": "enabled"}, "enabled"),
+        ({"CRASH_REPORTING_CONSENT": "enabled", "ANALYTICS_CONSENT": "disabled"}, "disabled"),
+        ({"ANALYTICS_CONSENT": "not_asked"}, "not_asked"),
+    ],
+)
+def test_analytics_consent_migration_inherits_disabled_crash_consent_and_preserves_explicit(
+    raw, expected_analytics
+):
+    migrated = migrate_settings_data(raw)
+    assert migrated["SETTINGS_SCHEMA_VERSION"] == 6
+    assert migrated["ANALYTICS_CONSENT"] == expected_analytics
+    assert Settings(**migrated).ANALYTICS_CONSENT == expected_analytics

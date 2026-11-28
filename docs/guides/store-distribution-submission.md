@@ -105,10 +105,22 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
   the Play **Upload Key** (never reuse the GitHub LTS sideload keystore as an
   untracked secret).
 - **Privacy Policy URL**: host `docs/PRIVACY.md` at a stable HTTPS URL and link
-  it in Play Console Store Settings and inside the app.
+  it in Play Console Store Settings and inside the app (exposed both on the
+  initial sign-in dialog via *Điều khoản & Quyền riêng tư* and under **Settings
+  → Privacy**).
+- **PostHog Project Privacy Prerequisite**: before embedding
+  `POSTHOG_PROJECT_API_KEY` (`phc_...` public project key only; never `phx_` or
+  `phs_` secret keys) and `POSTHOG_HOST` (`https://us.i.posthog.com`,
+  `https://eu.i.posthog.com`, or an HTTPS reverse proxy — never web UI hosts
+  `app.posthog.com`/`us.posthog.com`/`eu.posthog.com`), enable **Discard client
+  IP data = ON** under **PostHog Project Settings → Privacy**.
 - **Data Safety form**: use the flow inventory below; it is not a completed
-  Play Console declaration. Provide local data and credential deletion
-  instructions matching [docs/PRIVACY.md](../PRIVACY.md).
+  Play Console declaration. Provide local data, credential, and analytics
+  `distinct_id` deletion instructions matching [docs/PRIVACY.md](../PRIVACY.md)
+  (no developer-hosted account exists; `distinct_id` is never linked to MSSV and
+  is wiped immediately via **Settings → Privacy → Phân tích sử dụng ẩn danh →
+  Tắt**, **Settings → Account → Đăng xuất**, or app uninstall with
+  `android:allowBackup="false"`).
 - **Personal Developer Account Closed Testing Gate**:
   - Personal Play Console accounts created on or after Nov 13, 2023 must run a
     **Closed Testing** track with at least **12 opted-in testers for 14
@@ -159,6 +171,7 @@ to the release being submitted.
 | Moodle/Portal sign-in and authenticated requests: account ID, credentials, session or service token | Configured UTH Moodle/Portal endpoints (`courses.ut.edu.vn`, `thnn.ut.edu.vn`, `portal.ut.edu.vn`, `portal-publicapp.ut.edu.vn`) over HTTPS when the user signs in or requests authenticated data | App functionality and account management | Required for authenticated features; signing in is a user choice | Map the account ID and credential/session fields to the current form taxonomy. Assess collection and sharing from the actual endpoint and its role; a separate UTHelper backend is not required for an off-device transfer to be in scope. |
 | Assignment or quiz submission: answers and user-selected attachments | Configured UTH Moodle/Portal endpoint over HTTPS when the user submits | App functionality and course work | Optional, user-triggered; fields or attachments may be required by the selected task | Review `Files and docs`, `Other user-generated content`, and associated user IDs as applicable. Assess the user-initiated sharing exception separately from collection. |
 | Sanitized crash and performance diagnostics | Sentry only when diagnostics delivery is enabled; the app currently enables diagnostics by default and lets users disable them in Settings → Privacy | Troubleshooting and reliability | Required (opt-out); enabled by default on launch, and users can disable delivery and purge queued reports at any time in Settings → Privacy | Review `Crash logs` and `Diagnostics`, any qualifying identifiers/device context, the actual SDK behavior, encryption, Sentry's processing role, and configured retention/deletion. |
+| Anonymous usage analytics (`App interactions` + random installation `UUIDv4` `distinct_id` in `analytics/installation.json`) | PostHog (`POST <posthog_host>/batch/` over HTTPS with `$process_person_profile: false`, `$ip: null`, `$geoip_disable: true`, and PostHog **Discard client IP data = ON**), active only after authenticated non-demo sign-in when `ANALYTICS_CONSENT == "enabled"` (`0` events on pre-login dialog or `uthelper_demo`) | Analytics (product usage, session duration, DAU/WAU/MAU, and sync health; never advertising or cross-app tracking) | Optional; users can disable **Phân tích sử dụng ẩn danh** at any time in **Settings → Privacy** (immediately halting delivery and deleting `analytics/pending/*` and `analytics/installation.json`), or wipe via Sign out / uninstall (`android:allowBackup="false"`) | Declare `App activity → App interactions` (**Collected: Yes**, **Shared: No**, **Ephemeral: No**, **Optional: Yes**, **Purpose: Analytics**) and `Device or other IDs` (**Collected: Yes**, **Shared: No**, **Ephemeral: No**, **Optional: Yes**, **Purpose: Analytics**) encrypted in transit over HTTPS. |
 | User-configured notification integrations | Gmail, Discord, or Telegram endpoint chosen in Settings, when the configured alert is sent | Delivering reminders the user requested | Optional; requires user configuration | Inventory the exact fields and recipient for each integration, then classify them and assess collection/sharing and transport independently. |
 
 Grades and course documents fetched from UTH are displayed or cached on device;
@@ -191,7 +204,7 @@ backend. The owner remains responsible for the final Console answers.
      $env:CL = "$($env:CL.Trim()) $clFlag"
    }
    python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-   python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --output src/assets/diagnostics-config.json
+   python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --posthog-key "$env:POSTHOG_PROJECT_API_KEY" --posthog-host "$env:POSTHOG_HOST" --output src/assets/diagnostics-config.json
    flet build windows --build-version <version> --build-number <build_number> --template build/support/flet-build-template-0.86.5-diagnostics.zip --yes --verbose
    python scripts/prepare_windows_bundle.py build/windows
    python scripts/verify_windows_bundle.py build/windows --expected-version <version>
@@ -258,6 +271,25 @@ backend. The owner remains responsible for the final Console answers.
   - `msstore` runtime suppresses `UpdateCoordinator` and `GitHubReleaseClient`
     entirely; Settings links to `ms-windows-store://pdp/?ProductId=<ID>`
     (fallback `https://apps.microsoft.com/detail/<ID>`).
+- **Policy 10.5.1 & 10.5.2 (Privacy Policy URL, Consent & Non-Personal Telemetry)**:
+  - **10.5.1 (Privacy Policy URL)**: Partner Center **Properties → Privacy
+    policy URL** MUST point to the hosted HTTPS [docs/PRIVACY.md](../PRIVACY.md)
+    (mandatory for all `runFullTrust` packages and network/telemetry traffic),
+    matching the in-app *Điều khoản & Quyền riêng tư* dialog accessible directly
+    on the initial sign-in screen (`login_dialog.py`) and under **Settings →
+    Privacy**.
+  - **10.5.2 (Personal Information & Telemetry Consent)**: UTHelper collects
+    zero personal information in telemetry—Sentry crash reports carry random
+    per-event IDs, and PostHog usage analytics runs strictly in personless mode
+    (`$process_person_profile: false`, `$ip: null`, `$geoip_disable: true`,
+    PostHog Project Settings **Discard client IP data = ON**, coarse enums only,
+    zero MSSV/credentials/courses/grades/hardware serials). Analytics remains
+    `INACTIVE` (`0` events and `0` `installation.json` writes) prior to login
+    and during `uthelper_demo` certification runs, surfaces pre-login terms
+    notice on the sign-in dialog, inherits `"disabled"` on upgrade if crash
+    diagnostics were disabled, and provides independent opt-out in **Settings →
+    Privacy** that immediately purges `analytics\pending` and
+    `analytics\installation.json` within MSIX-virtualized `%APPDATA%\UTHelper`.
 - **AppData virtualization**:
   - UTHelper writes all mutable configuration, caches, and logs exclusively to
     `%APPDATA%\UTHelper` (never inside the read-only MSIX installation folder).
