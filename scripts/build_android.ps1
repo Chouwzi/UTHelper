@@ -238,7 +238,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before initial Android build."
     }
-    & $pythonExe (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --build-environment $BuildEnvironment --package-format $Target --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
+    & $pythonExe (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --posthog-key "$env:POSTHOG_PROJECT_API_KEY" --posthog-host "$env:POSTHOG_HOST" --build-environment $BuildEnvironment --package-format $Target --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics and distribution channel config generation failed before initial Android build."
     }
@@ -263,7 +263,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime version generation failed before final Android build."
     }
-    & $pythonExe (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --build-environment $BuildEnvironment --package-format $Target --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
+    & $pythonExe (Join-Path $projectRoot "scripts\generate_public_runtime_config.py") --sentry-dsn "$env:SENTRY_DSN" --posthog-key "$env:POSTHOG_PROJECT_API_KEY" --posthog-host "$env:POSTHOG_HOST" --build-environment $BuildEnvironment --package-format $Target --output (Join-Path $projectRoot "src\assets\diagnostics-config.json") --distribution-channel $Channel --distribution-output $channelAssetPath --android-package-id "io.github.chouwzi.uthelper"
     if ($LASTEXITCODE -ne 0) {
         throw "Diagnostics and distribution channel config generation failed before final Android build."
     }

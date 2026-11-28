@@ -12,9 +12,21 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 from typing import Sequence
 import xml.etree.ElementTree as ET
 import zipfile
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_SOURCE_ROOT = str(_REPOSITORY_ROOT / "src")
+if _SOURCE_ROOT not in sys.path:
+    sys.path.insert(0, _SOURCE_ROOT)
+
+from diagnostics.release_config import (  # noqa: E402
+    PUBLIC_CONFIG_FILENAME,
+    PublicConfigError,
+    validate_public_config_bytes,
+)
 
 try:
     from scripts.release_metadata import ReleaseMetadataError, release_build_number
@@ -504,6 +516,84 @@ def _read_embedded_distribution_channel(archive: zipfile.ZipFile) -> dict[str, o
                 f"Failed to inspect nested app bundle {nested_name}"
             ) from exc
     return None
+
+
+def _verify_embedded_diagnostics_config(
+    archive: zipfile.ZipFile,
+    *,
+    require: bool = False,
+) -> bool:
+    """Validate every embedded ``diagnostics-config.json`` fail-closed (direct or nested app.zip)."""
+    verified_count = 0
+    direct_candidates = [
+        name
+        for name in archive.namelist()
+        if name == PUBLIC_CONFIG_FILENAME or name.endswith(f"/{PUBLIC_CONFIG_FILENAME}")
+    ]
+    for member in sorted(direct_candidates):
+        info = archive.getinfo(member)
+        if info.file_size <= 0 or info.file_size > 4096:
+            raise AndroidVerificationError(
+                f"Embedded {PUBLIC_CONFIG_FILENAME} ({member}) has invalid size ({info.file_size} bytes)"
+            )
+        try:
+            validate_public_config_bytes(archive.read(member), development=False)
+        except PublicConfigError as exc:
+            raise AndroidVerificationError(
+                f"Embedded {PUBLIC_CONFIG_FILENAME} ({member}) is invalid: {exc}"
+            ) from exc
+        verified_count += 1
+
+    nested_zips = [
+        name
+        for name in archive.namelist()
+        if name == "assets/app.zip"
+        or name.endswith("/assets/app.zip")
+        or name.endswith("/app/app.zip")
+        or name.endswith("flutter_assets/app/app.zip")
+    ]
+    for nested_name in sorted(nested_zips):
+        outer_info = archive.getinfo(nested_name)
+        if outer_info.file_size > 256 * 1024 * 1024:
+            raise AndroidVerificationError(
+                f"Nested app bundle exceeds size limit: {nested_name}"
+            )
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive.read(nested_name))) as nested:
+                inner_candidates = [
+                    item
+                    for item in nested.namelist()
+                    if item == PUBLIC_CONFIG_FILENAME
+                    or item.endswith(f"/{PUBLIC_CONFIG_FILENAME}")
+                ]
+                for inner in sorted(inner_candidates):
+                    inner_info = nested.getinfo(inner)
+                    if inner_info.file_size <= 0 or inner_info.file_size > 4096:
+                        raise AndroidVerificationError(
+                            f"Embedded {PUBLIC_CONFIG_FILENAME} inside {nested_name}:{inner} "
+                            f"has invalid size ({inner_info.file_size} bytes)"
+                        )
+                    try:
+                        validate_public_config_bytes(
+                            nested.read(inner),
+                            development=False,
+                        )
+                    except PublicConfigError as exc:
+                        raise AndroidVerificationError(
+                            f"Embedded {PUBLIC_CONFIG_FILENAME} inside {nested_name}:{inner} "
+                            f"is invalid: {exc}"
+                        ) from exc
+                    verified_count += 1
+        except zipfile.BadZipFile as exc:
+            raise AndroidVerificationError(
+                f"Failed to inspect nested app bundle {nested_name}"
+            ) from exc
+
+    if require and verified_count == 0:
+        raise AndroidVerificationError(
+            f"Android artifact is missing embedded {PUBLIC_CONFIG_FILENAME}"
+        )
+    return verified_count > 0
 
 
 def _verify_office_viewer_assets_in_app_zip(
@@ -1063,6 +1153,7 @@ def verify_android_release(
     allow_unsigned: bool = False,
     require_office_viewer: bool = False,
     require_quiz_webview: bool = False,
+    require_diagnostics_config: bool = False,
 ) -> dict[str, object]:
     if (apk is None) == (aab is None):
         raise AndroidVerificationError("Provide exactly one of apk or aab")
@@ -1226,6 +1317,10 @@ def verify_android_release(
                     expected_package_id=package_id,
                     native_libs=native_libs,
                 )
+            _verify_embedded_diagnostics_config(
+                archive,
+                require=require_diagnostics_config,
+            )
             office_viewer_verified = _verify_office_viewer_assets_in_app_zip(
                 archive,
                 require=require_office_viewer,
@@ -1359,6 +1454,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Require flutter_inappwebview DEX classes plus flet_uth_quiz and flet_webview packages",
     )
+    parser.add_argument(
+        "--require-diagnostics-config",
+        action="store_true",
+        help="Require a valid diagnostics-config.json inside the APK/AAB",
+    )
     return parser
 
 
@@ -1379,6 +1479,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allow_unsigned=args.allow_unsigned,
         require_office_viewer=args.require_office_viewer,
         require_quiz_webview=args.require_quiz_webview,
+        require_diagnostics_config=args.require_diagnostics_config,
     )
     return 0
 
