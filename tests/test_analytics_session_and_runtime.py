@@ -568,3 +568,320 @@ def test_create_default_analytics_runtime_dev_env_and_schema_v3_assets(
     )
     assert rt_preloaded.config.configured is False
     rt_preloaded.close()
+
+
+def test_h01_epoch_pinned_enqueue_drops_stale_pre_opt_out_events_and_prevents_id_mixing(
+    tmp_path: Path,
+):
+    clk = _ManualClock(datetime(2026, 11, 28, 15, 0, 0, tzinfo=UTC))
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt.on_foreground("cold_foreground", "home")
+    id_a = rt.identity_store.peek_cached()
+    assert id_a is not None
+    rt.flush_ram_to_spool(fsync=False)
+
+    # Simulate Thread A building an event under epoch_before, then opt-out + opt-in
+    # occurring BEFORE Thread A calls _enqueue_ram_events!
+    _consent_before, epoch_before = rt.consent_gate.snapshot()
+    stale_events = rt.tracker.capture_event(
+        EventName.GRADES_INTERACTION,
+        {"action": "gpa_planner_opened"},
+        human_interaction=True,
+    )
+    assert len(stale_events) == 1
+    assert stale_events[0].distinct_id == id_a
+
+    # Concurrent opt-out purges UUID_A, then re-opt-in mints UUID_B
+    rt.set_consent("disabled")
+    assert rt.current_consent is AnalyticsConsent.DISABLED
+    assert rt.tracker.consent is AnalyticsConsent.DISABLED
+    rt.set_consent("enabled")
+    id_b = rt.identity_store.peek_cached()
+    assert id_b is not None and id_b != id_a
+
+    # Delayed Thread A tries to enqueue stale UUID_A event from epoch_before -> MUST drop!
+    rt._enqueue_ram_events(stale_events, expected_epoch=epoch_before)
+    rt.flush_ram_to_spool(fsync=False)
+
+    pending = rt.spool.pending()
+    assert len(pending) >= 1
+    for queued in pending:
+        distinct_ids = {ev.distinct_id for ev in queued.batch.events}
+        assert distinct_ids == {id_b}
+    rt.close()
+
+
+def test_h02_noop_set_consent_enabled_and_settings_saved_never_self_wipe_spool_or_id(
+    tmp_path: Path,
+):
+    clk = _ManualClock(datetime(2026, 11, 28, 15, 30, 0, tzinfo=UTC))
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        initial_consent="enabled",
+        consent_provider=lambda: "enabled",
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt.on_foreground("cold_foreground", "home")
+    id_a = rt.identity_store.peek_cached()
+    assert id_a is not None
+    assert rt.consent_gate.epoch == 0
+
+    # Trigger repeated no-op set_consent("enabled") + settings-save hook mid-spool-enqueue!
+    real_enqueue = rt.spool.enqueue
+
+    def _enqueue_with_concurrent_settings_save(events, *, fsync=True):
+        res = real_enqueue(events, fsync=fsync)
+        rt.set_consent("enabled")
+        rt._on_settings_saved_consent_check()
+        return res
+
+    rt.spool.enqueue = _enqueue_with_concurrent_settings_save  # type: ignore[method-assign]
+    rt.capture_grades_interaction("semester_switched")
+    stored = rt.flush_ram_to_spool(fsync=False)
+
+    assert stored >= 2
+    assert rt.consent_gate.epoch == 0
+    assert (rt.analytics_dir / INSTALLATION_FILENAME).is_file()
+    assert rt.identity_store.peek_cached() == id_a
+    assert len(rt.spool.pending()) >= 1
+    rt.close()
+
+
+def test_m01_network_flush_gated_on_authenticated_foreground_and_not_fired_on_start(
+    tmp_path: Path,
+):
+    clk = _ManualClock(datetime(2026, 11, 28, 16, 0, 0, tzinfo=UTC))
+    # Seed a prior-exit spooled batch on disk
+    seed_rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    seed_rt.set_account_state(authenticated=True, is_demo=False)
+    seed_rt.on_foreground("cold_foreground", "home")
+    seed_rt.close()
+    assert len(seed_rt.spool.pending()) >= 1
+
+    sent_batches = 0
+    flushed_event = threading.Event()
+
+    class _CountingTransport:
+        def send_batch(self, events, *, timeout_seconds, is_cancelled=None):
+            nonlocal sent_batches
+            sent_batches += 1
+            flushed_event.set()
+            return BatchDeliveryOutcome.confirmed_success(status_code=200)
+
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    rt.delivery._transport = _CountingTransport()  # type: ignore[assignment]
+
+    # 1. start() before login/visibility -> 0 network flushes!
+    rt.start()
+    time.sleep(0.05)
+    assert sent_batches == 0
+
+    # 2. Unauthenticated login dialog in foreground -> 0 network flushes!
+    rt.on_foreground("cold_foreground", "home")
+    rt._submit_network_flush()
+    time.sleep(0.05)
+    assert sent_batches == 0
+
+    # 3. Demo account in foreground -> 0 network flushes!
+    rt.set_account_state(authenticated=True, is_demo=True)
+    rt._submit_network_flush()
+    time.sleep(0.05)
+    assert sent_batches == 0
+
+    # 4. Real account while hidden in tray (--autostart) -> 0 network flushes!
+    rt.on_background("tray_hide")
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt._submit_network_flush()
+    time.sleep(0.05)
+    assert sent_batches == 0
+
+    # 5. Entering authenticated non-demo foreground triggers network flush of prior batch!
+    rt.on_foreground("tray_restore", "home")
+    assert flushed_event.wait(timeout=2.0)
+    assert sent_batches >= 1
+    rt.close()
+
+
+def test_m01_account_switch_splits_spool_batches_and_flushes_matured_debounces(
+    tmp_path: Path,
+):
+    clk = _ManualClock(datetime(2026, 11, 28, 16, 30, 0, tzinfo=UTC))
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    # Student A starts, interacts, then session idle-expires in RAM (_session becomes None)
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt.on_foreground("cold_foreground", "home")
+    id_a = rt.identity_store.peek_cached()
+    assert id_a is not None
+    clk.advance(1900.0)  # >= 30m idle -> session ends in RAM
+    rt.poll_timers()
+    assert rt.active_session_id is None
+
+    # Student B logs in while Student A's events are STILL in _ram_buffer (pre_wipe_events == [])
+    clk.advance(5.0)
+    rt.set_account_state(authenticated=True, is_demo=False, account_changed=True)
+    id_b = rt.identity_store.peek_cached()
+    assert id_b is not None and id_b != id_a
+
+    # Student B dwells 5s on grades (>= 1.5s screen debounce) + queues un-matured 0.2s filter,
+    # then logs out -> matured screen view MUST flush before account_change session end!
+    rt.capture_screen_viewed("grades", "tab_bar")
+    clk.advance(5.0)
+    rt.capture_filter_applied("home", "urgency")
+    clk.advance(0.2)
+    rt.set_account_state(authenticated=False, is_demo=False, account_changed=False)
+    rt.flush_ram_to_spool(fsync=False)
+
+    batches = rt.spool.pending()
+    assert len(batches) >= 2
+    for queued in batches:
+        ids_in_batch = {ev.distinct_id for ev in queued.batch.events}
+        assert len(ids_in_batch) == 1, f"Mixed distinct_ids in one batch: {ids_in_batch}"
+
+    b_events = [
+        ev
+        for queued in batches
+        for ev in queued.batch.events
+        if ev.distinct_id == id_b
+    ]
+    assert [ev.event for ev in b_events] == [
+        EventName.SESSION_STARTED,
+        EventName.SCREEN_VIEWED,
+        EventName.SESSION_ENDED,
+    ]
+    assert b_events[1].properties["screen"] == "grades"
+    assert b_events[2].properties["end_reason"] == "account_change"
+    rt.close()
+
+
+def test_m02_disk_purge_runs_outside_consent_gate_lock_and_preserves_reenabled_id(
+    tmp_path: Path,
+):
+    clk = _ManualClock(datetime(2026, 11, 28, 17, 0, 0, tzinfo=UTC))
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt.on_foreground("cold_foreground", "home")
+    id_a = rt.identity_store.peek_cached()
+    rt.flush_ram_to_spool(fsync=False)
+
+    entered_clear = threading.Event()
+    release_clear = threading.Event()
+    real_clear = rt.spool.clear
+
+    def _slow_clear():
+        entered_clear.set()
+        assert release_clear.wait(timeout=3.0)
+        real_clear()
+
+    rt.spool.clear = _slow_clear  # type: ignore[method-assign]
+    purge_thread = threading.Thread(target=rt.set_consent, args=("disabled",), daemon=True)
+    purge_thread.start()
+    assert entered_clear.wait(timeout=2.0)
+
+    # While spool.clear() is blocked on disk I/O, consent_gate.snapshot() must NOT block!
+    t0 = time.perf_counter()
+    snap_consent, snap_epoch = rt.consent_gate.snapshot()
+    snap_ms = (time.perf_counter() - t0) * 1000.0
+    assert snap_ms < 100.0
+    assert snap_consent is AnalyticsConsent.DISABLED
+    assert snap_epoch >= 1
+
+    # Re-enabling on another thread waits for pending purge to finish first so UUID_B survives!
+    reenable_thread = threading.Thread(target=rt.set_consent, args=("enabled",), daemon=True)
+    reenable_thread.start()
+    time.sleep(0.03)
+    release_clear.set()
+    purge_thread.join(timeout=2.0)
+    reenable_thread.join(timeout=2.0)
+
+    id_b = rt.identity_store.peek_cached()
+    assert id_b is not None and id_b != id_a
+    assert (rt.analytics_dir / INSTALLATION_FILENAME).is_file()
+    rt.close()
+
+
+def test_l01_l02_daemon_flush_leaves_zero_executor_threads_and_idle_loop_sleeps_indefinitely(
+    tmp_path: Path,
+    caplog,
+):
+    import concurrent.futures.thread as cf_thread
+    import logging
+
+    clk = _ManualClock(datetime(2026, 11, 28, 17, 30, 0, tzinfo=UTC))
+    before_threads = set(cf_thread._threads_queues.keys())
+
+    done_flush = threading.Event()
+
+    def _raising_flush(*_a, **_kw):
+        done_flush.set()
+        raise RuntimeError("boom inside flush_once")
+
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        initial_consent="disabled",
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    # Spy on _wakeup_event.wait timeouts to prove L02 timeout=None when opted out / idle
+    observed_timeouts: list[float | None] = []
+    saw_indefinite_wait = threading.Event()
+    real_wait = rt._wakeup_event.wait
+
+    def _spy_wait(timeout=None):
+        observed_timeouts.append(timeout)
+        if timeout is None:
+            saw_indefinite_wait.set()
+        return real_wait(timeout=timeout)
+
+    rt._wakeup_event.wait = _spy_wait  # type: ignore[method-assign]
+    rt.start()
+    assert saw_indefinite_wait.wait(timeout=2.0)
+    assert observed_timeouts[0] is None
+
+    # Now enable consent + authenticated foreground and run _submit_network_flush (L01)
+    rt.delivery.flush_once = _raising_flush  # type: ignore[method-assign]
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt.on_foreground("cold_foreground", "home")
+    with caplog.at_level(logging.DEBUG, logger="analytics.runtime"):
+        rt.set_consent("enabled")
+        rt._submit_network_flush()
+        assert done_flush.wait(timeout=2.0)
+        time.sleep(0.05)
+
+    after_threads = set(cf_thread._threads_queues.keys())
+    assert after_threads - before_threads == set()
+    for rec in caplog.records:
+        if "Analytics delivery worker suppressed error" in rec.getMessage():
+            assert rec.exc_info is None
+
+    rt.close()
+

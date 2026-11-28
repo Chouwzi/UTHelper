@@ -161,6 +161,21 @@ class ForegroundSessionTracker:
         with self._lock:
             return self._consent
 
+    def has_pending_timers(self) -> bool:
+        """Return True if any active/paused session or debounce timer needs polling."""
+        with self._lock:
+            if (
+                not self.config.active_eligible
+                or self._disabled_for_process
+                or self._consent is not AnalyticsConsent.ENABLED
+            ):
+                return False
+            return (
+                self._session is not None
+                or self._pending_screen is not None
+                or self._pending_filter is not None
+            )
+
     def _can_emit_foreground_locked(self) -> bool:
         return (
             self.config.active_eligible
@@ -244,16 +259,25 @@ class ForegroundSessionTracker:
             should_wipe_identity = False
 
             if losing_or_switching_account:
-                self._pending_screen = None
-                self._pending_filter = None
                 if self._can_emit_close_existing_locked():
-                    self._flush_due_debounces_locked(now_mono, pre_wipe_events)
+                    if (
+                        self._foreground_visible
+                        and self._session is not None
+                        and self._session.paused_at_mono is None
+                        and (now_mono - self._session.last_interaction_mono)
+                        < self._idle_timeout_seconds
+                    ):
+                        self._flush_due_debounces_locked(now_mono, pre_wipe_events)
+                    self._pending_screen = None
+                    self._pending_filter = None
                     self._end_session_locked(
                         reason=SessionEndReason.ACCOUNT_CHANGE,
                         out=pre_wipe_events,
                     )
                 else:
                     self._session = None
+                    self._pending_screen = None
+                    self._pending_filter = None
                 should_wipe_identity = True
 
             self._authenticated = bool(authenticated)

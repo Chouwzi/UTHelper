@@ -57,6 +57,47 @@ _APP_VERSION_RE = re.compile(
 _UTC_MS_TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
 )
+_IPV6_NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
+_IPV6_NAT64_LOCAL_USE = ipaddress.IPv6Network("64:ff9b:1::/48")
+_IPV6_SIIT_TRANSLATED = ipaddress.IPv6Network("::ffff:0:0:0/96")
+_IPV6_BENCHMARKING = ipaddress.IPv6Network("2001:2::/48")
+_IPV6_DISCARD_ONLY = ipaddress.IPv6Network("100::/64")
+_IPV6_DOCUMENTATION = ipaddress.IPv6Network("2001:db8::/32")
+_IPV6_TEREDO = ipaddress.IPv6Network("2001::/32")
+_IPV6_SIXTOFOUR = ipaddress.IPv6Network("2002::/16")
+_IPV6_SPECIAL_RELEASE_NETWORKS = (
+    _IPV6_NAT64_WELL_KNOWN,
+    _IPV6_NAT64_LOCAL_USE,
+    _IPV6_SIIT_TRANSLATED,
+    _IPV6_BENCHMARKING,
+    _IPV6_DISCARD_ONLY,
+    _IPV6_DOCUMENTATION,
+    _IPV6_TEREDO,
+    _IPV6_SIXTOFOUR,
+)
+
+
+def _unwrap_embedded_ipv4(
+    ip_addr: ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address, ...]:
+    """Extract embedded IPv4 addresses from transition/translation IPv6 literals."""
+    embedded: list[ipaddress.IPv4Address] = []
+    if ip_addr.ipv4_mapped is not None:
+        embedded.append(ip_addr.ipv4_mapped)
+    if ip_addr.sixtofour is not None:
+        embedded.append(ip_addr.sixtofour)
+    if ip_addr.teredo is not None:
+        server_v4, client_v4 = ip_addr.teredo
+        embedded.extend((server_v4, client_v4))
+    if (
+        ip_addr in _IPV6_NAT64_WELL_KNOWN
+        or ip_addr in _IPV6_SIIT_TRANSLATED
+        or ip_addr in _IPV6_NAT64_LOCAL_USE
+    ):
+        embedded.append(ipaddress.IPv4Address(int(ip_addr) & 0xFFFFFFFF))
+    elif (int(ip_addr) >> 32) == 0 and int(ip_addr) > 1:
+        embedded.append(ipaddress.IPv4Address(int(ip_addr) & 0xFFFFFFFF))
+    return tuple(embedded)
 
 
 class AnalyticsConfigError(ValueError):
@@ -122,11 +163,26 @@ def validate_posthog_host(
         raise AnalyticsConfigError(
             "PostHog host must not contain query or fragment components"
         )
-    raw_netloc_host = parsed.netloc.rsplit("@", 1)[-1]
-    if raw_netloc_host.startswith("["):
-        raw_netloc_host = raw_netloc_host.split("]", 1)[0][1:]
-    elif ":" in raw_netloc_host:
-        raw_netloc_host = raw_netloc_host.split(":", 1)[0]
+    raw_hostport = parsed.netloc.rsplit("@", 1)[-1]
+    if raw_hostport.startswith("["):
+        bracket_head, bracket_sep, bracket_tail = raw_hostport.partition("]")
+        if not bracket_sep:
+            raise AnalyticsConfigError("PostHog host is not a valid URL")
+        raw_netloc_host = bracket_head[1:]
+        if bracket_tail:
+            if (
+                not bracket_tail.startswith(":")
+                or len(bracket_tail) == 1
+                or not bracket_tail[1:].isdigit()
+                or port is None
+            ):
+                raise AnalyticsConfigError("PostHog host port is invalid")
+    elif ":" in raw_hostport:
+        raw_netloc_host, port_text = raw_hostport.split(":", 1)
+        if not port_text or not port_text.isdigit() or port is None:
+            raise AnalyticsConfigError("PostHog host port is invalid")
+    else:
+        raw_netloc_host = raw_hostport
     hostname = parsed.hostname
     if (
         not hostname
@@ -159,27 +215,31 @@ def validate_posthog_host(
         ip_literal = None
 
     if ip_literal is not None:
-        effective_ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ip_literal
-        if (
-            isinstance(ip_literal, ipaddress.IPv6Address)
-            and ip_literal.ipv4_mapped is not None
-        ):
-            effective_ip = ip_literal.ipv4_mapped
-        if (
-            ip_literal.is_unspecified
-            or ip_literal.is_multicast
-            or effective_ip.is_unspecified
-            or effective_ip.is_multicast
-        ):
+        candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [ip_literal]
+        if isinstance(ip_literal, ipaddress.IPv6Address):
+            candidates.extend(_unwrap_embedded_ipv4(ip_literal))
+        if any(addr.is_unspecified or addr.is_multicast for addr in candidates):
             raise AnalyticsConfigError(
                 "PostHog host must not target unspecified or multicast IPs"
             )
-        if (
-            not ip_literal.is_global or not effective_ip.is_global
-        ) and not allow_private_dev:
-            raise AnalyticsConfigError(
-                "PostHog host must not target private, loopback, or reserved IPs"
-            )
+        if not allow_private_dev:
+            if isinstance(ip_literal, ipaddress.IPv6Address) and any(
+                ip_literal in net for net in _IPV6_SPECIAL_RELEASE_NETWORKS
+            ):
+                raise AnalyticsConfigError(
+                    "PostHog host must not target private, loopback, or reserved IPs"
+                )
+            if any(
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_link_local
+                or addr.is_reserved
+                or not addr.is_global
+                for addr in candidates
+            ):
+                raise AnalyticsConfigError(
+                    "PostHog host must not target private, loopback, or reserved IPs"
+                )
     elif hostname != "localhost":
         labels = hostname.split(".")
         if (
@@ -320,7 +380,6 @@ class SessionEndReason(StrEnum):
     IDLE_TIMEOUT = "idle_timeout"
     MAX_AGE_ROTATE = "max_age_rotate"
     ACCOUNT_CHANGE = "account_change"
-    OPT_OUT = "opt_out"
     APP_EXIT = "app_exit"
 
 

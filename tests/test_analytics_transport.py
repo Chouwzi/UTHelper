@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from email.message import Message
 from email.utils import format_datetime
+import http.client
 import io
 import json
 from pathlib import Path
@@ -380,3 +381,120 @@ def test_consent_epoch_gate_purges_in_0ms_without_blocking_on_inflight_socket(
     t.join(timeout=2.0)
     # Batch #2 was NEVER sent because epoch changed mid-flight!
     assert send_count == 1
+
+
+def test_consent_epoch_gate_noop_same_consent_does_not_bump_epoch(tmp_path: Path):
+    gate = AnalyticsConsentEpochGate(AnalyticsConsent.ENABLED)
+    assert gate.epoch == 0
+    assert gate.set_consent(AnalyticsConsent.ENABLED) == 0
+    assert gate.set_consent("enabled") == 0
+    assert gate.epoch == 0
+    assert gate.is_enabled_at(0) is True
+
+    # Mid-flight no-op set_consent("enabled") must NOT abort acknowledge()!
+    spool = AnalyticsSpool(tmp_path / "pending", clock=lambda: NOW)
+    spool.enqueue([_sample_event(1)], fsync=False)
+
+    def _opener(request, *, timeout_seconds, context):
+        gate.set_consent("enabled")
+        return _FakeResponse(200, "application/json", b'{"status":"Ok"}')
+
+    worker = AnalyticsDeliveryWorker(
+        spool,
+        api_key=VALID_KEY,
+        host=VALID_HOST,
+        consent_gate=gate,
+        transport_factory=lambda **kw: PostHogHttpTransport(**kw, opener_func=_opener),
+    )
+    summary = worker.flush_once()
+    assert summary.sent_batches == 1
+    assert summary.skipped_consent is False
+    assert spool.pending() == ()
+
+    # Real state transitions DO bump epoch once per transition
+    assert gate.set_consent(AnalyticsConsent.DISABLED) == 1
+    assert gate.set_consent(AnalyticsConsent.DISABLED) == 1
+    assert gate.set_consent(AnalyticsConsent.ENABLED) == 2
+
+
+def test_transport_aborts_before_opener_when_is_cancelled_and_worker_passes_epoch_cancel(
+    tmp_path: Path,
+):
+    opener_calls = 0
+
+    def _never_open(request, *, timeout_seconds, context):
+        nonlocal opener_calls
+        opener_calls += 1
+        return _FakeResponse(200, "application/json", b'{"status":"Ok"}')
+
+    transport = PostHogHttpTransport(
+        api_key=VALID_KEY,
+        host=VALID_HOST,
+        opener_func=_never_open,
+    )
+    cancelled_out = transport.send_batch([_sample_event()], is_cancelled=lambda: True)
+    assert cancelled_out.confirmed is False
+    assert opener_calls == 0
+
+    # Verify AnalyticsDeliveryWorker passes epoch cancellation into PostHogHttpTransport
+    spool = AnalyticsSpool(tmp_path / "pending_cancel", clock=lambda: NOW)
+    spool.enqueue([_sample_event(1)], fsync=False)
+    gate = AnalyticsConsentEpochGate(AnalyticsConsent.ENABLED)
+
+    class _RevokeDuringPayloadTransport(PostHogHttpTransport):
+        def build_batch_payload(self, events):
+            payload = super().build_batch_payload(events)
+            gate.set_consent(AnalyticsConsent.DISABLED, on_revoke=spool.clear)
+            return payload
+
+    worker = AnalyticsDeliveryWorker(
+        spool,
+        api_key=VALID_KEY,
+        host=VALID_HOST,
+        consent_gate=gate,
+        transport_factory=lambda **kw: _RevokeDuringPayloadTransport(
+            **kw, opener_func=_never_open
+        ),
+    )
+    summary = worker.flush_once()
+    assert opener_calls == 0
+    assert summary.skipped_consent is True
+    assert summary.sent_batches == 0
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        http.client.BadStatusLine("garbage"),
+        http.client.IncompleteRead(b"partial", 16),
+        ValueError("malformed header value"),
+    ],
+)
+def test_transport_classifies_http_exception_and_value_error_as_retryable_http_protocol_error(
+    tmp_path: Path,
+    exc: Exception,
+):
+    transport = PostHogHttpTransport(
+        api_key=VALID_KEY,
+        host=VALID_HOST,
+        opener_func=lambda *_a, **_kw: (_ for _ in ()).throw(exc),
+    )
+    outcome = transport.send_batch([_sample_event()])
+    assert outcome.confirmed is False
+    assert outcome.retryable is True
+    assert outcome.reason == "http_protocol_error"
+
+    spool = AnalyticsSpool(tmp_path / f"pending_{type(exc).__name__}", clock=lambda: NOW)
+    spool.enqueue([_sample_event(1)], fsync=False)
+    worker = AnalyticsDeliveryWorker(
+        spool,
+        api_key=VALID_KEY,
+        host=VALID_HOST,
+        rng=lambda: 0.0,
+        transport_factory=lambda **_kw: transport,
+    )
+    summary = worker.flush_once()
+    assert summary.sent_batches == 0
+    assert summary.retained_batches == 1
+    assert summary.retry_after_seconds >= 1.0
+

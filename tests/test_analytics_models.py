@@ -22,12 +22,14 @@ from analytics.models import (
     EventName,
     FilterAppliedProperties,
     GradesInteractionProperties,
+    NavSource,
     NotificationSummaryProperties,
     OsFamily,
     PackageFormatName,
     QuizActionProperties,
     ReleaseChannel,
     ScreenViewedProperties,
+    SessionEndReason,
     SessionEndedProperties,
     SessionHeartbeatProperties,
     SessionStartedProperties,
@@ -419,3 +421,71 @@ def test_bucket_helpers_and_document_format_classifier():
     assert classify_document_format("slides.pptx") is DocumentFormat.PPTX
     assert classify_document_format("bundle.zip") is DocumentFormat.ARCHIVE
     assert classify_document_format("unknown.xyz") is DocumentFormat.OTHER
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "https://us.i.posthog.com:",
+        "https://us.i.posthog.com:/ingest",
+        "https://[2606:4700:4700::1111]:",
+        "https://us.i.posthog.com:0",
+        "https://240.0.0.1",
+        "https://100.64.0.1",
+        "https://198.18.0.1",
+        "https://192.0.2.1",
+        "https://[2001:db8::1]",
+        "https://[2001:2::1]",
+        "https://[100::1]",
+        "https://[::ffff:0:127.0.0.1]",
+        "https://[::ffff:0:10.0.0.1]",
+        "https://[64:ff9b::127.0.0.1]",
+        "https://[64:ff9b::10.0.0.1]",
+        "https://[64:ff9b::8.8.8.8]",
+        "https://[64:ff9b:1::10.0.0.1]",
+        "https://[2002:7f00:1::1]",
+        "https://[2002:0a00:1::1]",
+        "https://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]",
+        "https://[2001:0000:7f00:0001:0000:0000:7f00:0001]",
+    ],
+)
+def test_validate_posthog_host_rejects_empty_port_reserved_and_embedded_ipv6(
+    bad_host: str,
+):
+    with pytest.raises(AnalyticsConfigError):
+        validate_posthog_host(bad_host, allow_private_dev=False)
+
+
+def test_validate_posthog_host_global_ipv6_and_dev_mode_port_and_multicast_guards():
+    assert (
+        validate_posthog_host(
+            "https://[2606:4700:4700::1111]:8443/ph/",
+            allow_private_dev=False,
+        )
+        == "https://[2606:4700:4700::1111]:8443/ph"
+    )
+    for bad_dev_host in (
+        "https://localhost:",
+        "https://127.0.0.1:",
+        "https://[::1]:",
+        "https://[64:ff9b::0.0.0.0]:8443",
+        "https://[::ffff:0:224.0.0.1]:8443",
+        "https://[2002:0000:0000::1]:8443",
+    ):
+        with pytest.raises(AnalyticsConfigError):
+            validate_posthog_host(bad_dev_host, allow_private_dev=True)
+
+
+def test_dead_session_end_reason_opt_out_removed_while_shortcut_nav_source_kept():
+    assert "OPT_OUT" not in SessionEndReason.__members__
+    assert "opt_out" not in {member.value for member in SessionEndReason}
+    with pytest.raises(ValidationError):
+        SessionEndedProperties(
+            end_reason="opt_out",  # type: ignore[arg-type]
+            duration_bucket="1m_5m",
+            screens_visited_bucket="1",
+        )
+    assert NavSource.SHORTCUT.value == "shortcut"
+    props = ScreenViewedProperties(screen="courses", nav_source=NavSource.SHORTCUT)
+    assert props.nav_source is NavSource.SHORTCUT
+
