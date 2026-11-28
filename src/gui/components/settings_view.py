@@ -94,6 +94,8 @@ class SettingsView(ft.Container):
         self.bgcolor  = C.BG
         self._selected_theme = getattr(settings, 'THEME', 'steel_light')
         self._original_theme = self._selected_theme  # For revert on discard
+        self._theme_cards_scroll_offset = 0.0
+        self._theme_cards_pending_scroll_offset: float | None = None
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
         self._hint_containers = []
         self._tiles = []
@@ -1069,9 +1071,44 @@ class SettingsView(ft.Container):
                 controls=cards,
                 spacing=10,
                 scroll=ft.ScrollMode.AUTO,
+                on_scroll=self._on_theme_cards_scroll,
             ),
             padding=ft.Padding.only(top=4, bottom=4),
         )
+
+    def _on_theme_cards_scroll(self, event) -> None:
+        try:
+            offset = float(getattr(event, "pixels", 0.0))
+        except (TypeError, ValueError):
+            return
+        if offset >= 0:
+            self._theme_cards_scroll_offset = offset
+
+    async def _restore_theme_cards_scroll(self) -> None:
+        offset = self._theme_cards_pending_scroll_offset
+        row = getattr(getattr(self, "_theme_cards_row", None), "content", None)
+        if offset is None or row is None:
+            return
+        try:
+            await row.scroll_to(offset=offset, duration=0)
+        except (AttributeError, RuntimeError, TypeError):
+            return
+        if self._theme_cards_pending_scroll_offset == offset:
+            self._theme_cards_pending_scroll_offset = None
+
+    def _schedule_theme_cards_scroll_restore(self) -> None:
+        offset = self._theme_cards_pending_scroll_offset
+        run_task = getattr(getattr(self, "_page", None), "run_task", None)
+        if offset is None:
+            return
+        if offset <= 0:
+            self._theme_cards_pending_scroll_offset = None
+            return
+        if callable(run_task):
+            try:
+                run_task(self._restore_theme_cards_scroll)
+            except (RuntimeError, TypeError):
+                pass
 
     def _make_theme_card(self, key: str, preset: dict, selected: bool):
         """Create a single theme preview card."""
@@ -1190,6 +1227,7 @@ class SettingsView(ft.Container):
                 self._update_save_button_state()
             # Force full page repaint
             self._page.update()
+            self._schedule_theme_cards_scroll_restore()
             log.info("[THEME] page.update() completed successfully")
         except Exception as exc:
             log.error(f"[THEME] EXCEPTION in _on_theme_select: {exc}", exc_info=True)
@@ -1555,6 +1593,7 @@ class SettingsView(ft.Container):
 
     def _rebuild_theme_cards(self):
         """Restore preset previews and update selection state in place."""
+        self._theme_cards_pending_scroll_offset = self._theme_cards_scroll_offset
         row_ctrl = self._theme_cards_row.content
         if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) == len(THEME_ORDER):
             for i, key in enumerate(THEME_ORDER):
@@ -1688,6 +1727,7 @@ class SettingsView(ft.Container):
             self._update_save_button_state()
 
         self.update()
+        self._schedule_theme_cards_scroll_restore()
 
     async def _handle_test_login(self, e):
         raw_user = self._username_field.value or ""
