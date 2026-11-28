@@ -4,7 +4,7 @@ Real Flet is not required: a permissive stub lets *our* code run end to end
 (rendering, search, filter chips, theme refresh, offline/empty states). This
 verifies our logic and attribute usage, NOT Flet's own API surface.
 
-Run from ``src/``:  python -m unittest tests.test_learning_roadmap_ui -v
+Run from the repo root:  python -m pytest tests/test_learning_roadmap_ui.py
 """
 from __future__ import annotations
 
@@ -16,54 +16,10 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from tests._roadmap_stubs import ensure_config, ensure_flet  # noqa: E402
 
-
-# ---------------------------------------------------------------- flet stub
-class _Meta(type):
-    def __getattr__(cls, name):            # ft.Border.all(...), ft.Icons.X, ft.FontWeight.W_700
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return lambda *a, **k: _Ctl(*a, **k)
-
-
-class _Ctl(metaclass=_Meta):
-    def __init__(self, *args, **kwargs):
-        self._args = args
-        self.__dict__.update(kwargs)
-        self.updates = 0
-
-    def update(self):
-        self.updates += 1
-
-
-def _install_flet_stub():
-    mod = types.ModuleType("flet")
-    mod.__getattr__ = lambda name: _Ctl if not name.startswith("__") else (_ for _ in ()).throw(AttributeError(name))
-    mod.Container = type("Container", (_Ctl,), {})
-
-    class Text(_Ctl):                      # real ft.Text takes `value` first
-        def __init__(self, value=None, **kwargs):
-            super().__init__(**kwargs)
-            self.value = value
-
-    mod.Text = Text
-    mod.Page = _Ctl
-    mod.Control = _Ctl
-    sys.modules["flet"] = mod
-    return mod
-
-
-if "flet" not in sys.modules:
-    _install_flet_stub()
-if "config" not in sys.modules:
-    _cfg = types.ModuleType("config")
-    _cfg.settings = types.SimpleNamespace(PORTAL_API_BASE="x", UTH_USERNAME="", UTH_PASSWORD="",
-                                          MOODLE_USERNAME="", MOODLE_PASSWORD="")
-    _cfg.get_data_dir = lambda: Path("/tmp")
-    sys.modules["config"] = _cfg
+ensure_flet()
+ensure_config()
 
 from core.learning_roadmap.builder import build_snapshot  # noqa: E402
 from core.learning_roadmap.service import (  # noqa: E402
@@ -133,6 +89,15 @@ class ViewTests(unittest.TestCase):
         self.view._on_search(types.SimpleNamespace(control=types.SimpleNamespace(value="triet")))
         self.assertIs(self.view._search_field, field)       # identity kept -> focus kept
 
+    def test_requirement_progress_renders_with_x_of_4(self):
+        from tests.test_learning_roadmap import _progress_bundle, GDQP_4
+        snap = build_snapshot(_progress_bundle(
+            passed_english=(1, 2), passed_gdqp=tuple(c for c, _, _ in GDQP_4[:3])))
+        self.view.show_result(RoadmapLoadResult(snap, SOURCE_NETWORK, datetime(2026, 11, 25, 9, 30)))
+        by_key = {r.key: r.progress_text for r in snap.requirements}
+        self.assertEqual((by_key["english"], by_key["defense"]), ("2/4", "3/4"))
+        self.assertIsNotNone(self.view._summary.content)   # rendered without error
+
     def test_offline_result_shows_warning_banner(self):
         self.view.show_result(RoadmapLoadResult(
             build_snapshot(bundle()), SOURCE_OFFLINE_CACHE, datetime(2026, 11, 20, 8, 0),
@@ -194,6 +159,7 @@ class ViewManagerTests(unittest.TestCase):
         controller = types.SimpleNamespace(
             calendar_btn=types.SimpleNamespace(icon_color=None),
             grades_btn=types.SimpleNamespace(icon_color=None),
+            roadmap_btn=types.SimpleNamespace(icon_color=None),
         )
         page = mock.Mock()
         switcher = types.SimpleNamespace(content=None)
@@ -203,7 +169,7 @@ class ViewManagerTests(unittest.TestCase):
                          roadmap_view=views["roadmap"])
         return vm, views, controller, switcher
 
-    def test_show_roadmap_keeps_grade_navigation_active(self):
+    def test_show_roadmap_hides_everything_else_and_highlights_button(self):
         vm, v, ctl, sw = self.make()
         vm.show_roadmap_loading()
         for name in ("dashboard", "detail", "settings", "calendar", "grades"):
@@ -211,7 +177,8 @@ class ViewManagerTests(unittest.TestCase):
         v["roadmap"].show_loading.assert_called_once()
         self.assertIs(sw.content, v["roadmap"])
         from gui.core.theme import C
-        self.assertEqual(ctl.grades_btn.icon_color, C.ACCENT)
+        self.assertEqual(ctl.roadmap_btn.icon_color, C.ACCENT)
+        self.assertEqual(ctl.grades_btn.icon_color, C.TEXT_SECONDARY)
         self.assertEqual(ctl.calendar_btn.icon_color, C.TEXT_SECONDARY)
 
     def test_every_other_screen_hides_the_roadmap(self):
@@ -227,14 +194,13 @@ class ViewManagerTests(unittest.TestCase):
             call(vm)
             self.assertFalse(v["roadmap"].visible)
 
-    def test_close_roadmap_returns_to_grade_screen(self):
+    def test_close_roadmap_returns_to_dashboard(self):
         vm, v, ctl, sw = self.make()
         vm.show_roadmap_loading()
         asyncio.run(vm.close_roadmap())
         self.assertFalse(v["roadmap"].visible)
-        self.assertTrue(v["grades"].visible)
-        self.assertFalse(v["dashboard"].visible)
-        self.assertIs(sw.content, v["grades"])
+        self.assertTrue(v["dashboard"].visible)
+        self.assertIs(sw.content, v["dashboard"])
 
     def test_grades_close_path_is_unchanged(self):
         vm, v, ctl, sw = self.make()

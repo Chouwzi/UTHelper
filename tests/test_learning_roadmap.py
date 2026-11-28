@@ -1,13 +1,12 @@
 """Unit tests for the Learning Roadmap core (stdlib unittest, no network, no Flet).
 
-Run from ``src/``:  python -m unittest tests.test_learning_roadmap -v
+Run from the repo root:  python -m pytest tests/test_learning_roadmap.py
 """
 from __future__ import annotations
 
 import gzip
 import io
 import json
-import sys
 import tempfile
 import types
 import unittest
@@ -15,38 +14,9 @@ import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from tests._roadmap_stubs import ensure_config  # noqa: E402
 
-# `config` needs pydantic + OS dirs; the roadmap only needs these two names.
-# Installed per test session in setUpModule (not at import time) so importing this
-# module never leaks a fake ``config`` into the other test modules.
-_FAKE_CONFIG: types.ModuleType | None = None
-
-
-def _install_fake_config() -> None:
-    global _FAKE_CONFIG
-    _cfg = types.ModuleType("config")
-    _cfg.settings = types.SimpleNamespace(
-        PORTAL_API_BASE="https://portal-publicapp.ut.edu.vn/api/v1",
-        UTH_USERNAME="", UTH_PASSWORD="", MOODLE_USERNAME="", MOODLE_PASSWORD="",
-    )
-    _cfg.get_data_dir = lambda: Path(tempfile.gettempdir())
-    sys.modules["config"] = _cfg
-    _FAKE_CONFIG = _cfg
-
-
-def setUpModule() -> None:
-    if "config" not in sys.modules:
-        _install_fake_config()
-
-
-def tearDownModule() -> None:
-    global _FAKE_CONFIG
-    if _FAKE_CONFIG is not None:
-        sys.modules.pop("config", None)
-        _FAKE_CONFIG = None
+ensure_config()
 
 from core.learning_roadmap.builder import attempt_outcome, build_snapshot  # noqa: E402
 from core.learning_roadmap.filtering import (  # noqa: E402
@@ -330,6 +300,178 @@ class RequirementTests(unittest.TestCase):
         self.assertEqual([r.key for r in snap.requirements], ["english", "it", "defense", "pe"])
 
 
+# ------------------------------------------- x/N progress (English, GDQP)
+def _fw_course(code, name, credits, sem_no=1):
+    return {"maHocPhan": code, "tenMonHoc": name, "soTinChi": credits, "hocKy": sem_no}
+
+
+GDQP_4 = (
+    ("0120007201", "Đường lối quốc phòng và an ninh của đảng cộng sản VN", 3),
+    ("0120007202", "Công tác quốc phòng và an ninh", 2),
+    ("0120007203", "Quân sự chung", 1),
+    ("0120007204", "Kỹ thuật chiến đấu bộ binh và chiến thuật", 2),
+)
+
+
+def _progress_bundle(passed_english=(), passed_gdqp=(), running_english=()):
+    fw = [{"hocKy": 1, "monHocs": [
+        *[{"maHocPhan": f"TT0{n}", "tenMonHoc": f"General English {n}", "soTinChi": 0}
+          for n in (1, 2, 3, 4)],
+        *[{"maHocPhan": c, "tenMonHoc": n, "soTinChi": t} for c, n, t in GDQP_4],
+    ]}]
+    done = [course(f"TT0{n}", f"General English {n}", 0, 8.0, "B") for n in passed_english]
+    done += [course(c, n, t, 8.0, "B") for c, n, t in GDQP_4 if c in passed_gdqp]
+    cur = {"id": 76, "name": "HK1 2026-2027", "courses": [
+        {"maHocPhan": f"TT0{n}", "tenMonHoc": f"General English {n}", "soTinChi": 0}
+        for n in running_english]}
+    return bundle(
+        bodies={"curriculum": fw},
+        transcript=[sem(74, "HK1 2025-2026", done)] if done else [],
+        current_semester=cur,
+    )
+
+
+class ProgressRequirementTests(unittest.TestCase):
+    def req(self, snap, key):
+        return {r.key: r for r in snap.requirements}[key]
+
+    def test_english_counts_levels_out_of_four(self):
+        r = self.req(build_snapshot(_progress_bundle(passed_english=(1, 2, 3))), "english")
+        self.assertEqual((r.progress_done, r.progress_total), (3, 4))
+        self.assertEqual(r.progress_text, "3/4")
+        self.assertEqual(r.status, RequirementStatus.NOT_MET)
+
+    def test_english_met_only_when_all_four_levels_done(self):
+        r = self.req(build_snapshot(_progress_bundle(passed_english=(1, 2, 3, 4))), "english")
+        self.assertEqual(r.progress_text, "4/4")
+        self.assertEqual(r.status, RequirementStatus.MET)
+
+    def test_english_running_level_is_in_progress(self):
+        snap = build_snapshot(_progress_bundle(passed_english=(1,), running_english=(2,)))
+        r = self.req(snap, "english")
+        self.assertEqual(r.progress_text, "2/4")   # studying level 2 = level 2 reached
+        self.assertEqual(r.status, RequirementStatus.IN_PROGRESS)
+
+    def test_currently_in_general_english_3_is_3_of_4(self):
+        # Student placed into / currently studying level 3 (1-2 not in the data).
+        b = _progress_bundle(running_english=(3,))
+        r = self.req(build_snapshot(b), "english")
+        self.assertEqual(r.progress_text, "3/4")
+        self.assertEqual(r.status, RequirementStatus.IN_PROGRESS)
+        self.assertIn("General English 3", r.detail)
+
+    def test_english_met_only_when_level_4_completed(self):
+        r = self.req(build_snapshot(_progress_bundle(passed_english=(1, 2, 3))), "english")
+        self.assertNotEqual(r.status, RequirementStatus.MET)
+        r = self.req(build_snapshot(_progress_bundle(passed_english=(4,))), "english")
+        self.assertEqual((r.progress_text, r.status), ("4/4", RequirementStatus.MET))
+
+    def test_all_past_terms_listed_when_current_term_is_not_in_transcript(self):
+        # Year 3 HK1 running (id 77, not in transcript); transcript holds the
+        # earlier terms. The newest finished term must not be dropped.
+        b = bundle(
+            transcript=[
+                sem(71, "HK1 2024-2025", [course("A1", "Môn A", 3, 8.0, "B+")]),
+                sem(72, "HK2 2024-2025", [course("A2", "Môn B", 3, 7.0, "B")]),
+                sem(74, "HK1 2025-2026", [course("A3", "Môn C", 3, 9.0, "A")]),
+                sem(75, "HK2 2025-2026", [course("A4", "Môn D", 3, 8.5, "A")]),
+            ],
+            current_semester={"id": 77, "name": "Học kỳ 1 năm học 2026-2027", "courses": [
+                {"maHocPhan": "TT03", "tenMonHoc": "General English 3", "soTinChi": 0}]},
+        )
+        snap = build_snapshot(b)
+        labels = [h.label for h in snap.history]
+        self.assertEqual(labels, ["HK2 2025-2026", "HK1 2025-2026",
+                                  "HK2 2024-2025", "HK1 2024-2025"])
+
+    def test_empty_main_term_between_is_listed_summer_is_not(self):
+        b = bundle(
+            transcript=[
+                sem(71, "HK1 2024-2025", [course("A1", "Môn A", 3, 8.0, "B+")]),
+                sem(74, "HK1 2025-2026", [course("A3", "Môn C", 3, 9.0, "A")]),
+            ],
+            current_semester={"id": 76, "name": "Học kỳ 2 năm học 2025-2026", "courses": [
+                {"maHocPhan": "T9", "tenMonHoc": "Môn Z", "soTinChi": 3}]},
+        )
+        labels = [h.label for h in build_snapshot(b).history]
+        self.assertEqual(labels, ["HK1 2025-2026", "Học kỳ 2 · 2024-2025", "HK1 2024-2025"])
+
+    def test_english_level_outside_1_to_4_is_not_counted(self):
+        s = build_snapshot(_progress_bundle(passed_english=(1,)))
+        # a hypothetical "General English 5" must not push the count past 4
+        from core.learning_roadmap.builder import _english_level
+        from core.learning_roadmap.models import RoadmapCourse
+        c = RoadmapCourse("X", "General English 5", 0, CourseStatus.COMPLETED)
+        self.assertIsNone(_english_level(c))
+        self.assertEqual(self.req(s, "english").progress_text, "1/4")
+
+    def test_defense_is_the_four_courses(self):
+        passed = ("0120007201", "0120007203")
+        r = self.req(build_snapshot(_progress_bundle(passed_gdqp=passed)), "defense")
+        self.assertEqual(r.progress_text, "2/4")
+        self.assertEqual(r.status, RequirementStatus.NOT_MET)
+
+    def test_defense_met_with_all_four(self):
+        r = self.req(build_snapshot(_progress_bundle(
+            passed_gdqp=tuple(c for c, _, _ in GDQP_4))), "defense")
+        self.assertEqual(r.progress_text, "4/4")
+        self.assertEqual(r.status, RequirementStatus.MET)
+
+    def test_defense_missing_course_counts_as_not_done(self):
+        b = _progress_bundle(passed_gdqp=("0120007201",))
+        b["bodies"]["curriculum"][0]["monHocs"] = [
+            m for m in b["bodies"]["curriculum"][0]["monHocs"] if m["maHocPhan"] != "0120007204"]
+        r = self.req(build_snapshot(b), "defense")
+        self.assertEqual(r.progress_text, "1/4")           # total stays 4
+
+    def test_portal_flag_true_fills_the_bar(self):
+        b = _progress_bundle(passed_gdqp=("0120007201",))
+        b["bodies"]["graduation_info"] = {"gdqp": True}
+        r = self.req(build_snapshot(b), "defense")
+        self.assertEqual((r.status, r.progress_text), (RequirementStatus.MET, "4/4"))
+
+    def test_certificate_fills_english_bar(self):
+        b = _progress_bundle()
+        b["bodies"]["certificates"] = [{"tenChungChi": "IELTS 6.5"}]
+        r = self.req(build_snapshot(b), "english")
+        self.assertEqual((r.status, r.progress_text), (RequirementStatus.MET, "4/4"))
+
+    def test_program_certificate_does_not_fake_english_4_of_4(self):
+        b = _progress_bundle(passed_english=(1, 2, 3))
+        b["bodies"]["certificates"] = [{"tenChungChi": "Chương trình Tiếng Anh", "isDat": True}]
+        r = self.req(build_snapshot(b), "english")
+        self.assertEqual(r.progress_text, "3/4")
+        self.assertNotEqual(r.status, RequirementStatus.MET)
+
+    def test_english_counted_even_when_rows_do_not_match_the_framework(self):
+        # Transcript rows use class codes / different wording and the framework
+        # lists no English at all: 3 passed levels must still read 3/4.
+        b = bundle(
+            bodies={"curriculum": [{"hocKy": 1, "monHocs": [
+                {"maHocPhan": "X1", "tenMonHoc": "Toán", "soTinChi": 3}]}]},
+            transcript=[sem(74, "HK1 2025-2026", [
+                course("251_TT01_01", "General English 1", 0, 8.0, "B"),
+                course("251_TT02_01", "General English Level 2", 0, 7.0, "B"),
+                course("251_TT03_01", "General English III", 0, 9.0, "A"),
+            ])],
+        )
+        r = self.req(build_snapshot(b), "english")
+        self.assertEqual(r.progress_text, "3/4")
+        self.assertEqual(r.status, RequirementStatus.NOT_MET)
+
+    def test_exempted_english_levels_count(self):
+        b = _progress_bundle(passed_english=(3,))
+        b["bodies"]["exemptions"] = [
+            {"maHocPhan": "TT01", "tenMonHoc": "General English 1"},
+            {"maHocPhan": "TT02", "tenMonHoc": "General English 2"}]
+        self.assertEqual(self.req(build_snapshot(b), "english").progress_text, "3/4")
+
+    def test_it_and_pe_have_no_progress_count(self):
+        snap = build_snapshot(_progress_bundle())
+        self.assertFalse(self.req(snap, "it").has_progress)
+        self.assertFalse(self.req(snap, "pe").has_progress)
+
+
 # ------------------------------------------------------------------- filtering
 class FilterTests(unittest.TestCase):
     def setUp(self):
@@ -381,7 +523,7 @@ class ServiceTests(unittest.TestCase):
         self.now = datetime(2026, 11, 25, 9, 0)
 
     def svc(self, client, ttl=12.0):
-        return LearningRoadmapService(client, self.dir, ttl_hours=ttl, clock=lambda: self.now)
+        return LearningRoadmapService(self.dir / "learning_roadmap_cache.json", client, ttl_hours=ttl, clock=lambda: self.now)
 
     def test_network_then_fresh_cache_skips_network(self):
         client = FakeClient(bundle())
@@ -510,7 +652,7 @@ class FakePortal:
 
 class PortalClientRoadmapTests(unittest.TestCase):
     def client(self, portal):
-        return PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=portal)
+        return PortalClient("https://portal.ut.edu.vn/api/v1", opener=portal)
 
     def test_bundle_collects_everything_and_picks_latest_semester(self):
         portal = FakePortal()
@@ -532,11 +674,14 @@ class PortalClientRoadmapTests(unittest.TestCase):
         self.assertEqual(b["errors"], {"exemptions": "HTTP 500"})
         self.assertIn("curriculum", b["bodies"])
 
-    def test_expired_token_relogs_in_once_and_continues(self):
+    def test_expired_token_clears_session_and_stops_bundle(self):
+        # develop's hardened client treats a 401 on a data call as a rejected
+        # session: it drops the token and aborts instead of re-playing the
+        # credential, so the bundle never retries silently.
         portal = FakePortal(expire_first_token=True)
-        b = self.client(portal).fetch_roadmap_bundle("u", "p")
-        self.assertEqual(b["errors"], {})
-        self.assertGreaterEqual(portal.logins, 2)
+        with self.assertRaises(PortalAuthenticationError):
+            self.client(portal).fetch_roadmap_bundle("u", "p")
+        self.assertEqual(portal.logins, 1)
 
     def test_network_failure_aborts_instead_of_hammering(self):
         portal = FakePortal({"hoctap/chuongtrinhkhung": urllib.error.URLError("offline")})
@@ -548,7 +693,7 @@ class PortalClientRoadmapTests(unittest.TestCase):
         def opener(request, timeout=None):
             return _Resp({"success": False, "status": 401})
         with self.assertRaises(PortalAuthenticationError):
-            PortalClient("https://portal-publicapp.ut.edu.vn/api/v1", opener=opener).fetch_roadmap_bundle("u", "bad")
+            PortalClient("https://portal.ut.edu.vn/api/v1", opener=opener).fetch_roadmap_bundle("u", "bad")
 
     def test_missing_credentials_raise_before_any_request(self):
         portal = FakePortal()

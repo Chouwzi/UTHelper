@@ -92,15 +92,6 @@ class AcademicGradeService:
         if callable(clear_sess):
             clear_sess()
 
-    def clear_session(self) -> None:
-        """Clear cached Portal authentication token/session on account switch or logout."""
-        clear_token = getattr(self._portal_client, "clear_token", None)
-        if callable(clear_token):
-            clear_token()
-        clear_sess = getattr(self._portal_client, "clear_session", None)
-        if callable(clear_sess):
-            clear_sess()
-
     def _cache_paths(self, username: str) -> tuple[Path, Path]:
         digest = _namespace_digest(username)
         return (

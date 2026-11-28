@@ -807,7 +807,15 @@ class LearningRoadmapView(ft.Container):
 
     # ------------------------------------------------------------- dialogs
     def _page(self):
-        return self._page_ref or getattr(self, "page", None)
+        # ``page`` raises until the control is mounted; the plan dialogs are
+        # also opened from tests and early render passes, so treat a detached
+        # control as "no page" instead of propagating RuntimeError.
+        if self._page_ref is not None:
+            return self._page_ref
+        try:
+            return getattr(self, "page", None)
+        except RuntimeError:
+            return None
 
     def _show_dialog(self, dlg) -> None:
         self._dialog = dlg
