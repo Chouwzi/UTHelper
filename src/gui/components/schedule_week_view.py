@@ -1848,13 +1848,20 @@ class ScheduleWeekView(ft.Container):
             ),
             spacing=4,
         )
-        if session.cancelled:
-            suspended_watermark = ft.Container(
+        note_text = session.note.casefold()
+        is_makeup_session = not session.cancelled and "học bù" in note_text
+        if session.cancelled or is_makeup_session:
+            status_label, status_color = (
+                ("Tạm ngưng", C.CRITICAL)
+                if session.cancelled
+                else ("Học bù", C.WARNING)
+            )
+            status_watermark = ft.Container(
                 content=ft.Text(
-                    "Tạm ngưng",
+                    status_label,
                     size=16,
                     weight=ft.FontWeight.W_800,
-                    color=ft.Colors.with_opacity(0.68, C.CRITICAL),
+                    color=ft.Colors.with_opacity(0.88, status_color),
                     text_align=ft.TextAlign.CENTER,
                     no_wrap=True,
                 ),
@@ -1870,7 +1877,7 @@ class ScheduleWeekView(ft.Container):
             card_content = ft.Stack(
                 controls=[
                     card_content,
-                    suspended_watermark,
+                    status_watermark,
                 ],
                 alignment=ft.Alignment.CENTER,
                 fit=ft.StackFit.EXPAND,
@@ -1884,6 +1891,8 @@ class ScheduleWeekView(ft.Container):
             bgcolor=(
                 ft.Colors.with_opacity(0.16, C.CRITICAL)
                 if session.cancelled
+                else ft.Colors.with_opacity(0.14, C.WARNING)
+                if is_makeup_session
                 else C.SURFACE
             ),
             border=ft.Border.all(1, C.BORDER),
