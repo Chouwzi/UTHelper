@@ -329,10 +329,16 @@ def test_validate_posthog_host_normalizes_clean_https_origins(
         "https://us.i.posthog.com/%2e%2e/admin",
         "https://us.i.posthog.com//double",
         "https://localhost:8000",
+        "https://posthog.local",
+        "https://sub.posthog.localhost",
         "https://127.0.0.1:8000",
+        "https://[::ffff:127.0.0.1]:8000",
         "https://10.0.0.5",
         "https://192.168.1.1",
         "https://169.254.169.254",
+        "https://0.0.0.0:8000",
+        "https://[ff02::1]:8000",
+        "https://ingest.example.edu/~tilde",
     ],
 )
 def test_validate_posthog_host_rejects_insecure_ui_and_private_hosts(bad_host: str):
@@ -346,9 +352,23 @@ def test_validate_posthog_host_allows_private_dev_only_when_explicit():
         == "https://localhost:8443/ingest"
     )
     assert (
+        validate_posthog_host("https://posthog.local:8443/ingest", allow_private_dev=True)
+        == "https://posthog.local:8443/ingest"
+    )
+    assert (
         validate_posthog_host("https://127.0.0.1:8443", allow_private_dev=True)
         == "https://127.0.0.1:8443"
     )
+    # Unspecified and multicast IPs remain rejected even when allow_private_dev=True!
+    for always_bad in (
+        "https://0.0.0.0:8443",
+        "https://[::]:8443",
+        "https://[::ffff:0.0.0.0]:8443",
+        "https://224.0.0.1:8443",
+        "https://[ff02::1]:8443",
+    ):
+        with pytest.raises(AnalyticsConfigError):
+            validate_posthog_host(always_bad, allow_private_dev=True)
 
 
 def test_bucket_helpers_and_document_format_classifier():

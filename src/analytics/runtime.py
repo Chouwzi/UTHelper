@@ -184,6 +184,43 @@ def _resolve_default_app_version(assets_root: Path) -> str:
     return "unknown"
 
 
+def _read_schema_v3_asset_fields(
+    assets_root: Path,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Read and validate PostHog + build metadata from ``diagnostics-config.json``."""
+    payload = _read_small_json_asset(assets_root / _PUBLIC_CONFIG_FILENAME)
+    if payload is None:
+        return None, None, None, None
+
+    schema_ver = payload.get("schema_version")
+    build_env = payload.get("build_environment")
+    pkg_fmt = payload.get("package_format")
+    resolved_env = build_env if isinstance(build_env, str) else None
+    resolved_fmt = pkg_fmt if isinstance(pkg_fmt, str) else None
+
+    if type(schema_ver) is not int or schema_ver != 3:
+        return None, None, resolved_env, resolved_fmt
+    if set(payload.keys()) != _EXPECTED_PUBLIC_CONFIG_V3_KEYS:
+        return None, None, None, None
+
+    raw_key = payload.get("posthog_project_api_key")
+    raw_host = payload.get("posthog_host")
+    if not isinstance(raw_key, str) or not isinstance(raw_host, str):
+        return None, None, resolved_env, resolved_fmt
+
+    file_key: str | None = None
+    file_host: str | None = None
+    try:
+        if raw_key:
+            file_key = validate_posthog_api_key(raw_key)
+        if raw_host:
+            file_host = validate_posthog_host(raw_host, allow_private_dev=False)
+    except AnalyticsConfigError:
+        return None, None, resolved_env, resolved_fmt
+
+    return file_key, file_host, resolved_env, resolved_fmt
+
+
 def _resolve_public_posthog_pair(
     assets_root: Path,
     *,
@@ -194,12 +231,22 @@ def _resolve_public_posthog_pair(
     if development:
         dev_key = environ.get("UTH_POSTHOG_KEY", "")
         dev_host = environ.get("UTH_POSTHOG_HOST", "")
-        if dev_key or dev_host:
-            if not dev_key:
-                return None, None, "development", "source", True
-            effective_host = dev_host if dev_host else DEFAULT_DEV_POSTHOG_HOST
+        if dev_key and dev_host:
             try:
                 valid_key = validate_posthog_api_key(dev_key)
+                valid_host = validate_posthog_host(dev_host, allow_private_dev=True)
+                return valid_key, valid_host, "development", "source", True
+            except AnalyticsConfigError:
+                return None, None, "development", "source", True
+
+        if dev_key and not dev_host:
+            try:
+                valid_key = validate_posthog_api_key(dev_key)
+            except AnalyticsConfigError:
+                return None, None, "development", "source", True
+            _fk, file_host, _fe, _ff = _read_schema_v3_asset_fields(assets_root)
+            effective_host = file_host or DEFAULT_DEV_POSTHOG_HOST
+            try:
                 valid_host = validate_posthog_host(
                     effective_host,
                     allow_private_dev=True,
@@ -208,33 +255,22 @@ def _resolve_public_posthog_pair(
             except AnalyticsConfigError:
                 return None, None, "development", "source", True
 
-    payload = _read_small_json_asset(assets_root / _PUBLIC_CONFIG_FILENAME)
-    if payload is None:
-        return None, None, None, None, False
+        if dev_host and not dev_key:
+            try:
+                valid_host = validate_posthog_host(dev_host, allow_private_dev=True)
+            except AnalyticsConfigError:
+                return None, None, "development", "source", True
+            file_key, _fh, _fe, _ff = _read_schema_v3_asset_fields(assets_root)
+            if file_key is None:
+                return None, None, "development", "source", True
+            return file_key, valid_host, "development", "source", True
 
-    schema_ver = payload.get("schema_version")
-    build_env = payload.get("build_environment")
-    pkg_fmt = payload.get("package_format")
-    resolved_env = build_env if isinstance(build_env, str) else None
-    resolved_fmt = pkg_fmt if isinstance(pkg_fmt, str) else None
-
-    if type(schema_ver) is not int or schema_ver != 3:
+    file_key, file_host, resolved_env, resolved_fmt = _read_schema_v3_asset_fields(
+        assets_root
+    )
+    if not file_key or not file_host:
         return None, None, resolved_env, resolved_fmt, False
-    if set(payload.keys()) != _EXPECTED_PUBLIC_CONFIG_V3_KEYS:
-        return None, None, None, None, False
-
-    raw_key = payload.get("posthog_project_api_key")
-    raw_host = payload.get("posthog_host")
-    if not isinstance(raw_key, str) or not isinstance(raw_host, str):
-        return None, None, resolved_env, resolved_fmt, False
-    if not raw_key or not raw_host:
-        return None, None, resolved_env, resolved_fmt, False
-    try:
-        valid_key = validate_posthog_api_key(raw_key)
-        valid_host = validate_posthog_host(raw_host, allow_private_dev=False)
-    except AnalyticsConfigError:
-        return None, None, resolved_env, resolved_fmt, False
-    return valid_key, valid_host, resolved_env, resolved_fmt, False
+    return file_key, file_host, resolved_env, resolved_fmt, False
 
 
 def _resolve_distribution_channel_name(
@@ -1097,12 +1133,15 @@ def file_count_bucket_helper(count: int) -> FileCountBucket:
     return file_count_bucket(count)
 
 
+_UNSET: Any = object()
+
+
 def create_default_analytics_runtime(
     data_dir: Path | str,
     *,
     development: bool = False,
-    api_key: str | None = None,
-    host: str | None = None,
+    api_key: str | None = _UNSET,
+    host: str | None = _UNSET,
     app_version: str | None = None,
     release_channel: ReleaseChannel | str | None = None,
     distribution_channel: DistributionChannelName | str | None = None,
@@ -1132,17 +1171,35 @@ def create_default_analytics_runtime(
         else _SOURCE_ASSETS_DIR
     )
 
-    asset_key, asset_host, asset_env, asset_fmt, allow_private = (
-        _resolve_public_posthog_pair(
-            resolved_assets,
-            development=development,
-            environ=env,
-        )
+    needs_public_config_asset = (
+        api_key is _UNSET
+        or host is _UNSET
+        or (not development and (release_channel is None or package_format is None))
     )
+    if needs_public_config_asset:
+        asset_key, asset_host, asset_env, asset_fmt, allow_private = (
+            _resolve_public_posthog_pair(
+                resolved_assets,
+                development=development,
+                environ=env,
+            )
+        )
+    else:
+        asset_key = None
+        asset_host = None
+        asset_env = None
+        asset_fmt = None
+        allow_private = bool(development)
 
-    candidate_key = api_key if api_key is not None else asset_key
-    candidate_host = host if host is not None else asset_host
-    if development and candidate_key and not candidate_host and api_key is not None:
+    candidate_key = asset_key if api_key is _UNSET else api_key
+    candidate_host = asset_host if host is _UNSET else host
+    if (
+        development
+        and candidate_key
+        and not candidate_host
+        and api_key is not _UNSET
+        and host is _UNSET
+    ):
         candidate_host = DEFAULT_DEV_POSTHOG_HOST
         allow_private = True
 
@@ -1159,32 +1216,46 @@ def create_default_analytics_runtime(
             validated_key = None
             validated_host = None
 
-    resolved_os = _coerce_enum_or_default(
-        OsFamily,
-        os_family,
-        _detect_os_family(),
+    resolved_os = (
+        _coerce_enum_or_default(OsFamily, os_family, OsFamily.UNKNOWN)
+        if os_family is not None
+        else _detect_os_family()
     )
-    resolved_device = _coerce_enum_or_default(
-        DeviceClass,
-        device_class,
-        _detect_device_class(resolved_os),
+    resolved_device = (
+        _coerce_enum_or_default(DeviceClass, device_class, DeviceClass.UNKNOWN)
+        if device_class is not None
+        else _detect_device_class(resolved_os)
     )
     resolved_release_channel = _coerce_enum_or_default(
         ReleaseChannel,
-        release_channel if release_channel is not None else ("development" if development else asset_env),
+        release_channel
+        if release_channel is not None
+        else ("development" if development else asset_env),
         ReleaseChannel.DEVELOPMENT if development else ReleaseChannel.RELEASE,
     )
-    resolved_dist = _coerce_enum_or_default(
-        DistributionChannelName,
-        distribution_channel,
-        _resolve_distribution_channel_name(resolved_assets, development=development),
-    )
+    if distribution_channel is not None:
+        resolved_dist = _coerce_enum_or_default(
+            DistributionChannelName,
+            distribution_channel,
+            DistributionChannelName.SOURCE,
+        )
+    else:
+        resolved_dist = _resolve_distribution_channel_name(
+            resolved_assets,
+            development=development,
+        )
     resolved_pkg = _coerce_enum_or_default(
         PackageFormatName,
-        package_format if package_format is not None else ("source" if development else asset_fmt),
+        package_format
+        if package_format is not None
+        else ("source" if development else asset_fmt),
         PackageFormatName.SOURCE,
     )
-    resolved_version = app_version or _resolve_default_app_version(resolved_assets)
+    resolved_version = (
+        app_version
+        if app_version is not None
+        else _resolve_default_app_version(resolved_assets)
+    )
     resolved_test_mode = (
         bool(env.get("UTH_TEST_MODE") == "1")
         if test_mode is None

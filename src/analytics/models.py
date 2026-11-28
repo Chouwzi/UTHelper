@@ -144,9 +144,13 @@ def validate_posthog_host(
             "https://eu.i.posthog.com, or an HTTPS ingestion reverse proxy"
         )
 
-    is_localhost = hostname == "localhost" or hostname.endswith(".localhost")
-    if is_localhost and not allow_private_dev:
-        raise AnalyticsConfigError("PostHog host must not target localhost in release mode")
+    is_local_domain = hostname == "localhost" or hostname.endswith(
+        (".localhost", ".local")
+    )
+    if is_local_domain and not allow_private_dev:
+        raise AnalyticsConfigError(
+            "PostHog host must not target localhost or .local domains in release mode"
+        )
 
     ip_literal: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
     try:
@@ -155,11 +159,28 @@ def validate_posthog_host(
         ip_literal = None
 
     if ip_literal is not None:
-        if not ip_literal.is_global and not allow_private_dev:
+        effective_ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ip_literal
+        if (
+            isinstance(ip_literal, ipaddress.IPv6Address)
+            and ip_literal.ipv4_mapped is not None
+        ):
+            effective_ip = ip_literal.ipv4_mapped
+        if (
+            ip_literal.is_unspecified
+            or ip_literal.is_multicast
+            or effective_ip.is_unspecified
+            or effective_ip.is_multicast
+        ):
+            raise AnalyticsConfigError(
+                "PostHog host must not target unspecified or multicast IPs"
+            )
+        if (
+            not ip_literal.is_global or not effective_ip.is_global
+        ) and not allow_private_dev:
             raise AnalyticsConfigError(
                 "PostHog host must not target private, loopback, or reserved IPs"
             )
-    elif not is_localhost:
+    elif hostname != "localhost":
         labels = hostname.split(".")
         if (
             len(labels) < 2
@@ -169,12 +190,6 @@ def validate_posthog_host(
             raise AnalyticsConfigError("PostHog hostname is invalid")
 
     raw_path = parsed.path or ""
-    decoded_path = unquote(raw_path)
-    if "%" in raw_path and any(ord(ch) < 0x21 or ch == "/" or ch == "\\" for ch in decoded_path):
-        # Reject percent-encoded slashes, control characters, or traversal tricks.
-        if "%2f" in raw_path.casefold() or "%5c" in raw_path.casefold() or "%2e" in raw_path.casefold():
-            raise AnalyticsConfigError("PostHog host path must not use encoded traversal")
-
     raw_segments = raw_path.split("/")
     # Allow empty path or single trailing slash, reject middle '//' empty segments.
     middle_segments = raw_segments[1:-1] if raw_path.endswith("/") else raw_segments[1:]
@@ -182,11 +197,10 @@ def validate_posthog_host(
         raise AnalyticsConfigError("PostHog host path must not contain empty '//' segments")
 
     clean_segments = [seg for seg in raw_segments if seg]
-    decoded_segments = [unquote(seg) for seg in clean_segments]
-    if any(seg in {".", ".."} for seg in clean_segments + decoded_segments):
+    if any(seg in {".", ".."} for seg in clean_segments):
         raise AnalyticsConfigError("PostHog host path must not contain dot segments")
     if any(
-        not re.fullmatch(r"[A-Za-z0-9._~-]+", seg)
+        not re.fullmatch(r"[A-Za-z0-9._-]+", seg)
         for seg in clean_segments
     ):
         raise AnalyticsConfigError("PostHog host path contains unsafe characters")

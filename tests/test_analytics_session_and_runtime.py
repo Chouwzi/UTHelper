@@ -470,7 +470,12 @@ def test_account_switch_rotates_distinct_id_and_opt_out_and_close_are_nonblockin
     assert final_evs[-1].properties["end_reason"] == "app_exit"
 
 
-def test_create_default_analytics_runtime_dev_env_and_schema_v3_assets(tmp_path: Path):
+def test_create_default_analytics_runtime_dev_env_and_schema_v3_assets(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import analytics.runtime as runtime_mod
+
     assets = tmp_path / "assets"
     assets.mkdir()
     (assets / "diagnostics-config.json").write_text(
@@ -517,6 +522,19 @@ def test_create_default_analytics_runtime_dev_env_and_schema_v3_assets(tmp_path:
     assert rt_dev.config.host == "https://us.i.posthog.com"
     rt_dev.close()
 
+    # Dev env override with UTH_POSTHOG_HOST only combines with posthog_project_api_key from asset!
+    rt_dev_host_override = create_default_analytics_runtime(
+        tmp_path / "dev_host_override",
+        development=True,
+        consent="enabled",
+        environ={"UTH_POSTHOG_HOST": "https://127.0.0.1:8443/ingest/"},
+        assets_dir=assets,
+    )
+    assert rt_dev_host_override.config.configured is True
+    assert rt_dev_host_override.config.api_key == VALID_KEY
+    assert rt_dev_host_override.config.host == "https://127.0.0.1:8443/ingest"
+    rt_dev_host_override.close()
+
     # UTH_TEST_MODE=1 suppresses active_eligible automatically
     rt_test = create_default_analytics_runtime(
         tmp_path / "test_data",
@@ -527,3 +545,26 @@ def test_create_default_analytics_runtime_dev_env_and_schema_v3_assets(tmp_path:
     )
     assert rt_test.config.active_eligible is False
     rt_test.close()
+
+    # Pre-loaded args from main.py (even None on unconfigured builds) skip ALL cold-boot asset reads!
+    def _fail_disk_read(*_a, **_kw):
+        raise AssertionError("unexpected cold-boot asset disk read")
+
+    monkeypatch.setattr(runtime_mod, "_read_small_json_asset", _fail_disk_read)
+    monkeypatch.setattr(runtime_mod, "_resolve_default_app_version", _fail_disk_read)
+
+    rt_preloaded = create_default_analytics_runtime(
+        tmp_path / "preloaded_unconf",
+        development=False,
+        api_key=None,
+        host=None,
+        app_version="2.7.0",
+        release_channel="release",
+        distribution_channel="exe_lts",
+        package_format="exe",
+        consent="enabled",
+        environ={},
+        assets_dir=assets,
+    )
+    assert rt_preloaded.config.configured is False
+    rt_preloaded.close()
