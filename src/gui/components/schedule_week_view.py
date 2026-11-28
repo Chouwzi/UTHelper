@@ -1815,29 +1815,17 @@ class ScheduleWeekView(ft.Container):
                     color=C.ACCENT,
                 ),
             ]
-            if session.cancelled:
-                time_header_controls.append(
-                    ft.Container(
-                        content=ft.Text(
-                            "Tạm ngưng",
-                            size=9.5,
-                            weight=ft.FontWeight.W_600,
-                            color=C.CRITICAL,
-                        ),
-                        bgcolor=ft.Colors.with_opacity(0.12, C.CRITICAL),
-                        border_radius=999,
-                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
-                    )
-                )
             time_header = ft.Row(
                 time_header_controls,
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=4,
+                wrap=True,
+                run_spacing=0,
             )
             summary = ft.Column(
                 [time_header, title, class_label, room_label],
-                spacing=3,
+                spacing=2,
                 tight=True,
             )
 
@@ -1851,21 +1839,64 @@ class ScheduleWeekView(ft.Container):
                 item, return_focus=details_button
             ),
         )
+        card_content: ft.Control = ft.Column(
+            [summary, details_button],
+            alignment=(
+                ft.MainAxisAlignment.START
+                if narrow
+                else ft.MainAxisAlignment.SPACE_BETWEEN
+            ),
+            spacing=4,
+        )
+        note_text = session.note.casefold()
+        is_makeup_session = not session.cancelled and "học bù" in note_text
+        if session.cancelled or is_makeup_session:
+            status_label, status_color = (
+                ("Tạm ngưng", C.CRITICAL)
+                if session.cancelled
+                else ("Học bù", C.MAKEUP_TEXT)
+            )
+            status_watermark = ft.Container(
+                content=ft.Text(
+                    status_label,
+                    size=18 if is_makeup_session else 16,
+                    weight=ft.FontWeight.W_800,
+                    color=ft.Colors.with_opacity(0.70, status_color),
+                    text_align=ft.TextAlign.CENTER,
+                    no_wrap=True,
+                ),
+                width=148 if is_makeup_session else 120,
+                height=24,
+                alignment=ft.Alignment.CENTER,
+                rotate=ft.Rotate(
+                    angle=-0.785,
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ignore_interactions=True,
+            )
+            card_content = ft.Stack(
+                controls=[
+                    status_watermark,
+                    card_content,
+                ],
+                alignment=ft.Alignment.CENTER,
+                fit=ft.StackFit.LOOSE if narrow else ft.StackFit.EXPAND,
+                clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            )
         return ft.Container(
             height=None if narrow else 172,
-            content=ft.Column(
-                [summary, details_button],
-                alignment=(
-                    ft.MainAxisAlignment.START
-                    if narrow
-                    else ft.MainAxisAlignment.SPACE_BETWEEN
-                ),
-                spacing=4,
-            ),
+            content=card_content,
             padding=ft.Padding.all(8 if not narrow else 10),
-            bgcolor=C.SURFACE,
+            bgcolor=(
+                ft.Colors.with_opacity(0.16, C.CRITICAL)
+                if session.cancelled
+                else ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
+                if is_makeup_session
+                else C.SURFACE
+            ),
             border=ft.Border.all(1, C.BORDER),
             border_radius=8,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
 
     def _show_session_details(

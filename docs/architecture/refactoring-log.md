@@ -2780,3 +2780,15 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
   - `ruff check src tests`: **All checks passed!**.
   - Targeted & integration suites (`test_grade_overview_view.py`, `test_courses_app_integration.py`, `test_academic_radar_*.py`, `test_theme_propagation.py`, `test_architecture_boundaries.py`, `test_repository_governance.py`): **All passed** (including live Flet `Session` + `msgpack` wire-level planner input test).
 
+## PR #153 Calendar Suspended & Makeup Labels, Tab Today Reset & Differential-Review Fixes (2026-11-28)
+
+- **Branch & Scope**: `codex/fix-schedule-suspended-label-overflow` — `src/gui/components/{calendar_view,schedule_week_view}.py`, `src/gui/core/{theme,theme_presets}.py`, `tests/{test_calendar_week_view,test_schedule_week_view,test_theme_accessibility}.py`, `docs/architecture/refactoring-log.md`.
+- **Changes**:
+  - **Diagonal `"Tạm ngưng"` / `"Học bù"` Watermarks & Compact `"Học bù"` Chip**: Replaced cramped inline suspended pills in `ScheduleWeekView._session_summary_card` with centered diagonal watermarks (`ignore_interactions=True`) and subtle card tints (`0.16` `CRITICAL` / `0.25` `MAKEUP_BG`), added a `"Học bù"` chip in `CalendarView._make_compact_session_row`, and switched narrow `<920px` cards (`height=None` inside scrollable `Column`) to `ft.StackFit.LOOSE` so Flutter `RenderStack` never forces infinite height.
+  - **WCAG AA Theme-Aware `MAKEUP_BG` & `MAKEUP_TEXT` Tokens**: Added mode-appropriate makeup palette tokens (`#FDE68A` / `#854D0E` on light presets `steel_light` and `rose_light`; `#CA8A04` / `#FEF08A` on dark presets) and wired `apply_theme()` so all 9 themes meet `>= 4.5:1` contrast and live theme switching remaps mounted controls via `refresh_semantic_control_colors()`.
+  - **Reset Calendar Tabs to Today (`_toggle_view_mode`)**: Selecting `Tuần`, `Tháng`, or `Lịch học` (including clicking the already-active tab) resets `CalendarView` date/week/month anchors and `_detail_filter_mode` (`"day"`), clears in-flight period swipe state when entering `"schedule"`, and anchors `ScheduleWeekView` to `date.today()`.
+- **Verification**:
+  - `ruff check src tests`: **All checks passed!**.
+  - Full `pytest tests -q --tb=short` + calendar/schedule/theme regression suites: **All passed**.
+
+

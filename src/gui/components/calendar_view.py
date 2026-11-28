@@ -2093,11 +2093,22 @@ class CalendarView(ft.Container):
 
     def _toggle_view_mode(self, mode: str):
         """Switch between month, week, and schedule view."""
-        if self._view_mode == mode:
-            return
+        today = date.today()
+        self._year = today.year
+        self._month = today.month
+        self._selected_day = today.day
+        self._selected_date = today
+        self._week_start = today - timedelta(days=today.weekday())
+        self._detail_filter_mode = "day"
+
         previous_mode = self._view_mode
         self._view_mode = mode
         if mode == "schedule":
+            self._period_transition_active = False
+            self._period_request_active = False
+            self._pager_recentering = False
+            self._pending_desktop_delta = None
+            self._pending_desktop_control = None
             self._enter_schedule_mode()
             return
         if previous_mode == "schedule":
@@ -2345,6 +2356,20 @@ class CalendarView(ft.Container):
                         color=C.CRITICAL,
                     ),
                     bgcolor=ft.Colors.with_opacity(0.12, C.CRITICAL),
+                    border_radius=5,
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
+                )
+            )
+        elif "học bù" in session.note.casefold():
+            meta_controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        "Học bù",
+                        size=9.5,
+                        weight=ft.FontWeight.W_700,
+                        color=C.MAKEUP_TEXT,
+                    ),
+                    bgcolor=ft.Colors.with_opacity(0.25, C.MAKEUP_BG),
                     border_radius=5,
                     padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
                 )

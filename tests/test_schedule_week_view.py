@@ -24,6 +24,7 @@ def _session(
     course_code: str = "ECE-ENGR-302-2026",
     room: str = "Phòng thực hành Cơ điện tử 03",
     cancelled: bool = False,
+    note: str | None = None,
 ) -> ClassSession:
     return ClassSession(
         session_id=f"session-{day.isoformat()}-{start.isoformat()}",
@@ -36,7 +37,7 @@ def _session(
         period_start=1,
         period_end=3,
         cancelled=cancelled,
-        note="Phòng thực hành tầng 3" if cancelled else "",
+        note=("Phòng thực hành tầng 3" if cancelled else "") if note is None else note,
         link="https://portal.invalid/course",
         meeting_url="https://zoom.invalid/class",
         subject_code="CS-301",
@@ -854,13 +855,30 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     assert card_long.height == 172
     assert card_narrow.height is None
     assert card_short.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
-    assert card_long.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    assert card_short.bgcolor == C.SURFACE
+    assert card_long.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
 
-    summary_col = card_long.content.controls[0]
+    assert isinstance(card_long.content, ft.Stack)
+    watermark = card_long.content.controls[0]
+    card_body = card_long.content.controls[1]
+    assert watermark.width == 120
+    assert watermark.height == 24
+    assert watermark.left is None
+    assert watermark.top is None
+    assert watermark.bgcolor is None
+    assert watermark.rotate.angle == -0.785
+    assert "Tạm ngưng" in _text_values(watermark)
+    watermark_text = watermark.content
+    assert watermark_text.size == 16
+    assert watermark_text.weight == ft.FontWeight.W_800
+    assert watermark_text.color == ft.Colors.with_opacity(0.70, C.CRITICAL)
+
+    assert card_body.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    summary_col = card_body.controls[0]
     top_row = summary_col.controls[0]
     assert isinstance(top_row, ft.Row)
     assert "07:00 – 09:30" in _text_values(top_row)
-    assert "Tạm ngưng" in _text_values(top_row)
+    assert "Tạm ngưng" not in _text_values(top_row)
 
     title_txt, class_txt, room_txt = (
         summary_col.controls[1],
@@ -1171,6 +1189,61 @@ def test_month_date_picker_today_button_and_escape_key():
     # Also verify defensive focus guard when a non-focusable Container is passed to return_focus
     view._show_month_date_picker(return_focus=ft.Container())
     asyncio.run(dialogs[-1].on_dismiss(None))
+
+
+def test_session_summary_card_uses_loose_stack_fit_when_narrow_and_renders_makeup_watermark():
+    view = _view(760)
+    s_cancelled = _session(
+        TODAY,
+        subject="Lập trình mạng",
+        room="A201",
+        cancelled=True,
+        note="GV bận công tác",
+    )
+    s_makeup = _session(
+        TODAY,
+        subject="Trí tuệ nhân tạo",
+        room="B304",
+        cancelled=False,
+        note="Học bù buổi nghỉ lễ",
+    )
+    s_both = _session(
+        TODAY,
+        subject="An toàn thông tin",
+        room="C102",
+        cancelled=True,
+        note="Tạm ngưng buổi học bù",
+    )
+
+    narrow_cancelled = view._session_summary_card(s_cancelled, narrow=True)
+    narrow_makeup = view._session_summary_card(s_makeup, narrow=True)
+    wide_makeup = view._session_summary_card(s_makeup, narrow=False)
+    wide_both = view._session_summary_card(s_both, narrow=False)
+
+    assert narrow_cancelled.height is None
+    assert isinstance(narrow_cancelled.content, ft.Stack)
+    assert narrow_cancelled.content.fit == ft.StackFit.LOOSE
+
+    assert narrow_makeup.height is None
+    assert isinstance(narrow_makeup.content, ft.Stack)
+    assert narrow_makeup.content.fit == ft.StackFit.LOOSE
+
+    assert wide_makeup.height == 172
+    assert wide_makeup.bgcolor == ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
+    assert isinstance(wide_makeup.content, ft.Stack)
+    assert wide_makeup.content.fit == ft.StackFit.EXPAND
+    makeup_wm = wide_makeup.content.controls[0]
+    assert makeup_wm.width == 148
+    assert makeup_wm.height == 24
+    assert makeup_wm.ignore_interactions is True
+    assert makeup_wm.content.value == "Học bù"
+    assert makeup_wm.content.size == 18
+    assert makeup_wm.content.color == ft.Colors.with_opacity(0.70, C.MAKEUP_TEXT)
+
+    # Cancelled takes precedence over makeup note
+    assert wide_both.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
+    assert wide_both.content.controls[0].content.value == "Tạm ngưng"
+
 
 
 
