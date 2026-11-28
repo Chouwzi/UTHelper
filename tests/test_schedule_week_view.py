@@ -860,13 +860,15 @@ def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_le
     assert isinstance(card_long.content, ft.Stack)
     card_body = card_long.content.controls[0]
     watermark = card_long.content.controls[1]
-    assert watermark.width == 132
+    assert watermark.width == 96
     assert watermark.height == 22
+    assert watermark.left == -19
+    assert watermark.top == 26
     assert watermark.bgcolor == ft.Colors.with_opacity(0.72, C.CRITICAL)
     assert watermark.rotate.angle == -0.785
     assert "Tạm ngưng" in _text_values(watermark)
     watermark_text = watermark.content
-    assert watermark_text.size == 12
+    assert watermark_text.size == 11
     assert watermark_text.color == ft.Colors.with_opacity(0.90, C.ON_CRITICAL)
 
     assert card_body.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
