@@ -2011,7 +2011,41 @@ def test_verdict_m06_academic_grades_sync_classification_and_triggers(
     assert len(s4) == 1
     assert (s4[0]["trigger"], s4[0]["outcome"]) == ("manual", "auth_error")
 
-    # 5. Empty / logged-out load -> "empty" -> 0 telemetry events
+    # 5. Portal RuntimeError + no cache + userid=None -> last_load_source == "failed" -> outcome == "failed"
+    cache_file.unlink(missing_ok=True)
+    portal_mock.fetch_full_transcript.side_effect = RuntimeError("portal 502")
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "failed"
+    s5 = _grade_syncs()
+    assert len(s5) == 1
+    assert (
+        s5[0]["trigger"],
+        s5[0]["outcome"],
+        s5[0]["item_count_bucket"],
+    ) == ("foreground_poll", "failed", "0")
+
+    # 6. Portal [] ("live_empty") + live Moodle fetch_all_grades (userid=42) -> outcome == "succeeded", item_count > 0
+    portal_mock.fetch_full_transcript.side_effect = None
+    portal_mock.fetch_full_transcript.return_value = []
+    ctrl.orchestrator._get_userid = lambda: 42
+    ctrl.orchestrator.moodle_service.fetch_all_grades = lambda _uid: (
+        [
+            {"courseid": 101, "coursename": "Hệ điều hành", "shortname": "OS101", "grade": "8.5"},
+            {"courseid": 102, "coursename": "Mạng máy tính", "shortname": "NET102", "grade": "9.0"},
+        ],
+        {},
+    )
+    asyncio.run(ctrl._show_grades(force_refresh=False))
+    assert svc.last_load_source == "live_empty"
+    s6 = _grade_syncs()
+    assert len(s6) == 1
+    assert (
+        s6[0]["trigger"],
+        s6[0]["outcome"],
+        s6[0]["item_count_bucket"],
+    ) == ("foreground_poll", "succeeded", "1_10")
+
+    # 7. Empty / logged-out load -> "empty" -> 0 telemetry events
     monkeypatch.setattr(settings, "UTH_USERNAME", "")
     monkeypatch.setattr(settings, "UTH_PASSWORD", "")
     asyncio.run(ctrl._show_grades(force_refresh=False))

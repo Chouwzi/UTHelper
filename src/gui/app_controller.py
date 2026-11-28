@@ -7191,10 +7191,15 @@ class AppController:
                     self._grades_sync_seen_in_session = True
                     telemetry_grades = getattr(self, "_telemetry", None)
                     if telemetry_grades is not None:
+                        fallback_outcome = (
+                            "succeeded"
+                            if userid or load_source == "live_empty"
+                            else "failed"
+                        )
                         telemetry_grades.record_sync_completed(
                             provider="academic_grades",
                             trigger=grades_trigger,
-                            outcome="succeeded",
+                            outcome=fallback_outcome,
                             duration_seconds=_grades_time.monotonic() - grades_mono_start,
                             item_count=fallback_count,
                         )

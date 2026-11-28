@@ -163,9 +163,11 @@ class AcademicGradeService:
             if isinstance(transcript, list) and transcript:
                 logger.info("Using cached academic transcript for today (%s)", today_str)
                 normalized_cached = self._normalizer.normalize_transcript(transcript)
-                self.last_load_source = "daily_cache" if normalized_cached else "empty"
-                return normalized_cached
+                if normalized_cached:
+                    self.last_load_source = "daily_cache"
+                    return normalized_cached
 
+        live_completed_empty = False
         try:
             logger.info("Fetching full academic transcript from Portal...")
             raw_transcript = self._portal_client.fetch_full_transcript(username, password)
@@ -174,8 +176,9 @@ class AcademicGradeService:
                 logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
                 self._write_cache(raw_transcript, username)
                 normalized_live = self._normalizer.normalize_transcript(raw_transcript)
-                self.last_load_source = "live" if normalized_live else "empty"
+                self.last_load_source = "live" if normalized_live else "live_empty"
                 return normalized_live
+            live_completed_empty = True
         except UthMaintenanceError as exc:
             self.last_maintenance_notice = exc.notice
             logger.info(
@@ -183,7 +186,7 @@ class AcademicGradeService:
             )
             if cache and isinstance(cache.get("transcript"), list):
                 normalized_maint = self._normalizer.normalize_transcript(cache["transcript"])
-                self.last_load_source = "stale_cache" if normalized_maint else "empty"
+                self.last_load_source = "stale_cache" if normalized_maint else "failed"
                 return normalized_maint
             raise
         except PortalAuthenticationError:
@@ -193,13 +196,14 @@ class AcademicGradeService:
             logger.warning("Portal academic fetch failed: %s; checking stale cache", exc)
 
         # Fallback to stale cache if network failed
-        if cache and isinstance(cache.get("transcript"), list):
+        if not live_completed_empty and cache and isinstance(cache.get("transcript"), list):
             logger.info("Falling back to stale academic transcript cache")
             normalized_stale = self._normalizer.normalize_transcript(cache["transcript"])
-            self.last_load_source = "stale_cache" if normalized_stale else "empty"
-            return normalized_stale
+            if normalized_stale:
+                self.last_load_source = "stale_cache"
+                return normalized_stale
 
-        self.last_load_source = "empty"
+        self.last_load_source = "live_empty" if live_completed_empty else "failed"
         return []
 
     def load_credit_progress(
