@@ -81,10 +81,12 @@ class AcademicGradeService:
         self._cache_dir = cache_dir or get_data_dir()
         self._normalizer = normalizer or SemesterNormalizer()
         self.last_maintenance_notice: MaintenanceNotice | None = None
+        self.last_load_source: str = "empty"
 
     def clear_session(self) -> None:
         """Clear cached Portal authentication token/session on account switch or logout."""
         self.last_maintenance_notice = None
+        self.last_load_source = "empty"
         clear_token = getattr(self._portal_client, "clear_token", None)
         if callable(clear_token):
             clear_token()
@@ -135,12 +137,14 @@ class AcademicGradeService:
 
         Uses daily cache if available (fetched once per day) unless force_refresh is True.
         """
+        self.last_load_source = "empty"
         username, password = _resolve_credentials(username, password)
 
         if is_demo_account(username):
             raw_transcript = self._portal_client.fetch_full_transcript(
                 username, password
             )
+            self.last_load_source = "demo"
             return (
                 self._normalizer.normalize_transcript(raw_transcript)
                 if raw_transcript
@@ -148,6 +152,7 @@ class AcademicGradeService:
             )
 
         if not username or not password:
+            self.last_load_source = "empty"
             return []
 
         today_str = date.today().isoformat()
@@ -157,7 +162,9 @@ class AcademicGradeService:
             transcript = cache.get("transcript")
             if isinstance(transcript, list) and transcript:
                 logger.info("Using cached academic transcript for today (%s)", today_str)
-                return self._normalizer.normalize_transcript(transcript)
+                normalized_cached = self._normalizer.normalize_transcript(transcript)
+                self.last_load_source = "daily_cache" if normalized_cached else "empty"
+                return normalized_cached
 
         try:
             logger.info("Fetching full academic transcript from Portal...")
@@ -166,14 +173,18 @@ class AcademicGradeService:
             if raw_transcript:
                 logger.info("Successfully fetched %d semesters from Portal", len(raw_transcript))
                 self._write_cache(raw_transcript, username)
-                return self._normalizer.normalize_transcript(raw_transcript)
+                normalized_live = self._normalizer.normalize_transcript(raw_transcript)
+                self.last_load_source = "live" if normalized_live else "empty"
+                return normalized_live
         except UthMaintenanceError as exc:
             self.last_maintenance_notice = exc.notice
             logger.info(
                 "Portal academic transcript unavailable due to UTH maintenance; checking cached transcript"
             )
             if cache and isinstance(cache.get("transcript"), list):
-                return self._normalizer.normalize_transcript(cache["transcript"])
+                normalized_maint = self._normalizer.normalize_transcript(cache["transcript"])
+                self.last_load_source = "stale_cache" if normalized_maint else "empty"
+                return normalized_maint
             raise
         except PortalAuthenticationError:
             self.clear_session()
@@ -184,8 +195,11 @@ class AcademicGradeService:
         # Fallback to stale cache if network failed
         if cache and isinstance(cache.get("transcript"), list):
             logger.info("Falling back to stale academic transcript cache")
-            return self._normalizer.normalize_transcript(cache["transcript"])
+            normalized_stale = self._normalizer.normalize_transcript(cache["transcript"])
+            self.last_load_source = "stale_cache" if normalized_stale else "empty"
+            return normalized_stale
 
+        self.last_load_source = "empty"
         return []
 
     def load_credit_progress(

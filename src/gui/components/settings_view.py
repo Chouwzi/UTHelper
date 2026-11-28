@@ -3632,9 +3632,10 @@ class SettingsView(ft.Container):
                 self._page.window.always_on_top = persisted.always_on_top
             self.update()
 
-            await SettingsView._notify_analytics_consent_async(
-                self, persisted.analytics_consent
-            )
+            if persisted.analytics_consent != baseline.analytics_consent:
+                await SettingsView._notify_analytics_consent_async(
+                    self, persisted.analytics_consent
+                )
             if self._on_saved:
                 self._on_saved()
             return autostart_ok

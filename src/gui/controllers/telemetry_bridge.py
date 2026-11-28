@@ -85,6 +85,15 @@ class TelemetryBridge:
         self._today_schedule_started_mono: float | None = None
         self._today_schedule_manual: bool = False
         self._today_schedule_seen_ready: bool = False
+        self._courses_state_holders: list[dict[str, Any]] = []
+
+    def _reset_sync_trigger_state(self) -> None:
+        self._today_schedule_started_mono = None
+        self._today_schedule_manual = False
+        self._today_schedule_seen_ready = False
+        for holder in self._courses_state_holders:
+            holder["next_trigger"] = "startup_fg"
+            holder["seen_completed"] = False
 
     @property
     def runtime(self) -> AnalyticsRuntime | None:
@@ -113,16 +122,11 @@ class TelemetryBridge:
     # ── Consent, Local Reset & Account State ──
 
     def _sync_tracker_consent(self) -> bool:
-        """Keep tracker consent aligned with consent_gate; return True iff enabled."""
+        """Return True iff runtime analytics consent is currently enabled."""
         rt = self._runtime
         if rt is None:
             return False
-        current = rt.current_consent
-        if rt.tracker.consent is not current:
-            events = rt.tracker.set_consent(current)
-            if events:
-                rt._enqueue_ram_events(events, urgent_spool=True)
-        return current is AnalyticsConsent.ENABLED
+        return rt.current_consent is AnalyticsConsent.ENABLED
 
     def apply_consent(self, consent: str) -> None:
         """Apply live user analytics consent choice (``enabled`` | ``disabled``)."""
@@ -130,8 +134,13 @@ class TelemetryBridge:
         if rt is None:
             return
         try:
-            rt.set_consent(consent)
-            self._sync_tracker_consent()
+            selected = AnalyticsConsent(consent)
+        except (TypeError, ValueError):
+            return
+        try:
+            if rt.current_consent is selected and rt.tracker.consent is selected:
+                return
+            rt.set_consent(selected)
         except Exception:
             logger.debug("TelemetryBridge.apply_consent suppressed error", exc_info=True)
 
@@ -151,15 +160,31 @@ class TelemetryBridge:
         username: str | None,
         has_credentials: bool,
         account_changed: bool = False,
+        start_session: bool = True,
     ) -> None:
         """Synchronize authenticated non-demo eligibility and account rotation."""
         rt = self._runtime
+        clean_user = str(username or "").strip()
+        demo = bool(clean_user and is_demo_account(clean_user))
+        authenticated = bool(clean_user and has_credentials and not demo)
+        if account_changed or not authenticated:
+            self._reset_sync_trigger_state()
         if rt is None:
             return
         try:
-            clean_user = str(username or "").strip()
-            demo = bool(clean_user and is_demo_account(clean_user))
-            authenticated = bool(clean_user and has_credentials and not demo)
+            if (
+                not start_session
+                and authenticated
+                and not demo
+                and not account_changed
+            ):
+                if not rt.tracker.authenticated_non_demo:
+                    rt.tracker.set_account_state(
+                        authenticated=True,
+                        is_demo=False,
+                        account_changed=False,
+                    )
+                return
             rt.set_account_state(
                 authenticated=authenticated,
                 is_demo=demo,
@@ -695,7 +720,21 @@ class TelemetryBridge:
         """Observe filter & catalog sync events on ``CoursesTabView`` non-invasively."""
         if courses_view is None:
             return
-        state_holder = {"next_trigger": "startup_fg"}
+        state_holder: dict[str, Any] = {
+            "next_trigger": "startup_fg",
+            "seen_completed": False,
+        }
+        self._courses_state_holders.append(state_holder)
+
+        orig_reset = getattr(courses_view, "reset_for_account_switch", None)
+        if callable(orig_reset):
+
+            def _wrapped_reset(*args: Any, **kwargs: Any) -> Any:
+                state_holder["next_trigger"] = "startup_fg"
+                state_holder["seen_completed"] = False
+                return orig_reset(*args, **kwargs)
+
+            courses_view.reset_for_account_switch = _wrapped_reset
 
         orig_filter = getattr(courses_view, "_handle_filter_change", None)
         if callable(orig_filter):
@@ -729,17 +768,48 @@ class TelemetryBridge:
 
             courses_view.refresh = _wrapped_refresh
             list_pane = getattr(courses_view, "_list_pane", None)
-            if list_pane is not None and hasattr(list_pane, "_on_refresh"):
-                list_pane._on_refresh = _wrapped_refresh
+            if list_pane is not None:
+                if hasattr(list_pane, "_on_refresh_catalog"):
+                    list_pane._on_refresh_catalog = _wrapped_refresh
+                elif hasattr(list_pane, "_on_refresh"):
+                    list_pane._on_refresh = _wrapped_refresh
 
         orig_refresh_async = getattr(courses_view, "refresh_catalog_async", None)
         if callable(orig_refresh_async):
+            uses_native_seq = (
+                getattr(orig_refresh_async, "__func__", None)
+                is getattr(type(courses_view), "refresh_catalog_async", None)
+            )
 
             async def _wrapped_refresh_async(*args: Any, **kwargs: Any) -> Any:
-                trigger = state_holder["next_trigger"]
-                state_holder["next_trigger"] = "foreground_poll"
+                if getattr(courses_view, "_svc", None) is None:
+                    state_holder["next_trigger"] = (
+                        "foreground_poll"
+                        if state_holder["seen_completed"]
+                        else "startup_fg"
+                    )
+                    return await orig_refresh_async(*args, **kwargs)
+                trigger = str(state_holder["next_trigger"])
+                state_holder["next_trigger"] = (
+                    "foreground_poll"
+                    if state_holder["seen_completed"]
+                    else "startup_fg"
+                )
+                seq_before = getattr(courses_view, "_catalog_request_seq", None)
                 t0 = self._monotonic()
                 res = await orig_refresh_async(*args, **kwargs)
+                seq_after = getattr(courses_view, "_catalog_request_seq", None)
+                if seq_before is not None and seq_after is not None:
+                    expected_seq = (
+                        seq_before + 1 if uses_native_seq else seq_before
+                    )
+                    if seq_after != expected_seq:
+                        return res
+                if getattr(courses_view, "_svc", None) is None:
+                    return res
+                state_holder["seen_completed"] = True
+                if state_holder["next_trigger"] == "startup_fg":
+                    state_holder["next_trigger"] = "foreground_poll"
                 elapsed = max(0.0, self._monotonic() - t0)
                 st = getattr(courses_view, "_state", None)
                 courses = list(getattr(st, "courses", ()) or ())
