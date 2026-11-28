@@ -2349,6 +2349,20 @@ class CalendarView(ft.Container):
                     padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
                 )
             )
+        elif "học bù" in session.note.casefold():
+            meta_controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        "Học bù",
+                        size=9.5,
+                        weight=ft.FontWeight.W_600,
+                        color="#FDC12A",
+                    ),
+                    bgcolor=ft.Colors.with_opacity(0.25, "#FCF4A3"),
+                    border_radius=5,
+                    padding=ft.Padding.symmetric(horizontal=6, vertical=1.5),
+                )
+            )
 
         time_col = ft.Container(
             width=44,
