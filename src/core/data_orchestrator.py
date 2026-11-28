@@ -8,11 +8,15 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlsplit
 from core.client import MoodleClient
 from core.activity_status import (
+    COMPLETED_SUBMISSION_STATUSES,
+    extract_canonical_submission_status,
     normalize_submission_status,
     prefer_known_submission_status,
+    resolve_moodle_assign_submission_status,
 )
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.grade_monitor import GradeMonitor
+from core.maintenance import MaintenanceNotice, UthMaintenanceError
 from core.moodle_service import MoodleService
 from config import settings
 from models import Assignment
@@ -388,6 +392,11 @@ class DataOrchestrator:
             logger.warning("Smart poll failed, falling back to full fetch: %s", e)
             return None
 
+    @staticmethod
+    def _client_maintenance_notice(client_obj: Any) -> Optional[MaintenanceNotice]:
+        notice = getattr(client_obj, "last_maintenance_notice", None)
+        return notice if isinstance(notice, MaintenanceNotice) else None
+
     def login(self) -> bool:
         """Đăng nhập bằng WS token (stateless, không kick browser)."""
         self._sync_account_scope()
@@ -404,6 +413,10 @@ class DataOrchestrator:
         self.is_logged_in = self.client.login()
         if self.is_logged_in:
             logger.info("Đăng nhập WS token thành công.")
+            return True
+        maint_notice = self._client_maintenance_notice(self.client)
+        if maint_notice is not None:
+            raise UthMaintenanceError(maint_notice)
         return self.is_logged_in
 
     def get_latest_activities(self) -> List[Dict[str, Any]]:
@@ -427,6 +440,10 @@ class DataOrchestrator:
         with self._course_grades_lock:
             start_gen = self._course_grades_generation
         courses = fetch_current_courses_with_grades(self)
+        if not courses:
+            maint_notice = self._client_maintenance_notice(self.client)
+            if maint_notice is not None:
+                raise UthMaintenanceError(maint_notice)
         with self._course_grades_lock:
             if self._course_grades_generation != start_gen:
                 return [], []
@@ -503,12 +520,14 @@ class DataOrchestrator:
 
 
     def _thnn_login_was_deferred(self) -> bool:
+        if self._client_maintenance_notice(self.thnn_client) is not None:
+            return True
         login_err = str(
             getattr(self.thnn_client, "last_login_error", "")
             or getattr(self.thnn_client, "_last_login_error", "")
             or ""
         )
-        return login_err == "quiz_session_active"
+        return login_err in {"quiz_session_active", "maintenance"}
 
     def _fetch_thnn_activities(self, now_ts: int) -> List[Dict[str, Any]]:
         self._sync_account_scope()
@@ -733,6 +752,9 @@ class DataOrchestrator:
             # Tối ưu PERF: Bước 1 - Lấy userid (cần thiết cho danh sách môn học)
             userid = self._get_userid()
             if userid is None:
+                maint_notice = self._client_maintenance_notice(self.client)
+                if maint_notice is not None:
+                    raise UthMaintenanceError(maint_notice)
                 logger.warning("Không xác định được Moodle user id; snapshot không đầy đủ.")
                 return None
             
@@ -784,6 +806,9 @@ class DataOrchestrator:
             )
 
             if not isinstance(calendar_result, dict) or not isinstance(courses_result, list):
+                maint_notice = self._client_maintenance_notice(self.client)
+                if maint_notice is not None:
+                    raise UthMaintenanceError(maint_notice)
                 logger.warning("Moodle trả snapshot calendar/course không đầy đủ.")
                 return None
             
@@ -872,7 +897,12 @@ class DataOrchestrator:
                         continue
                     if not quiz_item.get("catalog_only"):
                         results.append(quiz_item)
+            except UthMaintenanceError:
+                raise
             except Exception as e:
+                maint_notice = self._client_maintenance_notice(self.client)
+                if maint_notice is not None:
+                    raise UthMaintenanceError(maint_notice) from e
                 logger.warning("Merge activities failed; snapshot is partial: %s", e)
                 return None
             
@@ -884,7 +914,12 @@ class DataOrchestrator:
             self.is_logged_in = True  # Token Web Service hoạt động = đã xác thực thành công
             self._last_fetch_ts = int(datetime.now().timestamp())  # Cơ chế Smart poll: Đánh dấu thời gian lần tải cuối
             return results
+        except UthMaintenanceError:
+            raise
         except Exception as e:
+            maint_notice = self._client_maintenance_notice(self.client)
+            if maint_notice is not None:
+                raise UthMaintenanceError(maint_notice) from e
             logger.warning("WS API fetch thất bại: %s", e)
             return None
 
@@ -1017,6 +1052,8 @@ class DataOrchestrator:
             import asyncio
             result = await asyncio.to_thread(self._fetch_via_ws_api)
             return result
+        except UthMaintenanceError:
+            raise
         except Exception as e:
             logger.warning("WS API async fetch thất bại: %s", e)
             return None
@@ -1184,6 +1221,8 @@ class DataOrchestrator:
         self._sync_account_scope()
         try:
             ws_result = await self._fetch_via_ws_api_async()
+        except UthMaintenanceError:
+            raise
         except Exception as exc:
             return FetchOutcome.failed(str(exc))
         if ws_result is None:
@@ -1216,15 +1255,28 @@ class DataOrchestrator:
         )
         if cached_status_data or current_status_data:
             details["status_data"] = {
-                **cached_status_data,
                 **current_status_data,
+                **cached_status_data,
             }
 
-        status = prefer_known_submission_status(
-            activity_data.get("submission_status"),
-            cached.get("submission_status"),
-        )
+        incoming_status = extract_canonical_submission_status(activity_data)
+        cached_status = extract_canonical_submission_status(cached)
+        if "graded" in {incoming_status, cached_status}:
+            status = "graded"
+        elif "submitted" in {incoming_status, cached_status}:
+            status = "submitted"
+        else:
+            status = prefer_known_submission_status(
+                cached_status,
+                incoming_status,
+            )
         result["submission_status"] = status
+        if status in COMPLETED_SUBMISSION_STATUSES and isinstance(
+            details.get("status_data"), dict
+        ):
+            cur_sub_label = details["status_data"].get("Trạng thái nộp bài")
+            if normalize_submission_status(cur_sub_label) == "not_submitted":
+                details["status_data"]["Trạng thái nộp bài"] = status
         if result.get("type") == "quiz" and status != "unknown":
             details["quiz_attempt_status"] = status
         result["details"] = details
@@ -1410,18 +1462,47 @@ class DataOrchestrator:
         # Cập nhật submission_status ở top level nếu có
         status_data = ws_details.get('status_data', {})
         quiz_attempt_status = ws_details.get('quiz_attempt_status')
+        ws_canonical = ws_details.get('submission_status')
         if activity_type == 'quiz' and quiz_attempt_status:
             result['submission_status'] = normalize_submission_status(quiz_attempt_status)
-        elif 'Trạng thái nộp bài' in status_data:
-            result['submission_status'] = normalize_submission_status(
-                status_data['Trạng thái nộp bài']
+        elif ws_canonical and normalize_submission_status(ws_canonical) != 'unknown':
+            result['submission_status'] = normalize_submission_status(ws_canonical)
+        else:
+            extracted_ws_status = extract_canonical_submission_status(
+                {"details": ws_details}
             )
-        elif 'Trạng thái' in status_data:
-            result['submission_status'] = normalize_submission_status(
-                status_data['Trạng thái']
-            )
-        
+            if extracted_ws_status != 'unknown':
+                result['submission_status'] = extracted_ws_status
+            elif 'Trạng thái nộp bài' in status_data:
+                result['submission_status'] = normalize_submission_status(
+                    status_data['Trạng thái nộp bài']
+                )
+            elif 'Trạng thái' in status_data:
+                result['submission_status'] = normalize_submission_status(
+                    status_data['Trạng thái']
+                )
+
         return result
+
+    @staticmethod
+    def _extract_cmid_from_activity(activity_data: Dict[str, Any]) -> Optional[int]:
+        raw_cmid = activity_data.get("cmid")
+        if raw_cmid is not None and not isinstance(raw_cmid, bool):
+            try:
+                parsed = int(raw_cmid)
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+        url = str(activity_data.get("url") or "")
+        if "id=" in url:
+            try:
+                parsed = int(url.split("id=")[-1].split("&")[0])
+                if parsed > 0:
+                    return parsed
+            except (ValueError, IndexError):
+                pass
+        return None
 
     def _fetch_one_activity_status(
         self, activity_data: Dict[str, Any]
@@ -1433,17 +1514,41 @@ class DataOrchestrator:
         if activity_type in {"assignment", "assign"}:
             assignment_id = activity_data.get("assignment_id")
             if not assignment_id:
+                cmid = self._extract_cmid_from_activity(activity_data)
+                course_id = activity_data.get("course_id")
+                resolver = getattr(
+                    self.moodle_service, "resolve_cmid_to_assign_id", None
+                )
+                if cmid and course_id and callable(resolver):
+                    try:
+                        assignment_id = resolver(int(cmid), int(course_id))
+                    except (TypeError, ValueError):
+                        assignment_id = None
+            if not assignment_id:
                 return None
             response = self.moodle_service.get_submission_status(int(assignment_id))
             if response is None:
                 return None
-            last_attempt = response.get("lastattempt", {})
-            submission = last_attempt.get("submission", {})
-            status = normalize_submission_status(submission.get("status"))
-            if status == "unknown":
-                status = normalize_submission_status(last_attempt.get("gradingstatus"))
+            status = resolve_moodle_assign_submission_status(response)
         elif activity_type == "quiz":
             quiz_id = activity_data.get("quiz_id")
+            if not quiz_id:
+                cmid = self._extract_cmid_from_activity(activity_data)
+                course_id = activity_data.get("course_id")
+                get_quizzes = getattr(
+                    self.moodle_service, "get_quizzes_by_courses", None
+                )
+                if cmid and course_id and callable(get_quizzes):
+                    try:
+                        quizzes = get_quizzes([int(course_id)]) or []
+                        for q in quizzes:
+                            if isinstance(q, dict) and int(
+                                q.get("coursemodule") or 0
+                            ) == int(cmid):
+                                quiz_id = q.get("id")
+                                break
+                    except (TypeError, ValueError):
+                        quiz_id = None
             if not quiz_id:
                 return None
             attempts = self.moodle_service.get_quiz_attempts(int(quiz_id))
@@ -1454,7 +1559,9 @@ class DataOrchestrator:
                 for attempt in attempts
                 if isinstance(attempt, dict)
             }
-            if "submitted" in states:
+            if "graded" in states:
+                status = "graded"
+            elif "submitted" in states:
                 status = "submitted"
             elif "in_progress" in states:
                 status = "in_progress"

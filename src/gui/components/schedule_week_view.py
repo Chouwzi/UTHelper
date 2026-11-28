@@ -10,11 +10,13 @@ background.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+import inspect
 import logging
 import re
 import threading
 from datetime import date, datetime, timedelta
-from typing import Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 import flet as ft
 
@@ -93,6 +95,58 @@ def _monday(day: date) -> date:
     return day - timedelta(days=day.weekday())
 
 
+_PAREN_GROUP_RE = re.compile(r"\s*\([^)]*\)")
+_UNCLOSED_PAREN_RE = re.compile(r"\s*\([^)]*$")
+_SPACED_DASH_RE = re.compile(r"\s+[-–—]\s+")
+_CO_SO_NUM_RE = re.compile(r"^cơ\s+sở\s*(\d+)$", re.IGNORECASE)
+
+
+def classify_session_shift(
+    session: ClassSession,
+) -> Literal["morning", "afternoon", "evening"]:
+    """Classify a class session into morning (<12:00), afternoon (12:00..17:29), or evening (>=17:30)."""
+    hm = (session.start_at.hour, session.start_at.minute)
+    if hm < (12, 0):
+        return "morning"
+    if hm < (17, 30):
+        return "afternoon"
+    return "evening"
+
+
+def _strip_parenthetical_address(raw: str) -> str:
+    if not raw:
+        return ""
+    cleaned = _PAREN_GROUP_RE.sub("", raw)
+    cleaned = _UNCLOSED_PAREN_RE.sub("", cleaned)
+    cleaned = _SPACED_DASH_RE.sub(" · ", cleaned)
+    return " ".join(cleaned.split()).strip(" ·-–—")
+
+
+def compact_room_badge_text(session: ClassSession) -> str:
+    """Shorten verbose Portal room/campus text for compact timeline rows."""
+    room_raw = (session.room or "").strip()
+    campus_raw = (session.campus or "").strip()
+    haystack = f"{room_raw} {campus_raw}".casefold()
+    if any(kw in haystack for kw in _ONLINE_KEYWORDS):
+        return "E-Learning"
+    cleaned_room = _strip_parenthetical_address(room_raw)
+    cleaned_campus = _strip_parenthetical_address(campus_raw)
+    if cleaned_campus:
+        match = _CO_SO_NUM_RE.match(cleaned_campus)
+        if match:
+            cleaned_campus = f"CS{match.group(1)}"
+    if cleaned_room:
+        folded_room = cleaned_room.casefold()
+        if "·" in cleaned_room or "cs" in folded_room or "cơ sở" in folded_room:
+            return cleaned_room
+        if cleaned_campus and cleaned_campus.casefold() not in folded_room:
+            return f"{cleaned_room} · {cleaned_campus}"
+        return cleaned_room
+    if cleaned_campus:
+        return cleaned_campus
+    return "Chưa cập nhật phòng"
+
+
 class ScheduleWeekView(ft.Container):
     def __init__(
         self,
@@ -101,6 +155,8 @@ class ScheduleWeekView(ft.Container):
         cache: Optional[WeekScheduleCache] = None,
         on_open_url: Optional[OpenUrlCallback] = None,
         on_open_external: Optional[OpenExternalCallback] = None,
+        on_weeks_changed: Optional[Callable[[], None]] = None,
+        on_maintenance: Optional[Callable[[Any, bool], None]] = None,
     ) -> None:
         super().__init__(expand=True, visible=False)
         self._page_ref = page
@@ -108,6 +164,8 @@ class ScheduleWeekView(ft.Container):
         self._cache = cache
         self._on_open_url = on_open_url
         self._on_open_external = on_open_external
+        self.on_weeks_changed: Callable[[], None] | None = on_weeks_changed
+        self.on_maintenance: Callable[[Any, bool], None] | None = on_maintenance
         self._cache_lock = threading.Lock()
         self._layout_width = self._initial_layout_width()
         self.on_size_change = self._on_size_change
@@ -121,7 +179,13 @@ class ScheduleWeekView(ft.Container):
         self._prefetching = False
         self._prefetch_generation: int | None = None
         self._prefetch_task = None
+        self._ensure_weeks_task: Any = None
+        self._ensure_weeks_seq = 0
+        self._ensure_weeks_targets: tuple[date, ...] = ()
+        self._ensure_weeks_debouncing = False
         self._auth_failed = False
+        self._maintenance_active = False
+        self._maintenance_weeks: set[date] = set()
         self._generation = 0                       # bumped by reset()
 
         self._week_label = ft.Text(
@@ -324,15 +388,19 @@ class ScheduleWeekView(ft.Container):
         The caller switches the cache namespace first.
         """
         self._generation += 1
-        task = self._prefetch_task
-        self._prefetch_task = None
-        if task is not None and not getattr(task, "done", lambda: True)():
-            try:
-                task.cancel()
-            except Exception:
-                pass
+        self._ensure_weeks_seq += 1
+        for task_attr in ("_prefetch_task", "_ensure_weeks_task"):
+            task = getattr(self, task_attr, None)
+            setattr(self, task_attr, None)
+            if task is not None and not getattr(task, "done", lambda: True)():
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
         self._prefetching = False
         self._prefetch_generation = None
+        self._ensure_weeks_targets = ()
+        self._ensure_weeks_debouncing = False
         self._weeks.clear()
         self._live_at.clear()
         self._errors.clear()
@@ -340,8 +408,173 @@ class ScheduleWeekView(ft.Container):
         self._forced.clear()
         self._hydrated = False
         self._auth_failed = False
+        self._maintenance_active = False
+        self._maintenance_weeks.clear()
+        self._notify_weeks_changed()
         if self.visible:
             self.show()
+
+    def sessions_for_day(self, day: date) -> tuple[ClassSession, ...]:
+        """Return cached/loaded class sessions for ``day``."""
+        return self._sessions_on(day)
+
+    def sessions_for_week(
+        self, monday: date
+    ) -> dict[date, tuple[ClassSession, ...]]:
+        """Return cached/loaded day->sessions mapping for the week of ``monday``."""
+        target = _monday(monday)
+        return dict(self._weeks.get(target, {}))
+
+    def week_status(self, monday: date) -> tuple[bool, str]:
+        """Return ``(is_loading_spinner, error_message)`` for the week of ``monday``."""
+        target = _monday(monday)
+        spinner = target in self._loading and (
+            target not in self._weeks or target in self._forced
+        )
+        return spinner, self._errors.get(target, "")
+
+    def reload_week(self, monday: date) -> None:
+        """Force-reload the timetable for the week containing ``monday``."""
+        target = _monday(monday)
+        self._errors.pop(target, None)
+        self._maintenance_weeks.discard(target)
+        self._auth_failed = False
+        self._maintenance_active = False
+        if self._fetch_week is None:
+            self._notify_weeks_changed()
+            return
+        self._ensure_loaded(target, force=True)
+
+    def open_session_details(
+        self, session: ClassSession, *, return_focus: ft.Control | None = None
+    ) -> None:
+        """Open the standard class session detail dialog."""
+        self._show_session_details(session, return_focus=return_focus)
+
+    def hydrate_and_ensure_weeks(
+        self,
+        mondays: Sequence[date],
+        *,
+        start_prefetch: bool = False,
+        debounce_ms: int = 0,
+    ) -> None:
+        """Hydrate disk cache in 0ms and ensure ``mondays`` are fresh with optional debounce."""
+        normalized: list[date] = []
+        for item in mondays:
+            m = _monday(item)
+            if m not in normalized:
+                normalized.append(m)
+        target_tuple = tuple(normalized)
+
+        self._hydrate()
+
+        prev_task = self._ensure_weeks_task
+        prev_running = prev_task is not None and not getattr(
+            prev_task, "done", lambda: True
+        )()
+
+        if (
+            self._fetch_week is None
+            or self._auth_failed
+            or self._maintenance_active
+        ):
+            if prev_running:
+                self._ensure_weeks_seq += 1
+                self._ensure_weeks_task = None
+                self._ensure_weeks_targets = ()
+                self._ensure_weeks_debouncing = False
+                try:
+                    prev_task.cancel()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            return
+
+        if start_prefetch:
+            self._start_prefetch()
+
+        if (
+            prev_running
+            and self._ensure_weeks_targets == target_tuple
+            and (not self._ensure_weeks_debouncing or debounce_ms > 0)
+        ):
+            return
+
+        cancelled_previous = False
+        if prev_running:
+            cancelled_previous = True
+            self._ensure_weeks_task = None
+            try:
+                prev_task.cancel()  # type: ignore[union-attr]
+            except Exception:
+                pass
+
+        unfresh = [m for m in target_tuple if not self._is_fresh(m)]
+        if not unfresh:
+            self._ensure_weeks_targets = ()
+            self._ensure_weeks_debouncing = False
+            return
+
+        self._ensure_weeks_seq += 1
+        seq = self._ensure_weeks_seq
+        generation = self._generation
+        self._ensure_weeks_targets = target_tuple
+        self._ensure_weeks_debouncing = debounce_ms > 0
+
+        premarked: set[date] = set()
+        if debounce_ms <= 0:
+            first_unloaded = next(
+                (m for m in unfresh if m not in self._loading), None
+            )
+            if first_unloaded is not None:
+                self._loading.add(first_unloaded)
+                self._errors.pop(first_unloaded, None)
+                premarked.add(first_unloaded)
+
+        async def _runner() -> None:
+            try:
+                if debounce_ms > 0:
+                    await asyncio.sleep(debounce_ms / 1000.0)
+                elif cancelled_previous:
+                    await asyncio.sleep(0)
+                if seq != self._ensure_weeks_seq or generation != self._generation:
+                    return
+                self._ensure_weeks_debouncing = False
+                for m in target_tuple:
+                    if (
+                        seq != self._ensure_weeks_seq
+                        or generation != self._generation
+                        or self._auth_failed
+                        or self._maintenance_active
+                    ):
+                        break
+                    if m in premarked:
+                        premarked.discard(m)
+                    else:
+                        if m in self._loading or self._is_fresh(m):
+                            continue
+                        self._loading.add(m)
+                        self._errors.pop(m, None)
+                        self._notify_weeks_changed()
+                    await self._load_async(m)
+            except asyncio.CancelledError:
+                return
+            finally:
+                for leftover in list(premarked):
+                    self._loading.discard(leftover)
+                if self._ensure_weeks_seq == seq:
+                    self._ensure_weeks_task = None
+                    self._ensure_weeks_targets = ()
+                    self._ensure_weeks_debouncing = False
+
+        try:
+            self._ensure_weeks_task = self._page_ref.run_task(_runner)
+        except (AttributeError, RuntimeError, TypeError):
+            for leftover in list(premarked):
+                self._loading.discard(leftover)
+            self._ensure_weeks_task = None
+            self._ensure_weeks_targets = ()
+            self._ensure_weeks_debouncing = False
+            logger.debug("Could not schedule ensure_weeks task", exc_info=True)
 
     def update_theme(self) -> None:
         self.bgcolor = C.BG
@@ -372,8 +605,87 @@ class ScheduleWeekView(ft.Container):
     def _reload(self) -> None:
         monday = _monday(self._selected)
         self._errors.pop(monday, None)
+        self._maintenance_weeks.discard(monday)
         self._auth_failed = False
+        self._maintenance_active = False
         self._ensure_loaded(monday, force=True)
+
+    def _notify_weeks_changed(self) -> None:
+        cb = self.on_weeks_changed
+        if callable(cb):
+            try:
+                cb()
+            except Exception:
+                logger.debug("on_weeks_changed callback failed", exc_info=True)
+
+    def _notify_maintenance(self, notice: Any, forced: bool) -> None:
+        cb = self.on_maintenance
+        if not callable(cb):
+            return
+        try:
+            sig = inspect.signature(cb)
+            params = list(sig.parameters.values())
+            positional = [
+                p
+                for p in params
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            has_varargs = any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+            )
+            has_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params
+            )
+            kw_names = {
+                p.name
+                for p in params
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+            if len(positional) >= 2 or has_varargs:
+                cb(notice, forced)
+            elif "user_initiated" in kw_names:
+                cb(notice, user_initiated=forced)
+            elif "force" in kw_names:
+                cb(notice, force=forced)
+            elif has_kwargs:
+                cb(notice, user_initiated=forced)
+            else:
+                cb(notice)
+        except Exception:
+            logger.debug("on_maintenance callback failed", exc_info=True)
+
+    @staticmethod
+    def _is_maintenance_exception(exc: BaseException) -> bool:
+        if getattr(exc, "notice", None) is not None:
+            return True
+        return any(
+            cls.__name__ in {"UthMaintenanceError", "PortalMaintenanceError"}
+            for cls in type(exc).__mro__
+        )
+
+    @staticmethod
+    def _format_maintenance_error(exc: BaseException) -> str:
+        notice = getattr(exc, "notice", None)
+        window_text = str(getattr(notice, "window_text", "") or "").strip()
+        reopen_text = str(getattr(notice, "reopen_text", "") or "").strip()
+        if window_text and reopen_text:
+            return f"Hệ thống UTH đang bảo trì ({window_text} · Mở lại: {reopen_text})."
+        if window_text:
+            return f"Hệ thống UTH đang bảo trì ({window_text})."
+        if reopen_text:
+            return f"Hệ thống UTH đang bảo trì (Mở lại: {reopen_text})."
+        msg = str(exc).strip()
+        if msg and "bảo trì" in msg.casefold():
+            return msg
+        return "Hệ thống UTH đang tạm ngưng bảo trì."
 
     # ----------------------------------------------------------------- cache
     def _hydrate(self) -> None:
@@ -387,8 +699,13 @@ class ScheduleWeekView(ft.Container):
         except Exception:
             logger.debug("Could not read week schedule cache", exc_info=True)
             return
+        added = False
         for monday, entry in entries.items():
-            self._weeks.setdefault(monday, entry.days)
+            if monday not in self._weeks:
+                self._weeks[monday] = entry.days
+                added = True
+        if added:
+            self._notify_weeks_changed()
 
     def _save_cache(
         self,
@@ -404,6 +721,9 @@ class ScheduleWeekView(ft.Container):
         except Exception:
             logger.debug("Could not write week schedule cache", exc_info=True)
 
+    def _is_fresh(self, monday: date) -> bool:
+        return not self._needs_fetch(monday)
+
     def _needs_fetch(self, monday: date) -> bool:
         if monday not in self._weeks:
             return True
@@ -416,18 +736,24 @@ class ScheduleWeekView(ft.Container):
     # --------------------------------------------------------------- loading
     def _ensure_loaded(self, monday: date, *, force: bool = False) -> None:
         if monday in self._loading:
+            if force:
+                self._forced.add(monday)
+                self._notify_weeks_changed()
+                self._render()
             return
         if not force and not self._needs_fetch(monday):
             return
         if self._fetch_week is None:
             if monday not in self._weeks:
                 self._errors[monday] = "Chưa cấu hình nguồn lịch học."
+                self._notify_weeks_changed()
                 self._render()
             return
         self._loading.add(monday)
         if force:
             self._forced.add(monday)
         self._errors.pop(monday, None)
+        self._notify_weeks_changed()
         self._render()
         try:
             self._page_ref.run_task(self._load_async, monday)
@@ -437,7 +763,7 @@ class ScheduleWeekView(ft.Container):
             logger.debug("Could not schedule timetable load", exc_info=True)
 
     def _start_prefetch(self) -> None:
-        if self._fetch_week is None or self._auth_failed:
+        if self._fetch_week is None or self._auth_failed or self._maintenance_active:
             return
         if self._prefetching and self._prefetch_generation == self._generation:
             return
@@ -461,16 +787,33 @@ class ScheduleWeekView(ft.Container):
             generation = self._generation
         try:
             for monday in WeekScheduleCache.window():
-                if generation != self._generation or self._auth_failed:
+                if (
+                    generation != self._generation
+                    or self._auth_failed
+                    or self._maintenance_active
+                ):
                     break
                 if monday in self._loading or not self._needs_fetch(monday):
                     continue
                 self._loading.add(monday)
-                await self._load_async(monday)
-                if generation != self._generation or self._auth_failed:
+                try:
+                    await self._load_async(monday)
+                except asyncio.CancelledError:
+                    if generation == self._generation:
+                        self._loading.discard(monday)
+                    raise
+                if (
+                    generation != self._generation
+                    or self._auth_failed
+                    or self._maintenance_active
+                ):
                     break
                 await asyncio.sleep(_PREFETCH_GAP_S)
-                if generation != self._generation or self._auth_failed:
+                if (
+                    generation != self._generation
+                    or self._auth_failed
+                    or self._maintenance_active
+                ):
                     break
         finally:
             if self._prefetch_generation in (None, generation):
@@ -482,36 +825,73 @@ class ScheduleWeekView(ft.Container):
         generation = self._generation
         error = ""
         auth_error = False
+        maintenance_exc: BaseException | None = None
         data: dict[date, tuple[ClassSession, ...]] | None = None
         try:
             data = await asyncio.to_thread(self._fetch_week, monday)  # type: ignore[arg-type]
-        except ScheduleAuthenticationError:
-            auth_error = True
-            error = "Chưa đăng nhập Portal. Vào Cài đặt để nhập MSSV và mật khẩu."
-        except Exception:
-            logger.warning("Portal week schedule request failed", exc_info=True)
-            error = "Không tải được lịch học. Kiểm tra kết nối rồi thử lại."
+        except asyncio.CancelledError:
+            if generation == self._generation:
+                self._loading.discard(monday)
+                self._forced.discard(monday)
+                self._notify_weeks_changed()
+                if monday == _monday(self._selected):
+                    self._render()
+            raise
+        except Exception as exc:
+            if self._is_maintenance_exception(exc):
+                maintenance_exc = exc
+                error = self._format_maintenance_error(exc)
+            elif isinstance(exc, ScheduleAuthenticationError):
+                auth_error = True
+                error = "Chưa đăng nhập Portal. Vào Cài đặt để nhập MSSV và mật khẩu."
+            else:
+                logger.warning("Portal week schedule request failed", exc_info=True)
+                error = "Không tải được lịch học. Kiểm tra kết nối rồi thử lại."
         if generation != self._generation:
             return  # account changed while fetching: drop the stale result
         self._loading.discard(monday)
         forced = monday in self._forced
         self._forced.discard(monday)
-        if auth_error:
+        if maintenance_exc is not None:
+            self._maintenance_active = True
+            self._maintenance_weeks.add(monday)
+            self._errors[monday] = error
+            notice_payload = getattr(maintenance_exc, "notice", None)
+            if notice_payload is None:
+                notice_payload = maintenance_exc
+            self._notify_maintenance(notice_payload, forced)
+        elif auth_error:
             self._auth_failed = True
             self._weeks.clear()
             self._live_at.clear()
+            self._maintenance_weeks.clear()
             self._errors[monday] = error
         elif data is not None:
+            self._maintenance_active = False
+            self._maintenance_weeks.discard(monday)
             fetched_at = datetime.now()
             self._weeks[monday] = data
             self._live_at[monday] = fetched_at
             self._errors.pop(monday, None)
-            await asyncio.to_thread(self._save_cache, monday, data, fetched_at)
+            try:
+                await asyncio.to_thread(self._save_cache, monday, data, fetched_at)
+            except asyncio.CancelledError:
+                if generation == self._generation:
+                    self._notify_weeks_changed()
+                    if monday == _monday(self._selected):
+                        self._render()
+                raise
         elif monday not in self._weeks or forced:
             # Cached data stays on screen; only surface the error when there
             # is nothing to show or the person asked for a reload.
+            self._maintenance_weeks.discard(monday)
             self._errors[monday] = error
-        if monday == _monday(self._selected) or auth_error:
+        self._notify_weeks_changed()
+        if (
+            monday == _monday(self._selected)
+            or auth_error
+            or maintenance_exc is not None
+        ):
             self._render()
 
     # ---------------------------------------------------------------- render
@@ -563,11 +943,17 @@ class ScheduleWeekView(ft.Container):
                 ft.Text("Đang tải lịch học…", size=11, color=C.TEXT_SECONDARY),
             ]
         elif monday in self._errors:
+            is_maint = monday in self._maintenance_weeks
+            icon_tone = C.WARNING if is_maint else C.CRITICAL
+            text_tone = C.TEXT_PRIMARY if is_maint else C.CRITICAL
+            icon = (
+                ft.Icons.WARNING_AMBER_ROUNDED
+                if is_maint
+                else ft.Icons.ERROR_OUTLINE_ROUNDED
+            )
             controls = [
-                ft.Icon(ft.Icons.ERROR_OUTLINE_ROUNDED, size=16, color=C.CRITICAL),
-                ft.Text(
-                    self._errors[monday], size=11, color=C.CRITICAL, expand=True
-                ),
+                ft.Icon(icon, size=16, color=icon_tone),
+                ft.Text(self._errors[monday], size=11, color=text_tone, expand=True),
                 ft.TextButton(
                     "Thử lại",
                     height=44,
@@ -1021,7 +1407,7 @@ class ScheduleWeekView(ft.Container):
             class_text,
             size=11,
             color=C.TEXT_SECONDARY,
-            max_lines=2,
+            max_lines=2 if narrow else 1,
             overflow=ft.TextOverflow.ELLIPSIS,
             selectable=True,
         )
@@ -1037,7 +1423,7 @@ class ScheduleWeekView(ft.Container):
             size=14 if narrow else 12,
             weight=ft.FontWeight.W_600,
             color=C.TEXT_PRIMARY,
-            max_lines=3,
+            max_lines=3 if narrow else 2,
             overflow=ft.TextOverflow.ELLIPSIS,
             selectable=True,
         )
@@ -1066,27 +1452,39 @@ class ScheduleWeekView(ft.Container):
                 vertical_alignment=ft.CrossAxisAlignment.START,
             )
         else:
-            summary_rows: list[ft.Control] = [
+            time_header_controls: list[ft.Control] = [
                 ft.Text(
                     time_text,
                     size=11,
                     weight=ft.FontWeight.W_600,
                     color=C.ACCENT,
                 ),
-                title,
-                class_label,
-                room_label,
             ]
             if session.cancelled:
-                summary_rows.append(
-                    ft.Text(
-                        "Tạm ngưng",
-                        size=10,
-                        weight=ft.FontWeight.W_600,
-                        color=C.CRITICAL,
+                time_header_controls.append(
+                    ft.Container(
+                        content=ft.Text(
+                            "Tạm ngưng",
+                            size=9.5,
+                            weight=ft.FontWeight.W_600,
+                            color=C.CRITICAL,
+                        ),
+                        bgcolor=ft.Colors.with_opacity(0.12, C.CRITICAL),
+                        border_radius=999,
+                        padding=ft.Padding.symmetric(horizontal=6, vertical=1),
                     )
                 )
-            summary = ft.Column(summary_rows, spacing=4)
+            time_header = ft.Row(
+                time_header_controls,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+            )
+            summary = ft.Column(
+                [time_header, title, class_label, room_label],
+                spacing=3,
+                tight=True,
+            )
 
         details_button = ft.TextButton(
             "Chi tiết",
@@ -1099,7 +1497,16 @@ class ScheduleWeekView(ft.Container):
             ),
         )
         return ft.Container(
-            content=ft.Column([summary, details_button], spacing=4),
+            height=None if narrow else 172,
+            content=ft.Column(
+                [summary, details_button],
+                alignment=(
+                    ft.MainAxisAlignment.START
+                    if narrow
+                    else ft.MainAxisAlignment.SPACE_BETWEEN
+                ),
+                spacing=4,
+            ),
             padding=ft.Padding.all(8 if not narrow else 10),
             bgcolor=C.SURFACE,
             border=ft.Border.all(1, C.BORDER),

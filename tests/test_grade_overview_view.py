@@ -703,13 +703,22 @@ def test_grade_overview_preserves_and_restores_scroll_offset_across_modal_dismis
         warnings.simplefilter("always", RuntimeWarning)
         gv_sync._on_course_clicked(None, sem.courses[0])
         assert len(gv_sync._open_dialog_tokens) == 1
-        # Synthetic focus-jump scroll event while modal is open must NOT clobber saved offset
+        assert scroll_calls_sync == [{"offset": 640.0, "duration": 0}]
+        # Synthetic focus-jump scroll event while modal is open must NOT clobber saved offset and counter-pins
         gv_sync._on_content_scroll(SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False))
         assert gv_sync._saved_scroll_offset == 640.0
+        assert scroll_calls_sync == [
+            {"offset": 640.0, "duration": 0},
+            {"offset": 640.0, "duration": 0},
+        ]
         # Close via button
         shown_sync[-1].actions[0].on_click(None)
         assert gv_sync._open_dialog_tokens == {}
-        assert scroll_calls_sync == [{"offset": 640.0, "duration": 0}]
+        assert scroll_calls_sync == [
+            {"offset": 640.0, "duration": 0},
+            {"offset": 640.0, "duration": 0},
+            {"offset": 640.0, "duration": 0},
+        ]
         assert gv_sync._saved_scroll_offset == 640.0
         assert not [w for w in caught if "was never awaited" in str(w.message)]
 
@@ -929,6 +938,7 @@ def test_grade_overview_modal_scroll_guard_races_and_pop_dialog_fallback():
 
     gv2._on_course_clicked(None, sem.courses[0])
     dlg1 = real_page2.shown[-1]
+    assert scroll_calls2 == [{"offset": 640.0, "duration": 0}]
     # Close Dialog 1 via "Đóng" button (async on_dismiss not yet delivered)
     dlg1.actions[0].on_click(None)
     assert real_page2.pop_calls == 1
@@ -936,23 +946,25 @@ def test_grade_overview_modal_scroll_guard_races_and_pop_dialog_fallback():
     assert gv2.handle_back() is False
     assert real_page2.pop_calls == 1
 
-    # Open Dialog 2 before Dialog 1's on_dismiss arrives
+    # Open Dialog 2 before Dialog 1's on_dismiss arrives -> pins on open
     gv2._open_planner(None)
     dlg2 = real_page2.shown[-1]
     assert len(gv2._open_dialog_tokens) == 2
+    assert len(scroll_calls2) == 2
 
-    # Dialog 1's delayed on_dismiss arrives while Dialog 2 is still open -> no scroll_to yet
+    # Dialog 1's delayed on_dismiss arrives while Dialog 2 is still open -> no close scroll_to yet
     dlg1.on_dismiss(None)
     assert len(gv2._open_dialog_tokens) == 1
-    assert scroll_calls2 == []
+    assert len(scroll_calls2) == 2
 
-    # Dialog 2 closes via handle_back(), then on_dismiss arrives -> restores scroll once
+    # Dialog 2 closes via handle_back(), then on_dismiss arrives -> restores scroll once on final close
     assert gv2.handle_back() is True
     assert gv2.handle_back() is False
     assert real_page2.pop_calls == 2
     dlg2.on_dismiss(None)
     assert gv2._open_dialog_tokens == {}
-    assert scroll_calls2 == [{"offset": 640.0, "duration": 0}]
+    assert len(scroll_calls2) == 3
+    assert all(c == {"offset": 640.0, "duration": 0} for c in scroll_calls2)
 
     # 3. pop_dialog() raising on real ft.Page must still clear _open_dialog_tokens for all modals
     real_page3 = _RealPageDouble(raise_on_pop=True)
@@ -996,4 +1008,410 @@ def test_grade_overview_notify_uses_page_overlay_without_popping_dialogs():
     assert len(snacks) == 1
     assert snacks[0].open is True
     assert snacks[0].content.value == "Đã sao chép bảng điểm"
+
+
+def test_opening_course_modal_immediately_pins_scroll_offset_before_close():
+    import asyncio
+
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+
+    async def scenario():
+        events: list[tuple[str, object]] = []
+        shown: list[ft.AlertDialog] = []
+        pending_tasks: list[asyncio.Task] = []
+
+        async def _fake_scroll_to(**kw):
+            events.append(("scroll_to", kw))
+
+        def _show_dialog(dlg):
+            events.append(("show_dialog", dlg.semantics_label))
+            shown.append(dlg)
+
+        page = SimpleNamespace(
+            width=400,
+            height=800,
+            dialogs=[],
+            overlay=[],
+            show_dialog=_show_dialog,
+            pop_dialog=lambda: events.append(("pop_dialog", True)),
+            update=lambda: None,
+            run_task=lambda fn: pending_tasks.append(asyncio.create_task(fn())),
+        )
+        gv = GradeOverviewView(page=page)
+        assert gv._scrollable_content.scroll_interval == 10
+        gv.update_academic_data([sem], [profile])
+        gv._scrollable_content.scroll_to = _fake_scroll_to
+
+        # When at top (0.0), opening a modal does not schedule unnecessary scroll_to
+        gv._on_course_clicked(None, sem.courses[0])
+        assert gv._pinned_modal_offset() == 0.0
+        assert pending_tasks == []
+        shown[-1].actions[0].on_click(None)
+        assert gv._pinned_modal_offset() is None
+        events.clear()
+
+        # Scroll down to 580.0
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=580.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+        assert gv._saved_scroll_offset == 580.0
+
+        # 1. Course modal: pins 580.0 immediately AFTER show_dialog, BEFORE close!
+        gv._on_course_clicked(None, sem.courses[0])
+        assert gv._pinned_modal_offset() == 580.0
+        assert len(pending_tasks) == 1
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert events == [
+            ("show_dialog", f"Bảng điểm {sem.courses[0].course_name}"),
+            ("scroll_to", {"offset": 580.0, "duration": 0}),
+        ]
+
+        # Switching tabs inside CourseComponentsDialog (Portal -> Course -> Portal) keeps 580.0 pinned
+        course_dlg = shown[-1]
+        tab_pills = course_dlg.content.content.content.controls[0].content.controls
+        events.clear()
+        tab_pills[1].on_click(None)
+        assert len(pending_tasks) == 1
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert ("scroll_to", {"offset": 580.0, "duration": 0}) in events
+        assert gv._saved_scroll_offset == 580.0
+
+        tab_pills[0].on_click(None)
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+
+        course_dlg.actions[0].on_click(None)
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert gv._open_dialog_tokens == {}
+
+        # 2. Planner modal: _pin_scroll_while_modal_open runs strictly AFTER show_dialog
+        events.clear()
+        gv._open_planner(None)
+        assert gv._pinned_modal_offset() == 580.0
+        assert len(pending_tasks) == 1
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert events == [
+            ("show_dialog", "Tính GPA mong muốn"),
+            ("scroll_to", {"offset": 580.0, "duration": 0}),
+        ]
+        shown[-1].actions[0].on_click(None)
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+
+        # 3. AcademicRadarCard metric detail sheet: pins 580.0 on open
+        events.clear()
+        gv._radar_card._on_metric_click(profile.metrics["breakthrough"])
+        assert gv._pinned_modal_offset() == 580.0
+        assert len(pending_tasks) == 1
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert events[0][0] == "show_dialog"
+        assert events[1] == ("scroll_to", {"offset": 580.0, "duration": 0})
+        shown[-1].actions[0].on_click(None)
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+
+        # 4. AcademicRadarCard radar info dialog: pins 580.0 on open
+        events.clear()
+        gv._radar_card._show_radar_info(None)
+        assert gv._pinned_modal_offset() == 580.0
+        assert len(pending_tasks) == 1
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert events == [
+            ("show_dialog", "Giải thích 6 chỉ số Radar học tập"),
+            ("scroll_to", {"offset": 580.0, "duration": 0}),
+        ]
+        shown[-1].actions[0].on_click(None)
+        await asyncio.gather(*pending_tasks)
+        pending_tasks.clear()
+        assert gv._saved_scroll_offset == 580.0
+
+    asyncio.run(scenario())
+
+
+def test_synthetic_zero_scroll_event_while_modal_open_is_counter_pinned_across_nested_dialogs():
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+
+    shown: list[ft.AlertDialog] = []
+    pops: list[bool] = []
+    scroll_calls: list[dict[str, object]] = []
+
+    page = SimpleNamespace(
+        width=400,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown.append,
+        pop_dialog=lambda: pops.append(True),
+        update=lambda: None,
+    )
+    gv = GradeOverviewView(page=page)
+    gv.update_academic_data([sem], [profile])
+
+    # Verify recursion guard even if scroll_to synchronously emits a synthetic 0.0 scroll event!
+    def _reentrant_scroll_to(**kw):
+        scroll_calls.append(kw)
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+
+    gv._scrollable_content.scroll_to = _reentrant_scroll_to
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=640.0, min_scroll_extent=0.0, out_of_range=False)
+    )
+    assert gv._saved_scroll_offset == 640.0
+
+    # Open outer modal (GpaDetailSheet or Planner -> token 1)
+    gv.open_gpa_detail_sheet()
+    assert len(gv._open_dialog_tokens) == 1
+    assert gv._pinned_modal_offset() == 640.0
+    assert len(scroll_calls) == 1
+    assert scroll_calls[-1] == {"offset": 640.0, "duration": 0}
+
+    # Open nested ExpectedGradeDialog on top of outer modal (1 -> 2 tokens)
+    gv.open_expected_grade_dialog()
+    assert len(gv._open_dialog_tokens) == 2
+    assert gv._pinned_modal_offset() == 640.0
+    assert len(scroll_calls) == 2
+    assert scroll_calls[-1] == {"offset": 640.0, "duration": 0}
+
+    # Synthetic pixels=0.0 from Flutter route focus change -> counter-pins immediately without recursion
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False)
+    )
+    assert gv._saved_scroll_offset == 640.0
+    assert len(scroll_calls) == 3
+    assert scroll_calls[-1] == {"offset": 640.0, "duration": 0}
+
+    # Subpixel jitter within <= 2.0px tolerance must NOT re-trigger scroll_to
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=641.5, min_scroll_extent=0.0, out_of_range=False)
+    )
+    assert len(scroll_calls) == 3
+    assert gv._saved_scroll_offset == 640.0
+
+    # Explicit _is_restoring_scroll=True guard must ignore synthetic 0.0 completely
+    gv._is_restoring_scroll = True
+    try:
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+    finally:
+        gv._is_restoring_scroll = False
+    assert len(scroll_calls) == 3
+
+    # Close nested dialog first via handle_back() (2 -> 1): outer token remains pinned at 640.0!
+    assert gv.handle_back() is True
+    assert len(pops) == 1
+    assert len(gv._open_dialog_tokens) == 1
+    assert gv._pinned_modal_offset() == 640.0
+    assert len(scroll_calls) == 3  # no close-restore yet while outer dialog is still open
+
+    # Synthetic 0.0 while outer dialog is still open -> still counter-pinned to 640.0!
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False)
+    )
+    assert len(scroll_calls) == 4
+    assert gv._saved_scroll_offset == 640.0
+
+    # Close outer dialog via handle_back() (1 -> 0): restores 640.0 cleanly on final close!
+    assert gv.handle_back() is True
+    assert gv.handle_back() is False
+    assert len(pops) == 2
+    assert gv._open_dialog_tokens == {}
+    assert gv._pinned_modal_offset() is None
+    assert len(scroll_calls) == 5
+    assert scroll_calls[-1] == {"offset": 640.0, "duration": 0}
+    assert gv._saved_scroll_offset == 640.0
+
+
+def test_grade_overview_preserves_rendered_radar_and_semester_data_on_refresh_error():
+    page = SimpleNamespace(width=400, height=800, update=lambda: None)
+    gv = GradeOverviewView(page=page)
+
+    # 1. Cold start error (no existing data): shows full _error_state
+    gv.show_error("Không thể kết nối Portal.")
+    assert gv._error_state.visible is True
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+    # 2. Populate rendered academic data and scroll down
+    sem1 = _make_sample_semester(75, "HK2 2025-2026")
+    sem2 = _make_sample_semester(74, "HK1 2025-2026")
+    p1 = calculate_radar_profile(sem1, previous_semester=sem2)
+    p2 = calculate_radar_profile(sem2)
+    gv.update_academic_data([sem1, sem2], [p1, p2])
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=420.0, min_scroll_extent=0.0, out_of_range=False)
+    )
+
+    # 3. Refresh cycle fails (show_loading -> show_error): rendered radar & semester courses stay intact!
+    gv.show_loading()
+    assert gv._radar_card.visible is True
+    assert gv._grade_list_view.visible is True
+    assert gv._loading_row.visible is True
+
+    gv.show_error("Hệ thống UTH đang tạm ngưng bảo trì (01h00 - 04h00).")
+    from gui.core.theme import C, apply_theme
+    from config import settings
+
+    assert gv._loading_row.visible is False
+    assert gv._radar_card.visible is True
+    assert gv._grade_list_view.visible is True
+    assert gv._error_state.visible is False
+    assert gv._stale_banner.visible is True
+    assert gv._stale_banner.bgcolor == C.SURFACE_ELEVATED
+    assert gv._stale_text.color == C.TEXT_PRIMARY
+    assert gv._stale_icon.color == C.WARNING
+    assert "bảo trì" in gv._stale_text.value
+    assert gv._semesters == [sem1, sem2]
+    assert gv._profiles == [p1, p2]
+    assert len(gv._grade_list_view.courses) == 6
+    assert gv._saved_scroll_offset == 420.0
+
+    orig_theme = settings.THEME
+    try:
+        apply_theme("steel_light")
+        gv.update_theme()
+        assert gv._stale_banner.bgcolor == C.SURFACE_ELEVATED
+        assert gv._stale_text.color == C.TEXT_PRIMARY
+        assert gv._stale_icon.color == C.WARNING
+    finally:
+        apply_theme(orig_theme)
+
+    # 4. Subsequent successful update clears stale banner
+    gv.update_academic_data([sem1, sem2], [p1, p2])
+    assert gv._stale_banner.visible is False
+
+
+def test_grade_overview_reset_and_clear_prevent_cross_account_transcript_leak():
+    from core.academic_radar.gpa_planner import CreditProgress
+
+    pops: list[bool] = []
+    shown: list[ft.AlertDialog] = []
+    page = SimpleNamespace(
+        width=400,
+        height=800,
+        dialogs=[],
+        overlay=[],
+        show_dialog=shown.append,
+        pop_dialog=lambda: pops.append(True),
+        update=lambda: None,
+    )
+    gv = GradeOverviewView(page=page)
+
+    sem1 = _make_sample_semester(75, "HK2 2025-2026")
+    p1 = calculate_radar_profile(sem1)
+    gv.update_academic_data([sem1], [p1], CreditProgress(earned_credits=90, required_credits=120))
+    gv._gpa_target_card._target_text = "3.8"
+    gv._graduation_card._target_text = "3.6"
+    gv._on_content_scroll(
+        SimpleNamespace(pixels=480.0, min_scroll_extent=0.0, out_of_range=False)
+    )
+    gv._on_course_clicked(None, sem1.courses[0])
+    gv.show_error("Mất mạng tạm thời")
+    assert gv._stale_banner.visible is True
+    assert len(gv._open_dialog_tokens) == 1
+
+    # AppController._teardown_account_session invokes clear() or reset()
+    assert gv.clear == gv.reset
+    gv.clear()
+
+    assert len(pops) == 1
+    assert gv._open_dialog_tokens == {}
+    assert gv._dialog_closers == {}
+    assert gv.handle_back() is False
+    assert gv._semesters == []
+    assert gv._profiles == []
+    assert gv._progress is None
+    assert gv._saved_scroll_offset == 0.0
+    assert gv._radar_card.profiles == []
+    assert gv._grade_list_view.courses == []
+    assert gv._gpa_target_card._target_text == ""
+    assert gv._graduation_card._target_text == ""
+    assert gv._stale_banner.visible is False
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+    # User B logs in and opens Bảng điểm while offline/maintenance: ZERO User A data leaks!
+    gv.show_loading()
+    assert gv._loading_row.visible is True
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+    gv.show_error("Hệ thống UTH đang bảo trì.")
+    assert gv._error_state.visible is True
+    assert gv._stale_banner.visible is False
+    assert gv._radar_card.visible is False
+    assert gv._grade_list_view.visible is False
+
+
+def test_synthetic_zero_scroll_during_post_scroll_to_20ms_cooldown_triggers_followup_pin():
+    import asyncio
+
+    sem = _make_sample_semester(75, "HK2 2025-2026")
+    profile = calculate_radar_profile(sem)
+
+    async def scenario():
+        shown: list[ft.AlertDialog] = []
+        scroll_calls: list[dict[str, object]] = []
+        pending_tasks: list[asyncio.Task] = []
+
+        first_scroll_done = asyncio.Event()
+
+        async def _fake_scroll_to(**kw):
+            scroll_calls.append(kw)
+            first_scroll_done.set()
+
+        page = SimpleNamespace(
+            width=400,
+            height=800,
+            dialogs=[],
+            overlay=[],
+            show_dialog=shown.append,
+            pop_dialog=lambda: None,
+            update=lambda: None,
+            run_task=lambda fn: pending_tasks.append(asyncio.create_task(fn())),
+        )
+        gv = GradeOverviewView(page=page)
+        gv.update_academic_data([sem], [profile])
+        gv._scrollable_content.scroll_to = _fake_scroll_to
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=580.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+
+        # t = 0ms: modal opens and schedules _restore() (30ms sleep -> scroll_to -> 20ms cooldown)
+        gv._on_course_clicked(None, sem.courses[0])
+        assert len(pending_tasks) == 1
+
+        # Wait deterministically until first scroll_to(580.0) has executed and _restore() enters 20ms cooldown
+        await first_scroll_done.wait()
+        await asyncio.sleep(0)
+        assert len(scroll_calls) == 1
+        assert scroll_calls[0] == {"offset": 580.0, "duration": 0}
+        assert gv._is_restoring_scroll is True
+        assert gv._restore_in_post_cooldown is True
+
+        # Flutter emits delayed synthetic pixels=0.0 during the 20ms cooldown!
+        gv._on_content_scroll(
+            SimpleNamespace(pixels=0.0, min_scroll_extent=0.0, out_of_range=False)
+        )
+        assert gv._saved_scroll_offset == 580.0
+
+        # Wait for _restore() to finish: must perform bounded follow-up scroll_to(580.0)
+        await asyncio.gather(*pending_tasks)
+        assert len(scroll_calls) == 2
+        assert scroll_calls[1] == {"offset": 580.0, "duration": 0}
+        assert gv._is_restoring_scroll is False
+        assert gv._saved_scroll_offset == 580.0
+
+    asyncio.run(scenario())
+
 

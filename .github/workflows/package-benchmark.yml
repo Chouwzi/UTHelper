@@ -76,13 +76,13 @@ jobs:
           VERSION=$(python scripts/release_metadata.py --print-version)
           BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
           python scripts/release_metadata.py --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --build-environment develop --package-format apk --output src/assets/diagnostics-config.json
           set --
           if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
           flet build apk --bundle-id "$APP_ID" --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose || test -d build/flutter
           flet-android-notifications-patch --project-root build/flutter
           python scripts/release_metadata.py --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --build-environment develop --package-format apk --output src/assets/diagnostics-config.json
           flet build apk --bundle-id "$APP_ID" --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
           mkdir -p measurements
           mapfile -t PACKAGES < <(find build/apk -maxdepth 1 -type f -name '*.apk')
@@ -147,7 +147,7 @@ jobs:
           VERSION=$(python scripts/release_metadata.py --print-version)
           BUILD=$(python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' "$VERSION")
           python scripts/release_metadata.py --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --build-environment develop --package-format ipa --output src/assets/diagnostics-config.json
           set --
           if [ -n "$FLAGS" ]; then read -r -a OPTIONS <<< "$FLAGS"; set -- "${OPTIONS[@]}"; fi
           flet build ipa --build-version "$VERSION" --build-number "$BUILD" "$@" --yes --verbose
@@ -211,7 +211,7 @@ jobs:
           $version = python scripts/release_metadata.py --print-version
           $build = python -c 'from scripts.release_metadata import release_build_number; import sys; print(release_build_number(sys.argv[1]))' $version
           python scripts/release_metadata.py --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --build-environment develop --package-format exe_msi --output src/assets/diagnostics-config.json
           New-Item -ItemType Directory -Path build/support -Force | Out-Null
           $template = 'build/support/template.zip'
           Invoke-WebRequest -Uri 'https://github.com/flet-dev/flet/releases/download/v0.86.5/flet-build-template.zip' -OutFile $template -TimeoutSec 60

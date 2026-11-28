@@ -828,3 +828,195 @@ def test_app_controller_open_url_in_app_mounts_embedded_webview_pane_and_handles
     assert controller._app_webview_host.visible is False
     assert controller._app_webview_pane is None
     assert pane.disposed is True
+
+
+def test_desktop_session_summary_cards_enforce_equal_172px_height_across_room_lengths():
+    view = _view(1120)
+    s_elearning = _session(
+        TODAY,
+        subject="Nhập môn Trí tuệ nhân tạo",
+        room="E-Learning",
+        cancelled=False,
+    )
+    s_long_cs1_address = _session(
+        TODAY,
+        subject="Phân tích và thiết kế hệ thống thông tin quản lý doanh nghiệp hiện đại",
+        room="F502 - CS1 (P.Thạnh Mỹ Tây, TP.HCM)",
+        cancelled=True,
+    )
+
+    card_short = view._session_summary_card(s_elearning, narrow=False)
+    card_long = view._session_summary_card(s_long_cs1_address, narrow=False)
+    card_narrow = view._session_summary_card(s_long_cs1_address, narrow=True)
+
+    assert card_short.height == 172
+    assert card_long.height == 172
+    assert card_narrow.height is None
+    assert card_short.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+    assert card_long.content.alignment == ft.MainAxisAlignment.SPACE_BETWEEN
+
+    summary_col = card_long.content.controls[0]
+    top_row = summary_col.controls[0]
+    assert isinstance(top_row, ft.Row)
+    assert "07:00 – 09:30" in _text_values(top_row)
+    assert "Tạm ngưng" in _text_values(top_row)
+
+    title_txt, class_txt, room_txt = (
+        summary_col.controls[1],
+        summary_col.controls[2],
+        summary_col.controls[3],
+    )
+    assert title_txt.max_lines == 2
+    assert class_txt.max_lines == 1
+    assert room_txt.max_lines == 2
+
+
+def test_hydrate_and_ensure_weeks_hydrates_cache_immediately_and_debounces_rapid_month_swipes(
+    tmp_path,
+):
+    from core.today_schedule import WeekScheduleCache
+
+    today_monday = _monday(date.today())
+    cache = WeekScheduleCache(cache_dir=tmp_path, namespace="student-1")
+    cached_session = _session(today_monday, subject="Môn từ cache 0ms")
+    cache.save_week(
+        today_monday,
+        {today_monday: (cached_session,)},
+        datetime.now(),
+    )
+
+    month1_far = today_monday + timedelta(weeks=8)
+    month2_far = today_monday + timedelta(weeks=14)
+    fetched_mondays: list[date] = []
+    change_notifications: list[int] = []
+
+    async def scenario():
+        tasks: list[asyncio.Task] = []
+
+        class _AsyncPage:
+            width = 1120
+            height = 844
+            window = SimpleNamespace(width=1120)
+
+            def run_task(self, coro_fn, *args, **kwargs):
+                t = asyncio.create_task(coro_fn(*args, **kwargs))
+                tasks.append(t)
+                return t
+
+            def update(self):
+                pass
+
+        def _fetch_week(monday_date: date):
+            fetched_mondays.append(monday_date)
+            return {
+                monday_date: (
+                    _session(monday_date, subject=f"Live {monday_date.isoformat()}"),
+                )
+            }
+
+        view = ScheduleWeekView(
+            page=_AsyncPage(),
+            fetch_week=_fetch_week,
+            cache=cache,
+            on_weeks_changed=lambda: change_notifications.append(1),
+        )
+
+        # First month swipe (debounced 250ms): cache must hydrate synchronously in 0ms
+        view.hydrate_and_ensure_weeks([today_monday, month1_far], debounce_ms=250)
+        hydrated = view.sessions_for_day(today_monday)
+        assert len(hydrated) == 1
+        assert hydrated[0].session_id == cached_session.session_id
+        assert hydrated[0].subject == "Môn từ cache 0ms"
+        assert hydrated[0].link == ""  # Disk cache never persists personal URLs
+        assert today_monday in view.sessions_for_week(today_monday)
+
+        # Within 50ms, user swipes to month2 -> month1 fetch MUST be cancelled!
+        await asyncio.sleep(0.05)
+        assert month1_far not in fetched_mondays
+        view.hydrate_and_ensure_weeks([month2_far], debounce_ms=250)
+
+        await asyncio.sleep(0.32)
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        assert month1_far not in fetched_mondays
+        assert month2_far in fetched_mondays
+        assert view.sessions_for_day(month2_far)[0].subject == f"Live {month2_far.isoformat()}"
+        assert len(change_notifications) >= 1
+
+    asyncio.run(scenario())
+
+
+def test_schedule_week_view_duck_typed_maintenance_preserves_cache_and_notifies_callback():
+    class PortalMaintenanceError(RuntimeError):
+        def __init__(self, notice):
+            super().__init__("UTH maintenance")
+            self.notice = notice
+
+    notice = SimpleNamespace(
+        source="portal",
+        window_text="01h00 - 04h00 (giờ Việt Nam)",
+        reopen_text="04h00 ngày 28/11/2026",
+        dedupe_key="2026-11-28|01h00-04h00|04h00",
+    )
+    maintenance_events: list[tuple[object, bool]] = []
+
+    def _on_maint(received_notice, *, user_initiated: bool = False):
+        maintenance_events.append((received_notice, user_initiated))
+
+    fetch_calls: list[date] = []
+
+    def _maint_fail(monday_date: date):
+        fetch_calls.append(monday_date)
+        raise PortalMaintenanceError(notice)
+
+    async def scenario():
+        tasks: list[asyncio.Task] = []
+
+        class _AsyncPage:
+            width = 1120
+            height = 760
+            window = SimpleNamespace(width=1120)
+
+            def run_task(self, coro_fn, *args, **kwargs):
+                t = asyncio.create_task(coro_fn(*args, **kwargs))
+                tasks.append(t)
+                return t
+
+            def update(self):
+                pass
+
+        view = ScheduleWeekView(
+            page=_AsyncPage(),
+            fetch_week=_maint_fail,
+            on_maintenance=_on_maint,
+        )
+        anchor = _monday(TODAY)
+        cached_sess = _session(TODAY, subject="Lịch đã lưu an toàn")
+        view._weeks[anchor] = {TODAY: (cached_sess,)}
+
+        await view._load_async(anchor)
+        assert view.sessions_for_day(TODAY) == (cached_sess,)
+        assert view._auth_failed is False
+        is_loading, err = view.week_status(anchor)
+        assert is_loading is False
+        assert "01h00 - 04h00" in err
+        assert "04h00 ngày 28/11/2026" in err
+        assert maintenance_events == [(notice, False)]
+
+        # Prefetch should not hammer remaining weeks while _maintenance_active is True
+        fetch_calls.clear()
+        await view._prefetch_async()
+        assert fetch_calls == []
+
+        # Manual reload_week resets _maintenance_active and passes user_initiated=True
+        view.reload_week(anchor)
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        assert maintenance_events[-1] == (notice, True)
+        assert view.sessions_for_day(TODAY) == (cached_sess,)
+
+    asyncio.run(scenario())
+
