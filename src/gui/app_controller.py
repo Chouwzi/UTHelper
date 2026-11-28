@@ -3531,6 +3531,7 @@ class AppController:
             on_open_courses=lambda: self._safe_run_task(self._show_course_grades),
             course_grades_lookup=self._lookup_moodle_course_grades_cached,
             course_grades_async_lookup=self._fetch_moodle_course_grades_async,
+            on_open_roadmap=lambda: self._safe_run_task(self._show_roadmap),
         )
         self.course_grades_view = CoursesView(
             on_close=lambda: self._safe_run_task(self._close_course_grades),
@@ -6916,27 +6917,50 @@ class AppController:
     async def _show_roadmap(self, force_refresh: bool = False):
         """Open the Learning Roadmap. Offline-first: fresh cache, else Portal,
         else the last saved copy (clearly flagged as offline in the view)."""
+        import hashlib
+
+        from config import get_data_dir
         from core.learning_roadmap.service import (
+            CACHE_FILE_NAME,
             SOURCE_NONE,
             LearningRoadmapService,
             RoadmapLoadResult,
         )
 
+        username = str(settings.UTH_USERNAME or settings.MOODLE_USERNAME or "").strip()
+        password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD or ""
+        # Cache per account so switching users never shows another account's plan.
+        account_key = hashlib.sha256(
+            username.casefold().encode("utf-8")
+        ).hexdigest()[:20]
+        cache_file = Path(get_data_dir()) / (
+            f"{Path(CACHE_FILE_NAME).stem}_{account_key}{Path(CACHE_FILE_NAME).suffix}"
+        )
+        account_epoch = getattr(self, "_account_epoch", 0)
+
         self._diag_screen("roadmap")
         self._diag_breadcrumb("navigation", "succeeded", "user", screen="roadmap")
         self.view_manager.show_roadmap_loading()
         self._sync_rail_active()
+        service = None
         try:
             service = getattr(self, "_roadmap_service", None)
-            if service is None:
+            if (
+                service is None
+                or getattr(self, "_roadmap_service_account_key", None) != account_key
+            ):
+                # Drop the previous account's in-memory copy before rebuilding.
+                clear_cache = getattr(service, "clear_cache", None)
+                if callable(clear_cache):
+                    clear_cache()
                 # Reuse the shared PortalClient so the cached token is not
                 # re-negotiated and account switches clear it in one place.
                 service = LearningRoadmapService(
-                    portal_client=getattr(self, "_portal_client", None)
+                    cache_file,
+                    portal_client=getattr(self, "_portal_client", None),
                 )
                 self._roadmap_service = service
-            username = settings.UTH_USERNAME or settings.MOODLE_USERNAME
-            password = settings.UTH_PASSWORD or settings.MOODLE_PASSWORD
+                self._roadmap_service_account_key = account_key
             result = await asyncio.to_thread(
                 service.load,
                 username=username,
@@ -6946,7 +6970,12 @@ class AppController:
         except Exception as e:
             logger.error("Learning roadmap load failed: %s", e, exc_info=True)
             result = RoadmapLoadResult(None, SOURCE_NONE, None, "Lỗi không xác định")
-        self.roadmap_view.set_plan_owner(settings.UTH_USERNAME or settings.MOODLE_USERNAME or "")
+        if account_epoch != getattr(self, "_account_epoch", 0):
+            # The account changed while the request was in flight: discard it.
+            if service is not None:
+                service.clear_cache()
+            return
+        self.roadmap_view.set_plan_owner(username)
         self.view_manager.show_roadmap_result(result)
 
     async def _close_roadmap(self):
