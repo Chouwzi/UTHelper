@@ -50,6 +50,17 @@ class TrayApp:
         self._stop_thread = None
         self._stop_helper_failed = False
 
+    @property
+    def is_ready(self) -> bool:
+        """Return whether the native system-tray icon is live and usable."""
+        with self._lifecycle_lock:
+            if self._close_requested or self._icon is None:
+                return False
+            thread = self._thread
+        if not self._ready_event.is_set():
+            return False
+        return thread is None or thread.is_alive()
+
     def setup(self, ready_timeout_seconds: float = 3.0) -> bool:
         """Start the tray and report readiness within a finite deadline."""
         ready_timeout = _bounded_timeout_seconds(

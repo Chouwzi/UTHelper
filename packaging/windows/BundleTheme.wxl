@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="en-us" Language="1033" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="Caption" Value="Cài đặt [WixBundleName]" />
+  <String Id="Title" Value="[WixBundleName]" />
+  <String Id="CheckingForUpdatesLabel" Value="Đang kiểm tra bản cập nhật..." />
+  <String Id="UpdateButton" Value="&amp;Cập nhật lên [WixStdBAUpdateAvailable]" />
+  <String Id="InstallHeader" Value="Chào mừng" />
+  <String Id="InstallMessage" Value="Trình cài đặt sẽ cài đặt hoặc nâng cấp [WixBundleName] trên máy tính và tự động gỡ các phiên bản cũ." />
+  <String Id="InstallMessageOptions" Value="Trình cài đặt sẽ cài đặt hoặc nâng cấp [WixBundleName] trên máy tính." />
+  <String Id="InstallVersion" Value="Phiên bản [WixBundleVersion]" />
+  <String Id="InstallDesktopShortcutCheckbox" Value="Tạo lối tắt trên màn hình &amp;Desktop" />
+  <String Id="InstallStartMenuShortcutCheckbox" Value="Tạo lối tắt trong &amp;Start Menu" />
+  <String Id="ConfirmCancelMessage" Value="Bạn có chắc chắn muốn hủy cài đặt không?" />
+  <String Id="ExecuteUpgradeRelatedBundleMessage" Value="Phiên bản trước" />
+  <String Id="HelpHeader" Value="Trợ giúp cài đặt" />
+  <String Id="HelpText" Value="/install | /repair | /uninstall - cài đặt, sửa lỗi hoặc gỡ cài đặt UTHelper.&#xA;/passive | /quiet - cài đặt tự động không hỏi thêm.&#xA;/norestart - không tự khởi động lại máy.&#xA;/log log.txt - ghi nhật ký cài đặt ra tệp chỉ định." />
+  <String Id="HelpCloseButton" Value="Đó&amp;ng" />
+  <String Id="InstallLicenseLinkText" Value="Điều khoản sử dụng [WixBundleName] &lt;a href=&quot;#&quot;&gt;chi tiết&lt;/a&gt;." />
+  <String Id="InstallAcceptCheckbox" Value="Tôi &amp;đồng ý với điều khoản sử dụng" />
+  <String Id="InstallOptionsButton" Value="&amp;Tùy chọn" />
+  <String Id="InstallInstallButton" Value="&amp;Cài đặt" />
+  <String Id="InstallCancelButton" Value="&amp;Hủy" />
+  <String Id="OptionsHeader" Value="Tùy chọn cài đặt" />
+  <String Id="OptionsLocationLabel" Value="Thư mục cài đặt:" />
+  <String Id="OptionsPerUserScopeText" Value="Chỉ cài cho tài khoản hiện tại" />
+  <String Id="OptionsPerMachineScopeText" Value="Cài cho mọi tài khoản trên máy" />
+  <String Id="OptionsBrowseButton" Value="Chọn..." />
+  <String Id="OptionsOkButton" Value="&amp;Đồng ý" />
+  <String Id="OptionsCancelButton" Value="&amp;Hủy" />
+  <String Id="ProgressHeader" Value="Đang cài đặt" />
+  <String Id="ProgressLabel" Value="Đang xử lý:" />
+  <String Id="OverallProgressPackageText" Value="Đang chuẩn bị..." />
+  <String Id="ProgressCancelButton" Value="&amp;Hủy" />
+  <String Id="ModifyHeader" Value="Quản lý cài đặt" />
+  <String Id="ModifyRepairButton" Value="&amp;Sửa lỗi" />
+  <String Id="ModifyUninstallButton" Value="&amp;Gỡ cài đặt" />
+  <String Id="ModifyCancelButton" Value="&amp;Hủy" />
+  <String Id="SuccessHeader" Value="Hoàn tất cài đặt" />
+  <String Id="SuccessCacheHeader" Value="Tải gói cài đặt hoàn tất" />
+  <String Id="SuccessInstallHeader" Value="Đã cài đặt [WixBundleName] thành công" />
+  <String Id="SuccessLayoutHeader" Value="Trích xuất bộ cài hoàn tất" />
+  <String Id="SuccessModifyHeader" Value="Cập nhật tùy chọn hoàn tất" />
+  <String Id="SuccessRepairHeader" Value="Sửa lỗi cài đặt hoàn tất" />
+  <String Id="SuccessUninstallHeader" Value="Đã gỡ cài đặt [WixBundleName]" />
+  <String Id="SuccessUnsafeUninstallHeader" Value="Đã gỡ cài đặt [WixBundleName]" />
+  <String Id="SuccessLaunchButton" Value="&amp;Mở ngay" />
+  <String Id="SuccessRestartText" Value="Vui lòng khởi động lại máy tính trước khi sử dụng phần mềm." />
+  <String Id="SuccessUninstallRestartText" Value="Vui lòng khởi động lại máy tính để hoàn tất gỡ cài đặt." />
+  <String Id="SuccessRestartButton" Value="&amp;Khởi động lại" />
+  <String Id="SuccessCloseButton" Value="Đó&amp;ng" />
+  <String Id="FailureHeader" Value="Cài đặt không thành công" />
+  <String Id="FailureCacheHeader" Value="Tải gói cài đặt thất bại" />
+  <String Id="FailureInstallHeader" Value="Cài đặt không thành công" />
+  <String Id="FailureLayoutHeader" Value="Trích xuất bộ cài thất bại" />
+  <String Id="FailureModifyHeader" Value="Thay đổi cài đặt thất bại" />
+  <String Id="FailureRepairHeader" Value="Sửa lỗi cài đặt thất bại" />
+  <String Id="FailureUninstallHeader" Value="Gỡ cài đặt thất bại" />
+  <String Id="FailureUnsafeUninstallHeader" Value="Gỡ cài đặt thất bại" />
+  <String Id="FailureHyperlinkLogText" Value="Đã xảy ra lỗi trong quá trình cài đặt. Xem chi tiết tại &lt;a href=&quot;#&quot;&gt;tệp nhật ký&lt;/a&gt;." />
+  <String Id="FailureRestartText" Value="Vui lòng khởi động lại máy tính để hoàn tác thay đổi." />
+  <String Id="FailureRestartButton" Value="&amp;Khởi động lại" />
+  <String Id="FailureCloseButton" Value="Đó&amp;ng" />
+  <String Id="FilesInUseTitle" Value="Tệp đang được sử dụng" />
+  <String Id="FilesInUseLabel" Value="Các ứng dụng sau đang sử dụng tệp cần cập nhật:" />
+  <String Id="FilesInUseNetfxCloseRadioButton" Value="Đóng các ứng dụng đang chạy." />
+  <String Id="FilesInUseCloseRadioButton" Value="Đóng các ứng dụng và tự mở lại sau khi cài." />
+  <String Id="FilesInUseDontCloseRadioButton" Value="Không đóng ứng dụng (cần khởi động lại máy)." />
+  <String Id="FilesInUseRetryButton" Value="&amp;Thử lại" />
+  <String Id="FilesInUseIgnoreButton" Value="&amp;Bỏ qua" />
+  <String Id="FilesInUseExitButton" Value="Th&amp;oát" />
+</WixLocalization>
