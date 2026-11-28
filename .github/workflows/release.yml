@@ -725,7 +725,7 @@ jobs:
           gh release edit "$TAG" --draft=false --latest
           CREATED_RELEASE_ID=""
       - name: Link Sentry release to the exact Git commit
-        uses: getsentry/action-release@ff07929a6537bac57790c3451cf4d364aca38528
+        uses: getsentry/action-release@2e505a70ff06dac263413242aa3617fec90134e5
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
