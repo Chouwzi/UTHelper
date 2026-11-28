@@ -11,12 +11,18 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Iterable
 
 from core.today_schedule import ClassSession
 
 SUPPORTED_LEAD_HOURS = (1, 2, 3)
+
+# The reconciler arms classes through 23:59:59 on this calendar day after
+# today; today's sessions already arrive with the dashboard snapshot. The
+# window slides forward on every reconcile, so a student who keeps the app
+# closed still receives reminders persisted on the last foreground run.
+REMINDER_LOOKAHEAD_DAYS = 14
 
 _ONLINE_MARKERS = (
     "truc tuyen",
@@ -184,7 +190,11 @@ def build_class_schedule_reminders(
     dnd_start: int = 22,
     dnd_end: int = 7,
 ) -> tuple[ClassScheduleReminder, ...]:
-    """Create deduplicated reminders at each selected 1/2/3-hour lead time."""
+    """Create deduplicated reminders at each selected 1/2/3-hour lead time.
+
+    Sessions starting after 23:59:59 on the fourteenth calendar day following
+    today are skipped until the next reconcile slides the window forward.
+    """
     if not enabled:
         return ()
     current = now or datetime.now()
@@ -202,8 +212,15 @@ def build_class_schedule_reminders(
 
     reminders: list[ClassScheduleReminder] = []
     seen: set[str] = set()
+    horizon = datetime.combine(
+        current.date() + timedelta(days=REMINDER_LOOKAHEAD_DAYS),
+        time.max,
+        tzinfo=current.tzinfo,
+    )
     for session in sessions:
         if session.cancelled or session.start_at <= current:
+            continue
+        if session.start_at > horizon:
             continue
         mode = detect_delivery_mode(session)
         if mode is None:

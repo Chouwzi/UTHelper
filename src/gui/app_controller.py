@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 
+from core.class_schedule_notifications import REMINDER_LOOKAHEAD_DAYS
 from core.data_orchestrator import DataOrchestrator
 from core.demo_sandbox import is_demo_account, normalize_demo_username
 from core.distribution import DistributionProfile, resolve_distribution_channel
@@ -32,6 +33,7 @@ from core.portal_client import PortalClient, PortalMaintenanceError
 from core.today_schedule import (
     ScheduleLoadStatus,
     TodayScheduleCache,
+    UpcomingScheduleCache,
     WeekScheduleCache,
     TodayScheduleCoordinator,
     TodayScheduleViewState,
@@ -5003,26 +5005,81 @@ class AppController:
         else:
             self._safe_run_task(coordinator.ensure_today)
 
-    def _fetch_tomorrow_sessions(self, credentials=None):
-        """Async callable: tomorrow's Portal classes for reminder scheduling.
+    def _get_upcoming_schedule_cache(self, username: str) -> UpcomingScheduleCache:
+        namespace = f"{settings.PORTAL_API_BASE}|{username}"
+        return UpcomingScheduleCache(namespace=namespace)
+
+    async def _fetch_upcoming_sessions(self, credentials=None):
+        """Async callable: Portal classes inside the reminder look-ahead window.
 
         The reconcile task passes the ``(username, password)`` pair captured
         when it was created, so an in-flight task of the previous account keeps
         fetching with its own credentials instead of reading the global
         settings after a switch.
+
+        Days ``1..REMINDER_LOOKAHEAD_DAYS`` after today are fetched one by one
+        with the shared Portal token (today's sessions already arrive with the
+        dashboard snapshot). The window is all-or-nothing: any failure — a
+        dead network or a rejected session — propagates, because the manager
+        keeps the previously armed alarms on a fetch error instead of
+        replacing them with a partial window (which would cancel the alarms of
+        the days that failed to fetch) and clears them on
+        ``ScheduleAuthenticationError``.
         """
         from datetime import timedelta
 
         if credentials is None:
             credentials = (settings.UTH_USERNAME, settings.UTH_PASSWORD)
         username, password = credentials
-        tomorrow = datetime.now().date() + timedelta(days=1)
-        return asyncio.to_thread(
-            self._portal_client.fetch_day,
-            tomorrow,
-            username,
-            password,
+        if not username or not password or is_demo_account(username):
+            return ()
+        expected_identity = (username, password)
+        has_identity_snapshot = hasattr(self, "_settings_identity")
+        identity_snapshot = tuple(
+            getattr(self, "_settings_identity", expected_identity)
         )
+        if identity_snapshot != expected_identity:
+            return ()
+        has_account_epoch = hasattr(self, "_account_epoch")
+        account_epoch = getattr(self, "_account_epoch", None)
+
+        def account_is_current() -> bool:
+            return (
+                (not has_identity_snapshot or tuple(
+                    getattr(self, "_settings_identity", ())
+                ) == identity_snapshot)
+                and (
+                    not has_account_epoch
+                    or getattr(self, "_account_epoch", None) == account_epoch
+                )
+            )
+
+        if not account_is_current():
+            return ()
+
+        cache = self._get_upcoming_schedule_cache(str(username))
+        cached = cache.load_fresh()
+        if cached is not None and account_is_current():
+            return cached.sessions
+
+        today = datetime.now().date()
+        upcoming = []
+        for offset in range(1, REMINDER_LOOKAHEAD_DAYS + 1):
+            if not account_is_current():
+                return ()
+            day_sessions = await asyncio.to_thread(
+                self._portal_client.fetch_day,
+                today + timedelta(days=offset),
+                username,
+                password,
+            )
+            if not account_is_current():
+                return ()
+            upcoming.extend(day_sessions)
+        sessions = tuple(upcoming)
+        if account_is_current():
+            cache.save(sessions)
+        return sessions
 
     async def _reconcile_class_schedule_notifications(
         self, sessions, *, clear_only: bool = False
@@ -5048,8 +5105,11 @@ class AppController:
         await reconcile(
             effective_sessions,
             clear_only=effective_clear_only,
-            fetch_day=self._fetch_tomorrow_sessions,
-            identity_getter=lambda: getattr(self, "_settings_identity", None),
+            fetch_day=self._fetch_upcoming_sessions,
+            identity_getter=lambda: (
+                getattr(self, "_settings_identity", None),
+                getattr(self, "_account_epoch", None),
+            ),
             android_bridge=getattr(self, "_android_background", None),
         )
 

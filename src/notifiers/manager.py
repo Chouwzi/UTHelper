@@ -583,8 +583,9 @@ class NotificationManager:
 
         ``clear_only=True`` drops every class reminder without any network
         call. ``fetch_day`` is an optional async callable receiving a
-        ``(username, password)`` snapshot and returning tomorrow's sessions,
-        ``identity_getter`` the current account identity, and
+        ``(username, password)`` snapshot and returning the sessions of the
+        forward reminder window (tomorrow through ``REMINDER_LOOKAHEAD_DAYS``
+        days ahead), ``identity_getter`` the current account identity, and
         ``android_bridge`` the optional native scheduler.
         """
         # Snapshot the account at TASK CREATION — before waiting for the lock.
@@ -637,17 +638,19 @@ class NotificationManager:
             )
             if enabled and fetch_day is not None:
                 # TodayScheduleCoordinator owns today's dashboard snapshot.
-                # Fetch tomorrow once during foreground scheduling as well, so
-                # a class beginning tomorrow can still have its alarm persisted
-                # before the app is suspended or the user leaves the device.
+                # Fetch the forward window once during foreground scheduling
+                # as well, so classes beyond today still have their alarms
+                # persisted before the app is suspended or the user leaves
+                # the device: a student who keeps the app closed for a week
+                # keeps receiving the reminders armed on the last run.
                 try:
-                    tomorrow_sessions = await fetch_day(credentials_before)
+                    upcoming_sessions = await fetch_day(credentials_before)
                     if stale_task():
                         logger.info(
                             "Skipping class-schedule reconcile: account changed during fetch"
                         )
                         return
-                    session_snapshot.extend(tomorrow_sessions)
+                    session_snapshot.extend(upcoming_sessions)
                 except ScheduleAuthenticationError:
                     # The Portal session is gone: the cached sessions belong to
                     # a login that no longer works, so drop them and clear the
@@ -660,7 +663,7 @@ class NotificationManager:
                     session_snapshot = []
                 except Exception:
                     logger.warning(
-                        "Could not fetch tomorrow's Portal timetable for reminders",
+                        "Could not fetch the upcoming Portal timetable for reminders",
                         exc_info=True,
                     )
                     # The native and Windows schedulers replace their full

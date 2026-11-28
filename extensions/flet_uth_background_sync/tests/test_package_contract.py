@@ -349,6 +349,9 @@ def test_flutter_package_registers_ios_user_notifications_adapter():
     assert "UNUserNotificationCenter" in swift
     assert 'case "import_activities"' in swift
     assert "seenScheduleKeys" in swift
+    assert "maximumClassScheduleNotificationRequests = 24" in swift
+    assert "maximumPendingNotificationRequests = 64" in swift
+    assert "candidates.prefix(Self.maximumClassScheduleNotificationRequests)" in swift
     assert "s.source_files = 'Classes/**/*.swift'" in podspec
 
 
@@ -462,4 +465,3 @@ def test_external_intent_launcher_sanitizes_browsable_intents_and_blocks_redirec
     assert "parsed.replaceExtras(null" in plugin
     assert "VIEW_DYNAMIC_LINK" in plugin
     assert 'case "launch_external_intent":' in swift
-

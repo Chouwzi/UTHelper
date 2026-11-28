@@ -15,7 +15,12 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 import gui.app_controller as app_controller_module
-from core.today_schedule import ScheduleLoadStatus, TodayScheduleViewState
+from core.today_schedule import (
+    ClassSession,
+    ScheduleLoadStatus,
+    TodayScheduleViewState,
+    UpcomingScheduleCache,
+)
 from core.update_coordinator import UpdateCoordinator, UpdateEvent, UpdateEventKind
 from core.update_models import LaunchResult, ReleasePackage
 from gui.app_controller import (
@@ -325,7 +330,7 @@ def test_auth_required_schedule_state_clears_class_reminders():
 
 
 def test_reconcile_clear_only_never_calls_portal_fetch(monkeypatch):
-    """Logout/account-switch clearing must not fetch tomorrow's timetable."""
+    """Logout/account-switch clearing must not fetch any timetable."""
     from unittest.mock import Mock
 
     from config import settings
@@ -563,6 +568,194 @@ def test_reconcile_auth_failure_clears_the_previously_armed_schedule(monkeypatch
     # The old ``except Exception`` path kept scheduling the cached sessions;
     # the auth branch must flip ``enabled`` off so the payload is empty.
     assert applied == [()]
+
+
+def _isolate_upcoming_schedule_cache(controller, tmp_path, credentials):
+    controller._settings_identity = credentials
+    controller._get_upcoming_schedule_cache = lambda username: UpcomingScheduleCache(
+        tmp_path, namespace=f"portal|{username}"
+    )
+
+
+def test_fetch_upcoming_sessions_never_calls_portal_for_demo_account():
+    from unittest.mock import Mock
+
+    controller = AppController.__new__(AppController)
+    controller._portal_client = SimpleNamespace(fetch_day=Mock())
+    assert asyncio.run(controller._fetch_upcoming_sessions(("uthelper_demo", "demo"))) == ()
+    controller._portal_client.fetch_day.assert_not_called()
+
+
+def test_fetch_upcoming_sessions_requests_the_full_two_week_window(tmp_path):
+    """Days +1..+14 after today are fetched with the reconciler's credentials."""
+    controller = AppController.__new__(AppController)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append((target_date, username, password))
+        return (
+            ClassSession(
+                session_id=f"session-{target_date.isoformat()}",
+                subject="Calculus",
+                course_code="MATH101",
+                start_at=datetime.combine(target_date, datetime.min.time()),
+                end_at=datetime.combine(target_date, datetime.min.time())
+                + timedelta(hours=2),
+                room="A.101",
+                campus="Campus 1",
+                period_start=1,
+                period_end=3,
+                cancelled=False,
+                note="",
+            ),
+        )
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("student-01", "secret"))
+
+    sessions = asyncio.run(
+        controller._fetch_upcoming_sessions(("student-01", "secret"))
+    )
+
+    today = datetime.now().date()
+    assert [item[0] for item in requested] == [
+        today + timedelta(days=offset) for offset in range(1, 15)
+    ]
+    assert all(item[1:] == ("student-01", "secret") for item in requested)
+    assert len(sessions) == 14
+
+
+def test_fetch_upcoming_sessions_reuses_fresh_cached_window(tmp_path):
+    controller = AppController.__new__(AppController)
+    calls = []
+
+    def fetch_day(target_date, username, password):
+        calls.append((target_date, username, password))
+        return ()
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("student-01", "secret"))
+
+    first = asyncio.run(controller._fetch_upcoming_sessions(("student-01", "secret")))
+    second = asyncio.run(controller._fetch_upcoming_sessions(("student-01", "secret")))
+
+    assert first == second == ()
+    assert len(calls) == 14
+
+
+def test_fetch_upcoming_sessions_stops_when_account_changes_mid_window(tmp_path):
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    requested = []
+    credentials = ("student-01", "secret")
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        controller._settings_identity = ("", "")
+        return ("old-account-session",)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, credentials)
+
+    sessions = asyncio.run(controller._fetch_upcoming_sessions(credentials))
+
+    assert sessions == ()
+    assert requested == [today + timedelta(days=1)]
+    cache = controller._get_upcoming_schedule_cache("student-01")
+    assert cache.load_fresh() is None
+
+
+def test_fetch_upcoming_sessions_stops_after_logout_even_if_same_account_relogs(
+    tmp_path,
+):
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    requested = []
+    credentials = ("student-01", "secret")
+    controller._account_epoch = 4
+
+    def fetch_day(target_date, _username, _password):
+        requested.append(target_date)
+        controller._account_epoch += 1
+        return ()
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, credentials)
+
+    sessions = asyncio.run(controller._fetch_upcoming_sessions(credentials))
+
+    assert sessions == ()
+    assert requested == [today + timedelta(days=1)]
+
+
+def test_fetch_upcoming_sessions_aborts_the_window_when_one_day_fails(tmp_path):
+    """A failed day aborts the run so the armed alarms are left untouched.
+
+    The manager keeps the previously persisted set when the fetch raises
+    (transient outage), so a partial window must never be returned: it would
+    cancel the alarms of the days that failed to fetch.
+    """
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    broken = today + timedelta(days=5)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        if target_date == broken:
+            raise OSError("network down")
+        return (target_date.isoformat(),)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("u", "p"))
+
+    with pytest.raises(OSError):
+        asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
+
+    # Fail-fast: nothing after the broken day is even requested.
+    assert requested == [today + timedelta(days=offset) for offset in range(1, 6)]
+
+
+def test_fetch_upcoming_sessions_fails_fast_on_a_dead_network(tmp_path):
+    """The first failure aborts the window instead of paying 14 timeouts."""
+    controller = AppController.__new__(AppController)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        raise OSError("network down")
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("u", "p"))
+
+    with pytest.raises(OSError):
+        asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
+
+    assert len(requested) == 1
+
+
+def test_fetch_upcoming_sessions_propagates_a_rejected_portal_session(tmp_path):
+    """Auth failure aborts the window so the manager clears stale alarms."""
+    from core.today_schedule import ScheduleAuthenticationError
+
+    controller = AppController.__new__(AppController)
+    today = datetime.now().date()
+    rejected = today + timedelta(days=3)
+    requested = []
+
+    def fetch_day(target_date, username, password):
+        requested.append(target_date)
+        if target_date == rejected:
+            raise ScheduleAuthenticationError("Portal rejected the session")
+        return (target_date.isoformat(),)
+
+    controller._portal_client = SimpleNamespace(fetch_day=fetch_day)
+    _isolate_upcoming_schedule_cache(controller, tmp_path, ("u", "p"))
+
+    with pytest.raises(ScheduleAuthenticationError):
+        asyncio.run(controller._fetch_upcoming_sessions(("u", "p")))
+
+    assert len(requested) == 3
 
 
 @pytest.mark.parametrize("use_android_bridge", [False, True], ids=["windows", "android"])
@@ -3129,4 +3322,3 @@ def test_perform_data_sync_skips_when_logged_out_without_error_state_or_fetch(mo
     assert controller.refresh_btn.disabled is False
     assert controller.error_state.visible is False
     controller._set_sync_status.assert_not_called()
-

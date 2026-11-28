@@ -16,6 +16,7 @@ from core.demo_sandbox import DEMO_USERNAME
 import gui.app_controller as app_controller_module
 from gui.app_controller import AppController
 import gui.components.login_dialog as login_dialog_module
+import gui.controllers.courses_coordinator as courses_coordinator_module
 from gui.components.detail_view import DetailView
 from gui.components.login_dialog import show_login_dialog
 from gui.components.settings_view import SettingsView
@@ -254,6 +255,11 @@ def test_courses_coordinator_and_detail_view_guard_demo_lms_while_keeping_local_
     monkeypatch,
 ):
     monkeypatch.setattr(settings, "UTH_USERNAME", DEMO_USERNAME)
+    monkeypatch.setattr(
+        courses_coordinator_module,
+        "build_embedded_webview_host",
+        lambda *_args, **_kwargs: SimpleNamespace(control=lambda: ft.Container()),
+    )
 
     overlay_snacks: list[object] = []
     pushed_overlays: list[tuple[object, str]] = []
@@ -790,4 +796,3 @@ def test_android_background_sync_disables_worker_logs_out_and_skips_room_import_
     asyncio.run(controller._complete_login_success())
     mock_bridge.logout.assert_awaited_once()
     mock_bridge.configure.assert_awaited_once_with("", token_origin="")
-

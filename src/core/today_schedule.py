@@ -343,6 +343,62 @@ class TodayScheduleCache:
         return bool(SafeFileIO.write_json_atomic(self._path, payload))
 
 
+UPCOMING_SCHEDULE_CACHE_TTL_SECONDS = 3 * 60 * 60
+
+
+@dataclass(frozen=True)
+class UpcomingScheduleSnapshot:
+    sessions: tuple[ClassSession, ...]
+    fetched_at: datetime
+
+
+class UpcomingScheduleCache:
+    """Short-lived disk cache for the forward class-reminder window."""
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, cache_dir: Path | None = None, namespace: str = "") -> None:
+        if cache_dir is None:
+            from config import _USER_DATA_DIR
+
+            cache_dir = _USER_DATA_DIR
+        digest = hashlib.sha256(namespace.strip().casefold().encode("utf-8")).hexdigest()[:12]
+        self._path = cache_dir / f"upcoming_schedule_{digest}.json"
+
+    def load_fresh(self, *, now: datetime | None = None) -> UpcomingScheduleSnapshot | None:
+        payload = SafeFileIO.read_json_safe(self._path, dict)
+        if not isinstance(payload, dict) or payload.get("version") != self.SCHEMA_VERSION:
+            return None
+        rows = payload.get("sessions")
+        if not isinstance(rows, list):
+            return None
+        try:
+            fetched_at = datetime.fromisoformat(str(payload["fetched_at"]))
+            current = now or datetime.now(tz=fetched_at.tzinfo)
+            age = (current - fetched_at).total_seconds()
+            # The cached 14-day window is anchored to the calendar day it was
+            # fetched. After midnight it is missing the new fourteenth day.
+            if current.date() != fetched_at.date() or not 0 <= age < UPCOMING_SCHEDULE_CACHE_TTL_SECONDS:
+                return None
+            sessions = tuple(
+                ClassSession.from_dict(row) for row in rows if isinstance(row, dict)
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            logger.warning("Upcoming schedule cache is invalid")
+            return None
+        return UpcomingScheduleSnapshot(sessions, fetched_at)
+
+    def save(
+        self, sessions: tuple[ClassSession, ...] | list[ClassSession], *, fetched_at: datetime | None = None
+    ) -> bool:
+        payload = {
+            "version": self.SCHEMA_VERSION,
+            "fetched_at": (fetched_at or datetime.now()).isoformat(),
+            "sessions": [session.to_dict() for session in sessions],
+        }
+        return bool(SafeFileIO.write_json_atomic(self._path, payload))
+
+
 WEEK_CACHE_RADIUS = 4  # weeks kept before and after the current week
 
 

@@ -307,6 +307,15 @@ Thông báo lịch học cho phép chọn một hoặc nhiều mốc 1, 2, 3 gi�
 tạm ngưng (`isTamNgung`) không được lên lịch; khi Portal được đồng bộ lại, các thông báo cũ được
 đối chiếu và cập nhật/hủy theo snapshot mới.
 
+Cửa sổ lên lịch kéo dài **2 tuần** (`REMINDER_LOOKAHEAD_DAYS = 14`): mỗi lần đồng bộ foreground,
+ứng dụng lấy thêm lịch các ngày kế tiếp qua `/lichhoc/ngay` và giữ lại các cảnh báo đã đặt trên
+nền (Android `AlarmManager`, scheduler tray trên Windows), nên người dùng không mở app cả tuần
+vẫn nhận thông báo đi học. Cửa sổ có tính nguyên tử: một lần truy cập Portal thất bại sẽ giữ nguyên
+toàn bộ lịch đã đặt thay vì thay bằng cửa sổ nửa vời làm mất cảnh báo của ngày lỗi; lỗi xác thực
+vẫn dọn toàn bộ lịch như trước.
+
+The forward reminder window is cached per student account for three hours, so reopening the app does not repeat all 14 Portal requests. Fetching stops as soon as the active account changes. Day 14 remains eligible through 23:59:59. On iOS, class reminders are capped at 24 pending requests, leaving room within the shared 64-request limit for assignment deadlines.
+
 ### `GET /api/v1/lichhoc/tuan?date={YYYY-MM-DD}`
 
 **Description:** Lịch tuần; thêm `ngayBatDauHoc` và `giangVien` (có thể null).

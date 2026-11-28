@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time as time_module
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from core.today_schedule import (
     ClassSession,
@@ -11,6 +11,8 @@ from core.today_schedule import (
     TodayScheduleCache,
     TodayScheduleCoordinator,
     TodayScheduleSnapshot,
+    UpcomingScheduleCache,
+    UPCOMING_SCHEDULE_CACHE_TTL_SECONDS,
     next_schedule_refresh_at,
     parse_portal_day,
     select_spotlight_session,
@@ -188,6 +190,31 @@ def test_today_schedule_cache_round_trips_sessions(tmp_path):
 
     assert cache.save(snapshot) is True
     assert cache.load_for(date(2026, 8, 11)) == snapshot
+
+
+def test_upcoming_schedule_cache_is_account_scoped_and_expires_after_three_hours(
+    tmp_path,
+):
+    fetched_at = datetime(2026, 8, 11, 8, 0)
+    cache = UpcomingScheduleCache(tmp_path, namespace="portal|student")
+    other_account_cache = UpcomingScheduleCache(tmp_path, namespace="portal|other")
+
+    assert cache.save((_session(),), fetched_at=fetched_at) is True
+    cached = cache.load_fresh(
+        now=fetched_at + timedelta(seconds=UPCOMING_SCHEDULE_CACHE_TTL_SECONDS - 1)
+    )
+    assert cached is not None
+    assert cached.sessions == (_session(),)
+    assert other_account_cache.load_fresh(now=fetched_at) is None
+    assert cache.load_fresh(
+        now=fetched_at + timedelta(seconds=UPCOMING_SCHEDULE_CACHE_TTL_SECONDS)
+    ) is None
+
+
+def test_upcoming_schedule_cache_expires_at_midnight(tmp_path):
+    cache = UpcomingScheduleCache(tmp_path, namespace="portal|student")
+    assert cache.save((_session(),), fetched_at=datetime(2026, 8, 11, 23, 59))
+    assert cache.load_fresh(now=datetime(2026, 8, 12, 0, 1)) is None
 
 
 def test_next_schedule_refresh_uses_midnight_and_six_am_boundaries():

@@ -9,6 +9,8 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
     private static let requestPrefix = "uth.deadline."
     private static let immediatePrefix = "uth.immediate."
     private static let classSchedulePrefix = "uth.class."
+    private static let maximumPendingNotificationRequests = 64
+    private static let maximumClassScheduleNotificationRequests = 24
     private static let settingsKey = "uth.notification.settings"
     private static let receiptsKey = "uth.notification.receipts"
     private static let keychainService = "com.uthelper.app_secrets"
@@ -305,7 +307,10 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             for request in existing where request.identifier.hasPrefix(Self.classSchedulePrefix) {
                 combined.append((self.triggerDate(of: request), request, false))
             }
-            let kept = self.nearest(combined, limit: 64)
+            let kept = self.nearest(
+                combined,
+                limit: Self.maximumPendingNotificationRequests
+            )
             let selectedRequests = kept.filter { $0.2 }.map { $0.1 }
             let keptIdentifiers = Set(kept.map { $0.1.identifier })
             let droppedClassIdentifiers = combined
@@ -424,11 +429,13 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                 return (reminderID, scheduled, content)
             }.sorted { $0.1 < $1.1 }
 
-            // Build the class requests up front so they can compete with
-            // deadline requests for the single 64-slot pending budget by
-            // nearest trigger, instead of reserving whatever is left over.
+            // Limit class reminders to 24 so deadline reminders retain room
+            // in iOS's shared 64-slot pending-notification budget.
             var classRequests: [UNNotificationRequest] = []
-            for (reminderID, scheduled, content) in candidates {
+            let selectedCandidates = Array(
+                candidates.prefix(Self.maximumClassScheduleNotificationRequests)
+            )
+            for (reminderID, scheduled, content) in selectedCandidates {
                 let identifier = Self.classSchedulePrefix + self.stableIdentifier(reminderID)
                 let components = Calendar.current.dateComponents(
                     [.year, .month, .day, .hour, .minute, .second],
@@ -450,7 +457,10 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
             for request in existing where request.identifier.hasPrefix(Self.requestPrefix) {
                 combined.append((self.triggerDate(of: request), request, false))
             }
-            let kept = self.nearest(combined, limit: 64)
+            let kept = self.nearest(
+                combined,
+                limit: Self.maximumPendingNotificationRequests
+            )
             let selectedRequests = kept.filter { $0.2 }.map { $0.1 }
             let keptIdentifiers = Set(kept.map { $0.1.identifier })
             let droppedDeadlineIdentifiers = combined
@@ -480,6 +490,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
                     self.finish(result, [
                         "desired": candidates.count,
                         "scheduled": selectedRequests.count - failures.count,
+                        "deferred": max(0, candidates.count - selectedRequests.count),
                         "cancelled": oldIdentifiers.count,
                         "failed": failures.count,
                         "errors": failures,

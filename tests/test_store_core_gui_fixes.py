@@ -906,4 +906,3 @@ def test_sec_pc_01_call_ws_api_invalidtoken_never_retries_cross_account_request(
     assert post_calls[0][1]["wstoken"] == "tok_A_expired"
     assert settings.MOODLE_WS_TOKEN == "tok_B_valid"
     assert settings.MOODLE_WS_TOKEN_USERNAME == "studentB"
-
