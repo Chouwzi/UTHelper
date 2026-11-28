@@ -885,3 +885,92 @@ def test_l01_l02_daemon_flush_leaves_zero_executor_threads_and_idle_loop_sleeps_
 
     rt.close()
 
+
+def test_m02_reset_local_state_blocked_on_spool_io_lock_invalidates_id_and_blocks_flush(
+    tmp_path: Path,
+):
+    clk = _ManualClock(datetime(2026, 11, 28, 18, 0, 0, tzinfo=UTC))
+    rt = AnalyticsRuntime(
+        data_dir=tmp_path,
+        config=_cfg(),
+        clock=clk.now_utc,
+        monotonic=clk.now_mono,
+    )
+    sent_batches: list[list[str]] = []
+
+    class _SpyTransport:
+        def send_batch(self, events, *, timeout_seconds, is_cancelled=None):
+            if is_cancelled is not None and is_cancelled():
+                return BatchDeliveryOutcome.retryable_failure("cancelled")
+            sent_batches.append([ev.distinct_id for ev in events])
+            return BatchDeliveryOutcome.confirmed_success(status_code=200)
+
+    rt.delivery._transport = _SpyTransport()  # type: ignore[assignment]
+    rt.set_account_state(authenticated=True, is_demo=False)
+    rt.on_foreground("cold_foreground", "home")
+    id_a = rt.identity_store.peek_cached()
+    assert id_a is not None
+    rt.flush_ram_to_spool(fsync=False)
+    assert len(rt.spool.pending()) == 1
+
+    # Hold rt._spool_io_lock on a helper thread (simulating an in-flight flush_ram_to_spool)
+    # while rt.reset_local_state() executes its fast lock and blocks on _drain_pending_disk_purge().
+    spool_lock_held = threading.Event()
+    release_spool_lock = threading.Event()
+
+    def _hold_spool_io_lock() -> None:
+        with rt._spool_io_lock:
+            spool_lock_held.set()
+            assert release_spool_lock.wait(timeout=3.0)
+
+    holder_thread = threading.Thread(target=_hold_spool_io_lock, daemon=True)
+    holder_thread.start()
+    assert spool_lock_held.wait(timeout=2.0)
+
+    reset_thread = threading.Thread(target=rt.reset_local_state, daemon=True)
+    reset_thread.start()
+
+    deadline = time.perf_counter() + 2.0
+    while not rt.consent_gate.purging and time.perf_counter() < deadline:
+        time.sleep(0.005)
+    assert rt.consent_gate.purging is True
+    # UI consent query still reports ENABLED while is_enabled_at(epoch) is suppressed!
+    snap_consent, snap_epoch = rt.consent_gate.snapshot()
+    assert rt.current_consent is AnalyticsConsent.ENABLED
+    assert snap_consent is AnalyticsConsent.ENABLED
+    assert rt.consent_gate.is_enabled_at(snap_epoch) is False
+
+    # 1. Cached retired UUID_A is ALREADY invalidated in memory (0ms)!
+    assert rt.identity_store.peek_cached() is None
+
+    # 2. Both delivery.flush_once() and _run_network_flush_task() send 0 pre-reset batches!
+    flush_summary = rt.delivery.flush_once()
+    assert flush_summary.skipped_consent is True
+    assert flush_summary.sent_batches == 0
+    rt._run_network_flush_task()
+    assert sent_batches == []
+
+    # 3. Concurrent record_interaction() (and even direct tracker/identity_store access)
+    #    during pending purge NEVER reuses retired UUID_A!
+    rt.record_interaction("home")
+    assert all(ev.distinct_id != id_a for ev in rt._ram_buffer)
+
+    # Release _spool_io_lock so reset_local_state() completes disk purge cleanly.
+    release_spool_lock.set()
+    holder_thread.join(timeout=2.0)
+    reset_thread.join(timeout=2.0)
+    assert rt.consent_gate.purging is False
+    assert rt.spool.pending() == ()
+    assert not (rt.analytics_dir / INSTALLATION_FILENAME).exists()
+
+    # Post-reset interaction mints a brand-new UUID_B != UUID_A!
+    clk.advance(1.0)
+    rt.record_interaction("home")
+    id_b = rt.identity_store.peek_cached()
+    assert id_b is not None and id_b != id_a
+    post_events = _spooled_events(rt)
+    assert len(post_events) == 1
+    assert post_events[0].distinct_id == id_b
+    rt.close()
+
+

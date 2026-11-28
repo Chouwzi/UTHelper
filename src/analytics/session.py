@@ -176,6 +176,22 @@ class ForegroundSessionTracker:
                 or self._pending_filter is not None
             )
 
+    def mark_current_screen(self, screen: ScreenName | str | None) -> None:
+        """Update remembered current screen in memory without starting a session."""
+        if screen is None:
+            return
+        selected_screen = ScreenName(screen)
+        with self._lock:
+            self._current_screen = selected_screen
+
+    def mark_foreground_state(self, *, screen: ScreenName | str | None = None) -> None:
+        """Mark UI foreground-visible in memory without starting a session."""
+        selected_screen = ScreenName(screen) if screen is not None else None
+        with self._lock:
+            if selected_screen is not None:
+                self._current_screen = selected_screen
+            self._foreground_visible = True
+
     def _can_emit_foreground_locked(self) -> bool:
         return (
             self.config.active_eligible

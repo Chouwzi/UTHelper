@@ -395,7 +395,7 @@ class AnalyticsRuntime:
         self._buffer_lock = threading.Lock()
         self._ram_buffer: deque[AnalyticsEvent] = deque()
         self._immediate_spool_needed = False
-        self._pending_disk_purge = False
+        self._pending_disk_purge_count = 0
         self._spool_write_seq = 1
         self._spool_flushed_seq = 0
         self._next_network_flush_mono = 0.0
@@ -510,7 +510,8 @@ class AnalyticsRuntime:
                 if (
                     latest is self.consent_gate.current
                     and self.tracker.consent is latest
-                    and not self._pending_disk_purge
+                    and self._pending_disk_purge_count == 0
+                    and not self.consent_gate.purging
                 ):
                     return
         self.set_consent(latest)
@@ -529,7 +530,8 @@ class AnalyticsRuntime:
                 if (
                     selected is self.consent_gate.current
                     and self.tracker.consent is selected
-                    and not self._pending_disk_purge
+                    and self._pending_disk_purge_count == 0
+                    and not self.consent_gate.purging
                 ):
                     return
 
@@ -539,10 +541,12 @@ class AnalyticsRuntime:
                     return
                 with self.consent_gate._lock, self.tracker._lock, self._buffer_lock:
                     self.consent_gate.set_consent(selected)
+                    self.consent_gate.begin_purge()
                     self.tracker.set_consent(selected)
+                    self.identity_store.invalidate_memory()
                     self._ram_buffer.clear()
                     self._immediate_spool_needed = False
-                    self._pending_disk_purge = True
+                    self._pending_disk_purge_count += 1
             self._drain_pending_disk_purge()
             self._wakeup_event.set()
             return
@@ -586,11 +590,12 @@ class AnalyticsRuntime:
             if self._closed:
                 return
             with self.consent_gate._lock, self.tracker._lock, self._buffer_lock:
-                self.consent_gate.bump_epoch()
+                self.consent_gate.begin_purge()
                 self.tracker.purge_in_memory_state()
+                self.identity_store.invalidate_memory()
                 self._ram_buffer.clear()
                 self._immediate_spool_needed = False
-                self._pending_disk_purge = True
+                self._pending_disk_purge_count += 1
         self._drain_pending_disk_purge()
         self._wakeup_event.set()
 
@@ -632,7 +637,9 @@ class AnalyticsRuntime:
                 self.flush_ram_to_spool(fsync=False)
 
             _, post_epoch = self.consent_gate.snapshot()
-            post_events = self.tracker.start_after_account_ready()
+            post_events: list[AnalyticsEvent] = []
+            if self.consent_gate.is_enabled_at(post_epoch):
+                post_events = self.tracker.start_after_account_ready()
             if post_events:
                 self._enqueue_ram_events(
                     post_events,
@@ -662,6 +669,10 @@ class AnalyticsRuntime:
                 self.tracker.authenticated_non_demo and self.tracker.foreground_visible
             )
             _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                self.tracker.mark_foreground_state(screen=screen)
+                self._wakeup_event.set()
+                return
             events = self.tracker.on_foreground(trigger=trigger, screen=screen)
             if events:
                 self._enqueue_ram_events(
@@ -707,6 +718,10 @@ class AnalyticsRuntime:
                 return
         try:
             _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                self.tracker.mark_current_screen(screen)
+                self._wakeup_event.set()
+                return
             events = self.tracker.record_interaction(screen=screen)
             if events:
                 self._enqueue_ram_events(
@@ -732,6 +747,10 @@ class AnalyticsRuntime:
         try:
             was_eligible = self.tracker.authenticated_non_demo and self.tracker.foreground_visible
             _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                self.tracker.mark_current_screen(screen)
+                self._wakeup_event.set()
+                return False
             events = self.tracker.capture_screen_viewed(screen, nav_source)
             enqueued = False
             if events:
@@ -760,6 +779,8 @@ class AnalyticsRuntime:
         try:
             was_eligible = self.tracker.authenticated_non_demo and self.tracker.foreground_visible
             _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
+                return False
             events = self.tracker.capture_filter_applied(surface, filter_kind)
             enqueued = False
             if events:
@@ -990,8 +1011,8 @@ class AnalyticsRuntime:
         with self._lifecycle_lock:
             if self._closed:
                 return 0
-        consent, epoch = self.consent_gate.snapshot()
-        if consent is not AnalyticsConsent.ENABLED:
+        _, epoch = self.consent_gate.snapshot()
+        if not self.consent_gate.is_enabled_at(epoch):
             return 0
         events = self.tracker.poll_timers()
         if events:
@@ -1012,7 +1033,11 @@ class AnalyticsRuntime:
         with self._spool_io_lock:
             self._drain_pending_disk_purge_locked()
             consent, epoch = self.consent_gate.snapshot()
-            if consent is not AnalyticsConsent.ENABLED or not self.config.active_eligible:
+            if (
+                consent is not AnalyticsConsent.ENABLED
+                or not self.consent_gate.is_enabled_at(epoch)
+                or not self.config.active_eligible
+            ):
                 with self._buffer_lock:
                     self._ram_buffer.clear()
                     self._immediate_spool_needed = False
@@ -1047,8 +1072,10 @@ class AnalyticsRuntime:
         deadline_seconds: float = MAX_DELIVERY_TIMEOUT_SECONDS,
     ) -> AnalyticsFlushSummary:
         """Advance due timers, flush RAM -> spool, and execute one HTTP delivery pass."""
+        self._drain_pending_disk_purge(blocking=False)
         self.poll_timers()
         self.flush_ram_to_spool(fsync=False)
+        self._drain_pending_disk_purge(blocking=False)
         return self.delivery.flush_once(deadline_seconds=deadline_seconds)
 
     def close(self) -> None:
@@ -1105,8 +1132,8 @@ class AnalyticsRuntime:
             if self._closed:
                 return False
         try:
-            consent, epoch = self.consent_gate.snapshot()
-            if consent is not AnalyticsConsent.ENABLED:
+            _, epoch = self.consent_gate.snapshot()
+            if not self.consent_gate.is_enabled_at(epoch):
                 return False
             events = self.tracker.capture_event(
                 event,
@@ -1142,7 +1169,10 @@ class AnalyticsRuntime:
             if expected_epoch is not None:
                 if not self.consent_gate.is_enabled_at(expected_epoch):
                     return False
-            elif self.consent_gate.current is not AnalyticsConsent.ENABLED:
+            elif (
+                self.consent_gate.current is not AnalyticsConsent.ENABLED
+                or self.consent_gate.purging
+            ):
                 return False
             self._ram_buffer.extend(events)
             if (
@@ -1192,6 +1222,7 @@ class AnalyticsRuntime:
 
     def _run_network_flush_task(self) -> None:
         try:
+            self._drain_pending_disk_purge(blocking=False)
             seq_before = self._spool_write_seq
             summary = self.delivery.flush_once(
                 deadline_seconds=MAX_DELIVERY_TIMEOUT_SECONDS
@@ -1301,15 +1332,25 @@ class AnalyticsRuntime:
             pass
 
     def _drain_pending_disk_purge_locked(self) -> None:
-        with self.consent_gate._lock:
-            if not self._pending_disk_purge:
-                return
-            self._pending_disk_purge = False
-        self._purge_local_files_unlocked()
+        while True:
+            with self.consent_gate._lock:
+                count = self._pending_disk_purge_count
+                if count <= 0:
+                    return
+                self._pending_disk_purge_count = 0
+            try:
+                self._purge_local_files_unlocked()
+            finally:
+                self.consent_gate.end_purge(count)
 
-    def _drain_pending_disk_purge(self) -> None:
-        with self._spool_io_lock:
+    def _drain_pending_disk_purge(self, *, blocking: bool = True) -> bool:
+        if not self._spool_io_lock.acquire(blocking=blocking):
+            return False
+        try:
             self._drain_pending_disk_purge_locked()
+            return True
+        finally:
+            self._spool_io_lock.release()
 
     def _purge_local_files_best_effort(self) -> None:
         with self._spool_io_lock:

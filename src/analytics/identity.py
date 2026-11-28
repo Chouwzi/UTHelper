@@ -57,6 +57,12 @@ class InstallationIdentityStore:
         with self._lock:
             return self._cached_distinct_id
 
+    def invalidate_memory(self) -> None:
+        """Clear cached ``distinct_id`` and force a fresh mint without disk I/O."""
+        with self._lock:
+            self._cached_distinct_id = None
+            self._force_new_mint = True
+
     def get_or_create(self, *, allow_create: bool = True) -> str | None:
         """Return existing or newly minted UUIDv4 ``distinct_id`` when ``allow_create=True``."""
         with self._lock:
