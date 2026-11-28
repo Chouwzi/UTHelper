@@ -1072,6 +1072,9 @@ class SettingsView(ft.Container):
                 spacing=10,
                 scroll=ft.ScrollMode.AUTO,
                 on_scroll=self._on_theme_cards_scroll,
+                # Keep Flutter's horizontal scrollable state when a page-wide
+                # theme repaint rebuilds the surrounding settings controls.
+                key=ft.ValueKey("settings-theme-cards-scroll"),
             ),
             padding=ft.Padding.only(top=4, bottom=4),
         )
@@ -1090,7 +1093,9 @@ class SettingsView(ft.Container):
         if offset is None or row is None:
             return
         try:
-            await asyncio.sleep(0)
+            # Let the page-wide theme repaint finish its Flutter frame before
+            # restoring the saved offset; a zero-delay yield can run too early.
+            await asyncio.sleep(0.05)
             await row.scroll_to(offset=offset, duration=0)
         except (AttributeError, RuntimeError, TypeError):
             return
@@ -1181,6 +1186,7 @@ class SettingsView(ft.Container):
 
         return ft.Container(
             content=card_content,
+            key=ft.ValueKey(f"settings-theme-card-{key}"),
             width=115,
             padding=ft.Padding.all(8),
             border_radius=12,
