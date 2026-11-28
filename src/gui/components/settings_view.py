@@ -94,9 +94,6 @@ class SettingsView(ft.Container):
         self.bgcolor  = C.BG
         self._selected_theme = getattr(settings, 'THEME', 'steel_light')
         self._original_theme = self._selected_theme  # For revert on discard
-        self._theme_cards_scroll_offset = 0.0
-        self._theme_cards_pending_scroll_offset: float | None = None
-        self._theme_cards_restoring_scroll = False
         self._themed_texts = []  # Track ft.Text instances for live theme refresh (early init)
         self._hint_containers = []
         self._tiles = []
@@ -1072,62 +1069,9 @@ class SettingsView(ft.Container):
                 controls=cards,
                 spacing=10,
                 scroll=ft.ScrollMode.AUTO,
-                on_scroll=self._on_theme_cards_scroll,
-                # Keep Flutter's horizontal scrollable state when a page-wide
-                # theme repaint rebuilds the surrounding settings controls.
-                key=ft.ValueKey("settings-theme-cards-scroll"),
             ),
             padding=ft.Padding.only(top=4, bottom=4),
         )
-
-    def _on_theme_cards_scroll(self, event) -> None:
-        try:
-            offset = float(getattr(event, "pixels", 0.0))
-        except (TypeError, ValueError):
-            return
-        if offset >= 0:
-            # Applying a theme can temporarily recreate Flutter's scrollable at
-            # offset zero while the page-wide theme update is still in flight.
-            # Keep the last user position until the final restore has completed.
-            if self._theme_cards_restoring_scroll and offset == 0:
-                return
-            self._theme_cards_scroll_offset = offset
-
-    async def _restore_theme_cards_scroll(self) -> None:
-        offset = self._theme_cards_pending_scroll_offset
-        row = getattr(getattr(self, "_theme_cards_row", None), "content", None)
-        if offset is None or row is None:
-            return
-        import logging
-        log = logging.getLogger("UTHelper.settings")
-        self._theme_cards_restoring_scroll = True
-        try:
-            # A theme change updates both MaterialApp and the settings subtree.
-            # Flutter may finish those updates on separate frames, so restoring
-            # only once can be followed by a late reset to zero. Reapply the
-            # exact saved offset across the repaint window.
-            for delay in (0.01, 0.08, 0.2):
-                await asyncio.sleep(delay)
-                await row.scroll_to(offset=offset, duration=0)
-        except (AttributeError, RuntimeError, TypeError):
-            log.exception("Theme carousel restoration failed")
-        finally:
-            self._theme_cards_restoring_scroll = False
-            if self._theme_cards_pending_scroll_offset == offset:
-                self._theme_cards_pending_scroll_offset = None
-
-    def _schedule_theme_cards_scroll_restore(self) -> None:
-        offset = self._theme_cards_pending_scroll_offset
-        run_task = getattr(getattr(self, "_page", None), "run_task", None)
-        if offset is None:
-            return
-        if offset is not None and offset <= 0:
-            self._theme_cards_pending_scroll_offset = None
-        if callable(run_task):
-            try:
-                run_task(self._restore_theme_cards_scroll)
-            except (RuntimeError, TypeError):
-                pass
 
     def _make_theme_card(self, key: str, preset: dict, selected: bool):
         """Create a single theme preview card."""
@@ -1199,7 +1143,6 @@ class SettingsView(ft.Container):
 
         return ft.Container(
             content=card_content,
-            key=ft.ValueKey(f"settings-theme-card-{key}"),
             width=115,
             padding=ft.Padding.all(8),
             border_radius=12,
@@ -1214,23 +1157,22 @@ class SettingsView(ft.Container):
         """Handle theme card selection - applies IMMEDIATELY for live preview."""
         import logging
         log = logging.getLogger("UTHelper.settings")
+        log.info(f"[THEME] _on_theme_select called: {theme_key}")
         try:
-            # Snapshot before any theme/page repaint can emit a scroll event at
-            # offset zero and overwrite the last user-selected position.
-            self._theme_cards_pending_scroll_offset = getattr(
-                self, "_theme_cards_scroll_offset", 0.0
-            )
             self._selected_theme = theme_key
             self._apply_theme_colors(theme_key)
             # Apply theme globally RIGHT NOW for instant preview
             apply_theme(theme_key)
+            log.info(f"[THEME] After apply_theme: TEXT_PRIMARY={C.TEXT_PRIMARY}, TEXT_SECONDARY={C.TEXT_SECONDARY}")
             # Sync Flet's page.theme ColorScheme
             from gui.core.theme import set_page_theme
             set_page_theme(self._page, theme_name=theme_key)
-            # Update settings view colors before the global theme repaint.
+            # Update settings view own colors
             self.bgcolor = C.BG
             # Refresh all section containers with new theme colors
             self._refresh_section_colors()
+            log.info(f"[THEME] After _refresh_section_colors: _back_text.color={getattr(self._back_text, 'color', '?')}, _title_text.color={getattr(self._title_text, 'color', '?')}")
+            log.info(f"[THEME] themed_texts={len(self._themed_texts)}, hint_containers={len(self._hint_containers)}, tiles={len(self._tiles)}")
             # Notify app_controller to refresh entire UI (dashboard, header, footer, cards)
             if self._on_theme_preview:
                 self._on_theme_preview()
@@ -1246,11 +1188,9 @@ class SettingsView(ft.Container):
                 getattr(self, "_update_save_button_state")
             ):
                 self._update_save_button_state()
-            # The app callback repaints the page once. Avoid a second full
-            # update here, which can recreate the horizontal viewport.
-            if not self._on_theme_preview:
-                self._page.update()
-            self._schedule_theme_cards_scroll_restore()
+            # Force full page repaint
+            self._page.update()
+            log.info("[THEME] page.update() completed successfully")
         except Exception as exc:
             log.error(f"[THEME] EXCEPTION in _on_theme_select: {exc}", exc_info=True)
 
@@ -1615,8 +1555,6 @@ class SettingsView(ft.Container):
 
     def _rebuild_theme_cards(self):
         """Restore preset previews and update selection state in place."""
-        if self._theme_cards_pending_scroll_offset is None:
-            self._theme_cards_pending_scroll_offset = self._theme_cards_scroll_offset
         row_ctrl = self._theme_cards_row.content
         if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) == len(THEME_ORDER):
             for i, key in enumerate(THEME_ORDER):
@@ -1667,9 +1605,11 @@ class SettingsView(ft.Container):
                 except Exception:
                     import logging as _fb_log
                     _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
-            # Let the single page.update() at the end of theme selection flush
-            # these changed leaf properties. Updating this row or each card
-            # separately can reset the native horizontal scroll position.
+            try:
+                row_ctrl.update()
+            except Exception:
+                import logging as _fb_log
+                _fb_log.getLogger(__name__).debug("Ignored exception", exc_info=True)
         else:
             # Fallback if row or length mismatch
             new_row = self._build_theme_selector()
@@ -1748,11 +1688,6 @@ class SettingsView(ft.Container):
             self._update_save_button_state()
 
         self.update()
-        schedule_scroll_restore = getattr(
-            self, "_schedule_theme_cards_scroll_restore", None
-        )
-        if callable(schedule_scroll_restore):
-            schedule_scroll_restore()
 
     async def _handle_test_login(self, e):
         raw_user = self._username_field.value or ""
