@@ -2124,6 +2124,8 @@ class CalendarView(ft.Container):
                     self._selected_date = sel
                 except ValueError:
                     pass
+        # Update tab colors before rendering because the render methods can
+        # call page.update() immediately.
         self._style_mode_buttons()
         self._reset_period_pager()
         if self._view_mode == "month":
