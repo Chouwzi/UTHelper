@@ -1,4 +1,4 @@
-# Store Distribution & Submission Guide (Google Play, Microsoft Store & LTS)
+# Store Distribution & Submission Guide (Apple App Store, Google Play, Microsoft Store & LTS)
 
 Status: current operator guide and pre-submission compliance checklist for
 UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi-channel-store-and-lts-distribution.md)).
@@ -11,6 +11,8 @@ UTHelper's multi-channel distribution architecture ([ADR 0004](../adr/0004-multi
 | `apk_lts` | Android `.apk` (`io.github.chouwzi.uthelper`, `universal` + `arm64-v8a`) | GitHub Releases (LTS) | Signed GitHub Releases (`DownloadManager` + `ApkUpdateInstaller`, Schema 3 `sideload`) | Retained |
 | `msstore` | Windows `.msix` (`x64`) | Microsoft Store | Microsoft Store-managed (`ms-windows-store://pdp/?ProductId=...`) | Disabled (zero GitHub polling or external installers) |
 | `exe_lts` | Windows `.msi` + Burn `.exe` (`x64`) | GitHub Releases (LTS) | Signed GitHub Releases (Authenticode-pinned `WindowsPackageVerifier` + `WindowsPackageLauncher`) | Retained |
+| `ios_app_store` | iOS App Store app bundle | Apple App Store | Apple-managed | Disabled (zero GitHub polling or external installers) |
+| `ios_lts` | iOS unsigned `.ipa` (`arm64`) | GitHub Releases (LTS) | Manual user re-signing (Sideloadly / AltStore) | Retained (opens the release page) |
 | `ios_sideload` | iOS unsigned `.ipa` (`io.github.chouwzi.uthelper`, `arm64`) | GitHub Releases (LTS) | Manual user re-signing (Sideloadly / AltStore) | Manual release page link only |
 
 > **Cross-channel, legacy `apk_lts`, and iOS sideload migration notes**:
@@ -319,18 +321,18 @@ prefer direct Android `.apk` or Windows `.msi`/Burn `.exe` installers:
 
 ---
 
-## 5. Apple App Store (iOS) — Deferred Roadmap
+## 5. Apple App Store (iOS) Preparation
 
-- **Current status**: **Deferred** (not scheduled for initial store launch).
-- **Reason**: Publishing on the Apple App Store requires an active Apple
-  Developer Program membership ($99 USD/year). Because UTHelper is a free,
-  non-commercial (`PolyForm Noncommercial 1.0.0`) student project, the team does
-  not currently have dedicated budget for Apple's recurring developer fee.
+- **Build preparation**: iOS builds declare the `ios_app_store` distribution
+  channel, embed `PrivacyInfo.xcprivacy` at the app bundle root, and keep
+  App Transport Security enabled. The GitHub simulator build checks this bundle
+  contract and confirms that the external self-updater is disabled.
+- **Update policy**: App Store builds receive updates through Apple. The
+  unsigned `ios_lts` GitHub artifact remains available for manual re-signing.
+- **Submission requirements**: the App Store release still requires a signed
+  device archive, an Apple Developer account, App Store Connect metadata,
+  a hosted privacy policy URL, and completed privacy disclosures based on the
+  final binary and its third-party SDKs.
 - **Interim iOS support**: UTHelper continues to ship an unsigned `iPhoneOS`
   `arm64` `.ipa` in every 7-asset GitHub LTS release for manual re-signing via
   Sideloadly or AltStore.
-- **Future path**: After UTHelper launches smoothly on Google Play (CH Play) and
-  Microsoft Store and validates sustained student demand, the team may open a
-  transparent community support / crowdfunding effort to cover the Apple
-  Developer Program fee and introduce a dedicated `appstore` distribution
-  channel following the same compliance architecture as `chplay` and `msstore`.

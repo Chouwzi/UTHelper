@@ -750,7 +750,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
         let query = baseKeychainQuery()
         let updateAttributes: [String: Any] = [
             kSecValueData as String: payload,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
         let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
         if updateStatus == errSecSuccess {
@@ -762,7 +762,7 @@ public final class UthBackgroundSyncPlugin: NSObject, FlutterPlugin, UNUserNotif
 
         var addQuery = query
         addQuery[kSecValueData as String] = payload
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         return addStatus == errSecSuccess
     }

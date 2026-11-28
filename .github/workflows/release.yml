@@ -268,11 +268,15 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
-          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json
+          python scripts/generate_public_runtime_config.py --require-configured --sentry-dsn "$SENTRY_DSN" --output src/assets/diagnostics-config.json --distribution-channel ios_lts --distribution-output src/assets/distribution-channel.json
           flet build ipa --build-version "$VERSION" --build-number "$BUILD_NUMBER" --yes --verbose
           find build/ipa -mindepth 1 -maxdepth 1 -type d -name '*.xcarchive' -print | sort > "$RUNNER_TEMP/xcarchive-candidates.txt"
           test "$(wc -l < "$RUNNER_TEMP/xcarchive-candidates.txt" | tr -d ' ')" -eq 1
           XCARCHIVE=$(sed -n '1p' "$RUNNER_TEMP/xcarchive-candidates.txt")
+          find "$XCARCHIVE/Products/Applications" -mindepth 1 -maxdepth 1 -type d -name '*.app' -print | sort > "$RUNNER_TEMP/ios-archive-apps.txt"
+          test "$(wc -l < "$RUNNER_TEMP/ios-archive-apps.txt" | tr -d ' ')" -eq 1
+          APP=$(sed -n '1p' "$RUNNER_TEMP/ios-archive-apps.txt")
+          python scripts/prepare_ios_app_store.py --app-bundle "$APP"
           mkdir -p release evidence
           FINAL_IPA="release/UTHelper-$VERSION.ipa"
           python scripts/package_unsigned_ipa.py \

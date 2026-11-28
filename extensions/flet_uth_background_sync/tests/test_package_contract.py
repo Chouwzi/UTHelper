@@ -360,7 +360,7 @@ def test_ios_plugin_implements_keychain_app_secret_vault():
     for method in ('case "read_app_secrets":', 'case "write_app_secrets":', 'case "clear_app_secrets":'):
         assert method in swift
     assert "kSecClassGenericPassword" in swift
-    assert "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly" in swift
+    assert "kSecAttrAccessibleWhenUnlockedThisDeviceOnly" in swift
     assert "SecItemCopyMatching" in swift
     assert "SecItemUpdate" in swift
     assert "SecItemAdd" in swift

@@ -152,8 +152,9 @@ flet-uth-background-sync = "extensions/flet_uth_background_sync"
 flet-uth-quiz = "extensions/flet_uth_quiz"
 
 [tool.flet.ios.info]
-# Allow cleartext HTTP for Moodle instances without HTTPS
-NSAppTransportSecurity = { NSAllowsArbitraryLoads = true }
+# Keep Apple's App Transport Security enabled for every iOS connection.
+NSAppTransportSecurity = { NSAllowsArbitraryLoads = false, NSAllowsLocalNetworking = true }
+ITSAppUsesNonExemptEncryption = false
 # Permission descriptions (required by App Store)
 NSUserNotificationsUsageDescription = "UTHelper cần quyền thông báo để nhắc deadline bài tập và lịch học."
 

@@ -1233,7 +1233,11 @@ def test_store_channel_suppresses_update_coordinator_and_github_client(monkeypat
     import pytest
     from core.distribution import DistributionChannel, build_distribution_profile
 
-    for channel in (DistributionChannel.CHPLAY, DistributionChannel.MSSTORE):
+    for channel in (
+        DistributionChannel.CHPLAY,
+        DistributionChannel.MSSTORE,
+        DistributionChannel.IOS_APP_STORE,
+    ):
         monkeypatch.setattr(
             app_controller_module,
             "resolve_distribution_channel",
@@ -1346,6 +1350,15 @@ def test_open_store_url_uses_external_launch_and_https_fallback(monkeypatch):
     ]
 
     assert controller._open_store_url("javascript:alert(1)") is False
+
+    assert controller._open_store_url(
+        "itms-apps://apps.apple.com/app/id6750123456",
+        "https://apps.apple.com/app/id6750123456",
+    ) is True
+    assert calls[-1] == (
+        "itms-apps://apps.apple.com/app/id6750123456",
+        ft.LaunchMode.EXTERNAL_APPLICATION,
+    )
 
 
 def test_run_page_task_propagates_exceptions_and_handles_missing_session():

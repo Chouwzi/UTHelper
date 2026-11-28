@@ -2727,3 +2727,13 @@ rg -n "Wait-Process" scripts/test_windows_single_instance_e2e.ps1
 
 
 
+
+## iOS App Store packaging preparation (2026-11-22)
+
+- Added distinct `ios_app_store` and `ios_lts` distribution channels. iOS defaults to the App Store profile, which disables GitHub self-updates; explicit LTS retains sideload updates.
+- Added the app-owned `packaging/ios/PrivacyInfo.xcprivacy` manifest and `scripts/prepare_ios_app_store.py`; kept ATS enabled and wired simulator/LTS archive validation.
+- Added optional numeric `app_store_id` metadata and `itms-apps://` / HTTPS links; the workflow reads GitHub Actions variable `APP_STORE_ID`, intentionally unset until publication.
+- Declared `ITSAppUsesNonExemptEncryption = false` and validate the generated Info.plist value.
+- Added iOS Keychain storage for app secrets in the Swift plugin using `WhenUnlockedThisDeviceOnly`; generalized Python mobile secret migration while preserving Android compatibility aliases.
+- Packaged the plugin `PrivacyInfo.xcprivacy` in its CocoaPods resource bundle and kept mobile content within Flet SafeArea for notch/Dynamic Island/home indicator.
+- Verification before merge: 249 focused tests passed; Ruff and `git diff --check` passed; GitHub iOS, Android, MSIX, Python 3.12-3.14, lint, and security checks passed.

@@ -10,6 +10,9 @@ Schedules UTHelper deadline reminders with iOS UserNotifications.
   s.author           = { 'UTHelper' => 'noreply@uthelper.local' }
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*.swift'
+  s.resource_bundles = {
+    'flet_uth_background_sync_privacy' => ['PrivacyInfo.xcprivacy']
+  }
   s.dependency 'Flutter'
   s.platform = :ios, '13.0'
   s.swift_version = '5.0'

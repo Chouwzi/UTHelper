@@ -80,6 +80,15 @@ def test_distribution_channel_asset_contract_is_deterministic(tmp_path):
         "schema_version": 1,
         "channel": "exe_lts",
     }
+    assert build_distribution_channel_payload(
+        "ios_app_store", app_store_id="6750123456"
+    ) == {
+        "schema_version": 1,
+        "channel": "ios_app_store",
+        "app_store_id": "6750123456",
+    }
+    with pytest.raises(ReleaseMetadataError, match="app_store_id"):
+        build_distribution_channel_payload("ios_app_store", app_store_id="../bad")
 
 
 def test_release_metadata_cli_writes_distribution_channel(tmp_path):

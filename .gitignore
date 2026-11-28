@@ -83,6 +83,10 @@ build/aab/
 build/ipa/
 *.ipa
 ios/
+# Keep the source Apple privacy manifest; only generated iOS build directories
+# are ignored by the rule above.
+!packaging/ios/
+!packaging/ios/**
 # Keep the source iOS plugin; the rule above is only for generated Flet output.
 !extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/ios/
 !extensions/flet_uth_background_sync/flutter/flet_uth_background_sync/ios/**
