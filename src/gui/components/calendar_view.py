@@ -2099,10 +2099,16 @@ class CalendarView(ft.Container):
         self._selected_day = today.day
         self._selected_date = today
         self._week_start = today - timedelta(days=today.weekday())
+        self._detail_filter_mode = "day"
 
         previous_mode = self._view_mode
         self._view_mode = mode
         if mode == "schedule":
+            self._period_transition_active = False
+            self._period_request_active = False
+            self._pager_recentering = False
+            self._pending_desktop_delta = None
+            self._pending_desktop_control = None
             self._enter_schedule_mode()
             return
         if previous_mode == "schedule":

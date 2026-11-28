@@ -37,8 +37,8 @@ class C:
     CRITICAL       = "#DC2626"
     WARNING        = "#9A6700"
     SAFE           = "#147D3F"
-    MAKEUP_BG      = "#FCF4A3"
-    MAKEUP_TEXT    = "#FDC12A"
+    MAKEUP_BG      = "#FDE68A"
+    MAKEUP_TEXT    = "#854D0E"
     TEXT_PRIMARY   = "#0F172A"
     TEXT_SECONDARY = "#475569"
     BORDER         = "#E2E8F0"
@@ -337,6 +337,11 @@ def apply_theme(theme_name: str) -> None:
     C.ON_SAFE = _best_on_color(C.SAFE, preset, "on_safe")
     C.UPDATE = C.WARNING
     C.ON_UPDATE = C.ON_WARNING
+    is_light = preset.get("mode", "dark") == "light"
+    C.MAKEUP_BG = preset.get("makeup_bg", "#FDE68A" if is_light else "#CA8A04")
+    C.MAKEUP_TEXT = preset.get(
+        "makeup_text", "#854D0E" if is_light else "#FEF08A"
+    )
 
     # Màu sắc của các badge loại hoạt động
     _TYPE_COLORS["quiz"]       = preset["quiz"]

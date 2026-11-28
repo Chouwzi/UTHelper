@@ -24,6 +24,7 @@ def _session(
     course_code: str = "ECE-ENGR-302-2026",
     room: str = "Phòng thực hành Cơ điện tử 03",
     cancelled: bool = False,
+    note: str | None = None,
 ) -> ClassSession:
     return ClassSession(
         session_id=f"session-{day.isoformat()}-{start.isoformat()}",
@@ -36,7 +37,7 @@ def _session(
         period_start=1,
         period_end=3,
         cancelled=cancelled,
-        note="Phòng thực hành tầng 3" if cancelled else "",
+        note=("Phòng thực hành tầng 3" if cancelled else "") if note is None else note,
         link="https://portal.invalid/course",
         meeting_url="https://zoom.invalid/class",
         subject_code="CS-301",
@@ -1188,6 +1189,61 @@ def test_month_date_picker_today_button_and_escape_key():
     # Also verify defensive focus guard when a non-focusable Container is passed to return_focus
     view._show_month_date_picker(return_focus=ft.Container())
     asyncio.run(dialogs[-1].on_dismiss(None))
+
+
+def test_session_summary_card_uses_loose_stack_fit_when_narrow_and_renders_makeup_watermark():
+    view = _view(760)
+    s_cancelled = _session(
+        TODAY,
+        subject="Lập trình mạng",
+        room="A201",
+        cancelled=True,
+        note="GV bận công tác",
+    )
+    s_makeup = _session(
+        TODAY,
+        subject="Trí tuệ nhân tạo",
+        room="B304",
+        cancelled=False,
+        note="Học bù buổi nghỉ lễ",
+    )
+    s_both = _session(
+        TODAY,
+        subject="An toàn thông tin",
+        room="C102",
+        cancelled=True,
+        note="Tạm ngưng buổi học bù",
+    )
+
+    narrow_cancelled = view._session_summary_card(s_cancelled, narrow=True)
+    narrow_makeup = view._session_summary_card(s_makeup, narrow=True)
+    wide_makeup = view._session_summary_card(s_makeup, narrow=False)
+    wide_both = view._session_summary_card(s_both, narrow=False)
+
+    assert narrow_cancelled.height is None
+    assert isinstance(narrow_cancelled.content, ft.Stack)
+    assert narrow_cancelled.content.fit == ft.StackFit.LOOSE
+
+    assert narrow_makeup.height is None
+    assert isinstance(narrow_makeup.content, ft.Stack)
+    assert narrow_makeup.content.fit == ft.StackFit.LOOSE
+
+    assert wide_makeup.height == 172
+    assert wide_makeup.bgcolor == ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
+    assert isinstance(wide_makeup.content, ft.Stack)
+    assert wide_makeup.content.fit == ft.StackFit.EXPAND
+    makeup_wm = wide_makeup.content.controls[0]
+    assert makeup_wm.width == 148
+    assert makeup_wm.height == 24
+    assert makeup_wm.ignore_interactions is True
+    assert makeup_wm.content.value == "Học bù"
+    assert makeup_wm.content.size == 18
+    assert makeup_wm.content.color == ft.Colors.with_opacity(0.70, C.MAKEUP_TEXT)
+
+    # Cancelled takes precedence over makeup note
+    assert wide_both.bgcolor == ft.Colors.with_opacity(0.16, C.CRITICAL)
+    assert wide_both.content.controls[0].content.value == "Tạm ngưng"
+
 
 
 

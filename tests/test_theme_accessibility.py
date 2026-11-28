@@ -198,3 +198,48 @@ def test_gui_components_do_not_own_literal_palette_colors():
                 violations.append(f"{relative}:{line_number}")
 
     assert violations == []
+
+
+def _blend_hex(fg_hex: str, bg_hex: str, alpha: float) -> str:
+    fg = [int(fg_hex.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4)]
+    bg = [int(bg_hex.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4)]
+    out = [round(alpha * f + (1.0 - alpha) * b) for f, b in zip(fg, bg, strict=True)]
+    return "#{:02X}{:02X}{:02X}".format(*out)
+
+
+@pytest.mark.parametrize("theme_name", THEME_ORDER)
+def test_makeup_badge_colors_meet_wcag_aa_across_all_themes(theme_name):
+    apply_theme(theme_name)
+    chip_bg = _blend_hex(C.MAKEUP_BG, C.SURFACE, 0.25)
+
+    assert contrast_ratio(C.MAKEUP_TEXT, chip_bg) >= 4.5, (
+        theme_name,
+        C.MAKEUP_TEXT,
+        chip_bg,
+    )
+    assert contrast_ratio(C.MAKEUP_TEXT, C.SURFACE) >= 4.5, (
+        theme_name,
+        C.MAKEUP_TEXT,
+        C.SURFACE,
+    )
+
+
+def test_makeup_semantic_colors_remap_on_live_light_dark_theme_switch():
+    import flet as ft
+    from gui.core.theme import refresh_semantic_control_colors, semantic_palette
+
+    apply_theme("midnight_blue")
+    dark_palette = semantic_palette()
+    chip = ft.Container(
+        content=ft.Text("Học bù", color=C.MAKEUP_TEXT),
+        bgcolor=ft.Colors.with_opacity(0.25, C.MAKEUP_BG),
+    )
+
+    apply_theme("steel_light")
+    light_palette = semantic_palette()
+    assert dark_palette["MAKEUP_TEXT"] != light_palette["MAKEUP_TEXT"]
+    refresh_semantic_control_colors([chip], dark_palette, light_palette)
+
+    assert chip.content.color == C.MAKEUP_TEXT
+    assert chip.bgcolor == ft.Colors.with_opacity(0.25, C.MAKEUP_BG)
+

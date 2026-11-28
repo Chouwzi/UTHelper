@@ -1880,9 +1880,8 @@ class ScheduleWeekView(ft.Container):
                     card_content,
                 ],
                 alignment=ft.Alignment.CENTER,
-                fit=ft.StackFit.EXPAND,
+                fit=ft.StackFit.LOOSE if narrow else ft.StackFit.EXPAND,
                 clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                expand=True,
             )
         return ft.Container(
             height=None if narrow else 172,
