@@ -23,6 +23,7 @@ class ViewManager:
         detail_switcher=None,
         empty_detail=None,
         on_destination_change=None,
+        on_screen_telemetry=None,
     ):
         self.page = page
         self.dashboard = dashboard
@@ -41,8 +42,24 @@ class ViewManager:
             expand=True, ignore_interactions=True
         )
         self._on_destination_change = on_destination_change
+        self._on_screen_telemetry = on_screen_telemetry
+        self._pending_nav_source: str | None = None
         self._detail_origin = None
         self._settings_navigation_generation = 0
+
+    def set_next_nav_source(self, nav_source: str | None) -> None:
+        """Hint the navigation trigger for the next screen transition."""
+        self._pending_nav_source = nav_source
+
+    def _emit_screen_telemetry(self, screen: str, default_source: str = "tab_bar") -> None:
+        source = getattr(self, "_pending_nav_source", None) or default_source
+        self._pending_nav_source = None
+        cb = getattr(self, "_on_screen_telemetry", None)
+        if callable(cb):
+            try:
+                cb(screen, source)
+            except Exception:
+                pass
 
     def _notify_destination(self, key: str) -> None:
         if callable(self._on_destination_change):
@@ -160,6 +177,7 @@ class ViewManager:
         self._sync_detail_host()
         self._sync_nav_buttons("home")
         self._notify_destination("home")
+        self._emit_screen_telemetry("home", "tab_bar")
         self.page.update()
 
     def show_courses(self):
@@ -169,6 +187,7 @@ class ViewManager:
         self._clear_detail_layer()
         self._sync_nav_buttons("courses")
         self._notify_destination("courses")
+        self._emit_screen_telemetry("courses", "tab_bar")
         if self.courses_view is None:
             self._sync_detail_host()
             self.page.update()
@@ -221,6 +240,7 @@ class ViewManager:
         self._sync_detail_host()
         self._sync_nav_buttons("calendar")
         self._notify_destination("calendar")
+        self._emit_screen_telemetry("calendar", "tab_bar")
         self.page.update()
 
     async def close_calendar(self):
@@ -245,6 +265,7 @@ class ViewManager:
         self._sync_detail_host()
         self._sync_nav_buttons("home")
         self._notify_destination("home")
+        self._emit_screen_telemetry("home", "back")
         self.page.update()
 
     async def show_settings(self):
@@ -268,6 +289,7 @@ class ViewManager:
         self._sync_detail_host()
         self._sync_nav_buttons("settings")
         self._notify_destination("settings")
+        self._emit_screen_telemetry("settings", "tab_bar")
         # Publish immediate visual feedback before any native settings lookup.
         self.page.update()
 
@@ -306,6 +328,7 @@ class ViewManager:
                 self.grade_overview_view._defer_self_update = False
         self._sync_nav_buttons("grades")
         self._notify_destination("grades")
+        self._emit_screen_telemetry("grades", "tab_bar")
         self.page.update()
 
     def _grade_courses_target(self):
@@ -401,6 +424,7 @@ class ViewManager:
             self.grade_overview_view.update_theme()
         if self.course_grades_view is None:
             self._sync_nav_buttons(active_nav)
+        self._emit_screen_telemetry(active_nav, "back")
         self.page.update()
 
     def show_courses_loading(self):
@@ -477,6 +501,7 @@ class ViewManager:
         self._sync_detail_host()
         self._sync_nav_buttons("home")
         self._notify_destination("home")
+        self._emit_screen_telemetry("home", "back")
         self.page.update()
 
     def show_detail_loading(self, data):
@@ -519,6 +544,7 @@ class ViewManager:
         else:
             self._show_only(origin, self.detail_view)
         self._sync_detail_host()
+        self._emit_screen_telemetry("detail", "card_tap")
         self.page.update()
 
     def show_detail_data(self, full_data):
@@ -567,6 +593,16 @@ class ViewManager:
             await asyncio.sleep(0.18)
             self.detail_view.visible = False
             self._show_only(destination)
+        dest_screen = (
+            "calendar"
+            if destination is self.calendar_view
+            else (
+                "courses"
+                if (self.courses_view is not None and destination is self.courses_view)
+                else "home"
+            )
+        )
+        self._emit_screen_telemetry(dest_screen, "back")
         self.page.update()
 
     async def close_settings(self):
@@ -591,6 +627,7 @@ class ViewManager:
         self._sync_detail_host()
         self._sync_nav_buttons("home")
         self._notify_destination("home")
+        self._emit_screen_telemetry("home", "back")
         self.page.update()
 
     def cancel_pending_settings_navigation(self) -> None:

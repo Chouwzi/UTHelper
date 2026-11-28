@@ -18,6 +18,17 @@ import sys
 import tempfile
 import zipfile
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_SOURCE_ROOT = str(_REPOSITORY_ROOT / "src")
+if _SOURCE_ROOT not in sys.path:
+    sys.path.insert(0, _SOURCE_ROOT)
+
+from diagnostics.release_config import (  # noqa: E402
+    PUBLIC_CONFIG_FILENAME,
+    PublicConfigError,
+    validate_public_config_bytes,
+)
+
 
 _CPU_TYPE_ARM64 = 0x0100000C
 _CPU_TYPE_X86_64 = 0x01000007
@@ -235,6 +246,168 @@ def verify_ios_app_office_viewer_assets(
     raise IpaError("iOS app bundle is missing required office_viewer/pdf_viewer assets")
 
 
+_IOS_ALLOWED_PACKAGE_FORMATS = frozenset({"ipa", "ios_app"})
+_MAX_NESTED_APP_ZIP_BYTES = 256 * 1024 * 1024
+
+
+def _validate_ios_diagnostics_bytes(
+    raw: bytes,
+    *,
+    source_label: str,
+    require: bool,
+    effective_build_env: str | None,
+) -> None:
+    try:
+        cfg = validate_public_config_bytes(raw, development=False)
+    except PublicConfigError as exc:
+        raise IpaError(
+            f"Embedded {PUBLIC_CONFIG_FILENAME} ({source_label}) is invalid: {exc}"
+        ) from exc
+
+    if require or cfg.package_format is not None:
+        if cfg.package_format not in _IOS_ALLOWED_PACKAGE_FORMATS:
+            raise IpaError(
+                f"Embedded {PUBLIC_CONFIG_FILENAME} ({source_label}) has unsupported "
+                f"iOS package_format {cfg.package_format!r}"
+            )
+    if effective_build_env is not None and cfg.build_environment != effective_build_env:
+        raise IpaError(
+            f"Embedded {PUBLIC_CONFIG_FILENAME} ({source_label}) build_environment "
+            f"{cfg.build_environment!r} != expected {effective_build_env!r}"
+        )
+
+
+def verify_ios_app_diagnostics_config(
+    app: Path,
+    *,
+    require: bool = False,
+    expected_build_environment: str | None = None,
+) -> bool:
+    """Validate every embedded ``diagnostics-config.json`` in an iOS ``.app`` bundle fail-closed."""
+    bundle = Path(app)
+    if bundle.is_symlink() or not bundle.is_dir() or bundle.suffix != ".app":
+        raise IpaError("exactly one application bundle is required")
+    _ensure_safe_tree(bundle)
+
+    effective_build_env = (
+        expected_build_environment
+        if expected_build_environment is not None
+        else ("release" if require else None)
+    )
+
+    for item in bundle.rglob("*"):
+        if item.is_symlink() and item.name in {"app.zip", PUBLIC_CONFIG_FILENAME}:
+            raise IpaError(
+                f"application contains unsafe symlink for {item.name}: {item}"
+            )
+
+    verified_count = 0
+    found_primary = False
+    app_zips = sorted(
+        item
+        for item in bundle.rglob("app.zip")
+        if not item.is_symlink() and item.is_file()
+    )
+    for app_zip in app_zips:
+        try:
+            if app_zip.stat().st_size > _MAX_NESTED_APP_ZIP_BYTES:
+                raise IpaError(f"Nested app.zip exceeds size limit: {app_zip.name}")
+            with zipfile.ZipFile(app_zip) as nested:
+                seen_names: set[str] = set()
+                zip_has_primary = False
+                for member in nested.infolist():
+                    if member.filename in seen_names:
+                        raise IpaError(
+                            f"Nested app.zip ({app_zip.name}) contains duplicate member: "
+                            f"{member.filename}"
+                        )
+                    seen_names.add(member.filename)
+                    if ((member.external_attr >> 16) & 0o170000) == 0o120000:
+                        raise IpaError(
+                            f"Nested app.zip ({app_zip.name}) contains unsafe symlink member: "
+                            f"{member.filename}"
+                        )
+                    if (
+                        member.filename == PUBLIC_CONFIG_FILENAME
+                        or member.filename.endswith(f"/{PUBLIC_CONFIG_FILENAME}")
+                    ):
+                        if (
+                            member.is_dir()
+                            or member.file_size <= 0
+                            or member.file_size > 4096
+                        ):
+                            raise IpaError(
+                                f"Embedded {PUBLIC_CONFIG_FILENAME} inside "
+                                f"{app_zip.name}:{member.filename} has invalid size"
+                            )
+                        raw = nested.read(member)
+                        if len(raw) == 0 or len(raw) > 4096:
+                            raise IpaError(
+                                f"Embedded {PUBLIC_CONFIG_FILENAME} inside "
+                                f"{app_zip.name}:{member.filename} has invalid byte length"
+                            )
+                        _validate_ios_diagnostics_bytes(
+                            raw,
+                            source_label=f"{app_zip.name}:{member.filename}",
+                            require=require,
+                            effective_build_env=effective_build_env,
+                        )
+                        verified_count += 1
+                        if member.filename in {
+                            f"assets/{PUBLIC_CONFIG_FILENAME}",
+                            f"app/assets/{PUBLIC_CONFIG_FILENAME}",
+                        }:
+                            zip_has_primary = True
+                if require and not zip_has_primary:
+                    raise IpaError(
+                        f"Nested app.zip ({app_zip.name}) is missing primary "
+                        f"assets/{PUBLIC_CONFIG_FILENAME}"
+                    )
+                if zip_has_primary:
+                    found_primary = True
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise IpaError("iOS nested app.zip is invalid") from exc
+
+    loose_configs = sorted(
+        item
+        for item in bundle.rglob(PUBLIC_CONFIG_FILENAME)
+        if not item.is_symlink()
+    )
+    for cfg_path in loose_configs:
+        rel = cfg_path.relative_to(bundle).as_posix()
+        if cfg_path.is_dir():
+            raise IpaError(
+                f"Embedded {PUBLIC_CONFIG_FILENAME} ({rel}) must be a regular file"
+            )
+        try:
+            st = cfg_path.stat()
+            if st.st_size <= 0 or st.st_size > 4096:
+                raise IpaError(
+                    f"Embedded {PUBLIC_CONFIG_FILENAME} ({rel}) has invalid size"
+                )
+            raw = cfg_path.read_bytes()
+        except OSError as exc:
+            raise IpaError(
+                f"Embedded {PUBLIC_CONFIG_FILENAME} ({rel}) cannot be read"
+            ) from exc
+        _validate_ios_diagnostics_bytes(
+            raw,
+            source_label=rel,
+            require=require,
+            effective_build_env=effective_build_env,
+        )
+        verified_count += 1
+        if not app_zips and (
+            rel == f"assets/{PUBLIC_CONFIG_FILENAME}"
+            or rel.endswith(f"/assets/{PUBLIC_CONFIG_FILENAME}")
+        ):
+            found_primary = True
+
+    if require and not found_primary:
+        raise IpaError(f"iOS app bundle is missing embedded {PUBLIC_CONFIG_FILENAME}")
+    return verified_count > 0
+
+
 def inspect_device_app(
     app: Path,
     *,
@@ -242,6 +415,8 @@ def inspect_device_app(
     build_number: str,
     bundle_id: str,
     require_office_viewer: bool = False,
+    require_diagnostics_config: bool = False,
+    expected_build_environment: str | None = None,
 ) -> IosAppMetadata:
     """Validate one unpacked, unsigned device application bundle."""
     bundle = Path(app)
@@ -284,6 +459,11 @@ def inspect_device_app(
         raise IpaError("application executable is invalid")
     architectures = _macho_architectures(executable)
     verify_ios_app_office_viewer_assets(bundle, require=require_office_viewer)
+    verify_ios_app_diagnostics_config(
+        bundle,
+        require=require_diagnostics_config,
+        expected_build_environment=expected_build_environment,
+    )
     return IosAppMetadata(
         bundle_id=actual_bundle,
         version=actual_version,
@@ -336,6 +516,8 @@ def inspect_ipa(
     build_number: str,
     bundle_id: str,
     require_office_viewer: bool = False,
+    require_diagnostics_config: bool = False,
+    expected_build_environment: str | None = None,
 ) -> IosAppMetadata:
     """Reopen and independently validate a packaged IPA."""
     path = Path(ipa)
@@ -354,6 +536,8 @@ def inspect_ipa(
                     build_number=build_number,
                     bundle_id=bundle_id,
                     require_office_viewer=require_office_viewer,
+                    require_diagnostics_config=require_diagnostics_config,
+                    expected_build_environment=expected_build_environment,
                 )
     except (OSError, zipfile.BadZipFile) as exc:
         raise IpaError("IPA container is invalid") from exc
@@ -367,6 +551,8 @@ def package_unsigned_ipa(
     build_number: str,
     bundle_id: str,
     require_office_viewer: bool = False,
+    require_diagnostics_config: bool = False,
+    expected_build_environment: str | None = None,
 ) -> IosAppMetadata:
     """Package one no-codesign xcarchive using the native macOS ZIP tool."""
     archive_path = Path(archive)
@@ -386,6 +572,8 @@ def package_unsigned_ipa(
         build_number=build_number,
         bundle_id=bundle_id,
         require_office_viewer=require_office_viewer,
+        require_diagnostics_config=require_diagnostics_config,
+        expected_build_environment=expected_build_environment,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="uthelper-ipa-package-") as temp:
@@ -420,6 +608,8 @@ def package_unsigned_ipa(
             build_number=build_number,
             bundle_id=bundle_id,
             require_office_viewer=require_office_viewer,
+            require_diagnostics_config=require_diagnostics_config,
+            expected_build_environment=expected_build_environment,
         )
         os.replace(temporary_ipa, destination)
     return verified
@@ -481,18 +671,68 @@ def write_verification_evidence(
     )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--archive", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--evidence", type=Path, required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--build-number", required=True)
-    parser.add_argument("--bundle-id", required=True)
-    parser.add_argument("--commit-sha", required=True)
-    parser.add_argument("--workflow-run-id", required=True)
+    parser.add_argument("--verify-app", type=Path)
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--version")
+    parser.add_argument("--build-number")
+    parser.add_argument("--bundle-id")
+    parser.add_argument("--commit-sha")
+    parser.add_argument("--workflow-run-id")
     parser.add_argument("--require-office-viewer", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--require-diagnostics-config", action="store_true")
+    parser.add_argument(
+        "--expected-build-environment",
+        choices=("release", "develop", "development"),
+        default=None,
+    )
+    args = parser.parse_args(argv)
+    if args.verify_app is not None:
+        if any(
+            opt is not None
+            for opt in (
+                args.archive,
+                args.output,
+                args.evidence,
+                args.version,
+                args.build_number,
+                args.bundle_id,
+                args.commit_sha,
+                args.workflow_run_id,
+            )
+        ):
+            parser.error("--verify-app cannot be combined with IPA packaging arguments")
+        verify_ios_app_office_viewer_assets(
+            args.verify_app,
+            require=args.require_office_viewer,
+        )
+        verify_ios_app_diagnostics_config(
+            args.verify_app,
+            require=args.require_diagnostics_config,
+            expected_build_environment=args.expected_build_environment,
+        )
+        return 0
+
+    missing = [
+        flag
+        for flag, val in (
+            ("--archive", args.archive),
+            ("--output", args.output),
+            ("--evidence", args.evidence),
+            ("--version", args.version),
+            ("--build-number", args.build_number),
+            ("--bundle-id", args.bundle_id),
+            ("--commit-sha", args.commit_sha),
+            ("--workflow-run-id", args.workflow_run_id),
+        )
+        if val is None
+    ]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
+
     metadata = package_unsigned_ipa(
         args.archive,
         args.output,
@@ -500,6 +740,8 @@ def main() -> None:
         build_number=args.build_number,
         bundle_id=args.bundle_id,
         require_office_viewer=args.require_office_viewer,
+        require_diagnostics_config=args.require_diagnostics_config,
+        expected_build_environment=args.expected_build_environment,
     )
     write_verification_evidence(
         args.output,
@@ -508,7 +750,8 @@ def main() -> None:
         workflow_run_id=args.workflow_run_id,
         output=args.evidence,
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

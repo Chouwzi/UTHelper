@@ -36,6 +36,7 @@ def _make_state_only_view():
         _sw_minimize_to_tray=_control(),
         _sw_auto_update=_control(),
         _dd_crash_reporting_consent=_control(),
+        _dd_analytics_consent=_control(),
         _sw_bg_check=_control(),
         _sw_email=_control(),
         _gmail_addr_field=_control(visible=False),
@@ -179,6 +180,7 @@ def _changed_snapshot(baseline, *, start_with_windows=True):
         minimize_to_tray=not baseline.minimize_to_tray,
         auto_update_enabled=not baseline.auto_update_enabled,
         crash_reporting_consent="enabled",
+        analytics_consent="disabled",
         background_check_android=not baseline.background_check_android,
         enable_gmail=True,
         gmail_address="mail-01@example.com",
@@ -229,6 +231,7 @@ def test_complete_settings_snapshot_round_trips_through_every_control(consent):
             "minimize_to_tray": False,
             "auto_update_enabled": False,
             "crash_reporting_consent": consent,
+            "analytics_consent": consent,
             "background_check_android": False,
             "enable_gmail": True,
             "gmail_address": "mail-01@example.com",
@@ -262,6 +265,7 @@ def test_complete_settings_snapshot_round_trips_through_every_control(consent):
 
     assert captured == snapshot
     assert view._dd_crash_reporting_consent.value == consent
+    assert view._dd_analytics_consent.value == consent
     assert view._sw_auto_update.value is False
     assert view._sw_debug.value is True
     assert view._gmail_pw_field.value == "mail-secret"
@@ -958,4 +962,113 @@ def test_settings_view_marshal_ui_handles_destroyed_flet_session_and_closed_loop
     closed_called = []
     SettingsView._marshal_ui(closed_view, lambda: closed_called.append("ran"))
     assert closed_called == []
+
+
+def test_analytics_consent_dirty_state_save_reset_and_theme_callbacks(
+    monkeypatch, tmp_path
+):
+    import flet as ft
+    import config
+    import gui.components.settings_view as settings_view_module
+    from gui.core.theme import C, apply_theme
+
+    # 1. Dirty state + controller callback on save
+    baseline = SettingsFormSnapshot.from_form_values({"analytics_consent": "enabled"})
+    draft = replace(baseline, analytics_consent="disabled")
+    fake_settings = SimpleNamespace(
+        **baseline.to_settings_values(),
+        UTH_CREDENTIALS_ORIGIN="",
+        MOODLE_WS_TOKEN="",
+        MOODLE_WS_TOKEN_ORIGIN="",
+    )
+    consent_calls: list[str] = []
+    reset_calls: list[str] = []
+    controller = SimpleNamespace(
+        apply_analytics_consent=lambda value: consent_calls.append(value),
+        reset_analytics_state=lambda: reset_calls.append("reset"),
+    )
+
+    view = _make_save_view(baseline, baseline)
+    view._controller = controller
+    assert SettingsView.has_changes(view) is False
+    view._dd_analytics_consent.value = "disabled"
+    assert SettingsView.has_changes(view) is True
+
+    monkeypatch.setattr(settings_view_module, "settings", fake_settings)
+    monkeypatch.setattr(settings_view_module, "save_settings", lambda: True)
+    monkeypatch.setattr(settings_view_module._pu, "IS_MOBILE", True)
+
+    assert asyncio.run(SettingsView._save(view, None)) is True
+    assert fake_settings.ANALYTICS_CONSENT == "disabled"
+    assert view._baseline_snapshot == draft
+    assert consent_calls == ["disabled"]
+
+    # 2. _reset_to_defaults restores analytics_consent to "enabled"
+    monkeypatch.setattr(settings_view_module, "apply_theme", lambda *_a, **_k: None)
+    monkeypatch.setattr("gui.core.theme.set_page_theme", lambda *_a, **_k: None)
+    view._apply_theme_colors = Mock()
+    view._refresh_section_colors = Mock()
+    view._notify_min_field = _control()
+    asyncio.run(SettingsView._reset_to_defaults(view, None))
+    assert view._dd_analytics_consent.value == "enabled"
+
+    # 3. _refresh_section_colors refreshes _dd_analytics_consent palette
+    original_theme = config.settings.THEME
+    try:
+        apply_theme("midnight_blue")
+        real_page = SimpleNamespace(
+            overlay=[],
+            update=lambda: None,
+            run_task=lambda *_a: None,
+            window=SimpleNamespace(),
+        )
+        real_view = SettingsView(
+            real_page,
+            SimpleNamespace(client=SimpleNamespace(), get_cached_details_snapshot=lambda: {}),
+            lambda: None,
+            autostart_coordinator=SimpleNamespace(),
+            controller=controller,
+        )
+        apply_theme("steel_light")
+        real_view._refresh_section_colors()
+        assert real_view._dd_analytics_consent.bgcolor == C.BG
+        assert real_view._dd_analytics_consent.color == C.TEXT_PRIMARY
+        assert real_view._dd_analytics_consent.focused_border_color == C.ACCENT
+    finally:
+        apply_theme(original_theme)
+
+    # 4. _do_reset_settings invokes controller.reset_analytics_state without hardcoded analytics paths
+    tasks = []
+    reset_page = SimpleNamespace(
+        overlay=[],
+        update=lambda: None,
+        run_task=lambda fn, *a, **k: tasks.append((fn, a, k)),
+    )
+    settings_json = tmp_path / "settings.json"
+    settings_json.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(config, "_USER_DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "clear_persisted_secrets", lambda: True)
+
+    reset_view = SimpleNamespace(
+        _page=reset_page,
+        _controller=controller,
+        _debug_info_text=ft.Text(),
+    )
+    SettingsView._do_reset_settings(reset_view)
+    coro_fn, args, kwargs = tasks[0]
+
+    async def _drive():
+        task = asyncio.create_task(coro_fn(*args, **kwargs))
+        await asyncio.sleep(0.02)
+        dlg = reset_page.overlay[-1]
+        yes_btn = next(
+            b for b in dlg.actions if getattr(b, "content", None) == "Reset" or getattr(b, "text", None) == "Reset"
+        )
+        yes_btn.on_click(None)
+        await task
+
+    asyncio.run(_drive())
+    assert not settings_json.exists()
+    assert reset_calls == ["reset"]
+
 

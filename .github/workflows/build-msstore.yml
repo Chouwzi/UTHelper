@@ -53,8 +53,10 @@ on:
       - 'scripts/generate_msix_assets.py'
       - 'scripts/prepare_windows_bundle.py'
       - 'scripts/verify_windows_bundle.py'
+      - 'scripts/generate_public_runtime_*.py'
       - '.github/workflows/build-msstore.yml'
       - 'src/core/distribution.py'
+      - 'src/diagnostics/release_config.py'
       - 'src/assets/icon.png'
       - 'src/assets/office_viewer/**'
       - 'src/assets/pdf_viewer/**'
@@ -123,6 +125,8 @@ jobs:
         shell: pwsh
         env:
           SENTRY_DSN: ${{ vars.SENTRY_DSN }}
+          POSTHOG_PROJECT_API_KEY: ${{ vars.POSTHOG_PROJECT_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: |
           $ErrorActionPreference = "Stop"
           $version = (python scripts/release_metadata.py --pyproject pyproject.toml --print-version).Trim()
@@ -135,7 +139,7 @@ jobs:
           try {
             python scripts/release_metadata.py --pyproject pyproject.toml --runtime-output src/assets/release-version
             if ($LASTEXITCODE -ne 0) { throw "Runtime version generation failed" }
-            python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --build-environment "$buildEnv" --package-format msix --output src/assets/diagnostics-config.json --distribution-channel msstore --distribution-output src/assets/distribution-channel.json
+            python scripts/generate_public_runtime_config.py --sentry-dsn "$env:SENTRY_DSN" --posthog-key "$env:POSTHOG_PROJECT_API_KEY" --posthog-host "$env:POSTHOG_HOST" --build-environment "$buildEnv" --package-format msix --output src/assets/diagnostics-config.json --distribution-channel msstore --distribution-output src/assets/distribution-channel.json
             if ($LASTEXITCODE -ne 0) { throw "Diagnostics config generation failed" }
             $clFlag = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
             if ([string]::IsNullOrWhiteSpace($env:CL)) {
@@ -149,7 +153,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Generated Flutter diagnostics verification failed" }
             python scripts/prepare_windows_bundle.py build/windows
             if ($LASTEXITCODE -ne 0) { throw "Windows bundle preparation failed" }
-            python scripts/verify_windows_bundle.py build/windows --expected-version "$version" --strict-site-packages
+            python scripts/verify_windows_bundle.py build/windows --expected-version "$version" --strict-site-packages --require-diagnostics-config
             if ($LASTEXITCODE -ne 0) { throw "Windows bundle verification failed" }
           } finally {
             Remove-Item -LiteralPath "src/assets/distribution-channel.json" -Force -ErrorAction SilentlyContinue
@@ -252,6 +256,7 @@ jobs:
             Version = $msixVersion
             Output = $evidenceJson
             RequireOfficeViewer = $true
+            RequireDiagnosticsConfig = $true
           }
           if (-not [string]::IsNullOrWhiteSpace($storeProductId)) {
             $verifyArgs.StoreProductId = $storeProductId
@@ -301,6 +306,7 @@ jobs:
                 PublisherDisplayName = $publisherDisplayName
                 Version = $msixVersion
                 RequireOfficeViewer = $true
+            RequireDiagnosticsConfig = $true
                 RunWack = $true
                 WackReportPath = "evidence/UTHelper-$version-msstore.wack-report.xml"
               }

@@ -10,6 +10,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_SOURCE_ROOT = str(_REPOSITORY_ROOT / "src")
+if _SOURCE_ROOT not in sys.path:
+    sys.path.insert(0, _SOURCE_ROOT)
+
+from diagnostics.release_config import (  # noqa: E402
+    PUBLIC_CONFIG_FILENAME,
+    PublicConfigError,
+    validate_public_config_bytes,
+)
+
 
 class BundleVerificationError(RuntimeError):
     """Raised when a Windows bundle is missing a required runtime artifact or contains forbidden debug binaries."""
@@ -257,11 +268,68 @@ def _inspect_debug_binaries_and_pe_imports(root: Path, issues: list[str]) -> Non
                 )
 
 
+def _inspect_embedded_diagnostics_config(
+    root: Path,
+    issues: list[str],
+    *,
+    require: bool,
+) -> None:
+    found_valid_primary = False
+    primary_path = root / "app" / "assets" / PUBLIC_CONFIG_FILENAME
+    candidates: list[Path] = []
+    seen_paths: set[str] = set()
+    for path in sorted(root.rglob(PUBLIC_CONFIG_FILENAME)):
+        key = path.relative_to(root).as_posix()
+        if key not in seen_paths:
+            seen_paths.add(key)
+            candidates.append(path)
+    if primary_path.is_symlink():
+        rel_primary = primary_path.relative_to(root).as_posix()
+        if rel_primary not in seen_paths:
+            candidates.append(primary_path)
+
+    for cfg_path in candidates:
+        rel = cfg_path.relative_to(root).as_posix()
+        if cfg_path.is_symlink():
+            issues.append(f"packaged {PUBLIC_CONFIG_FILENAME} must not be a symlink: {rel}")
+            continue
+        if cfg_path.is_dir():
+            issues.append(f"packaged {PUBLIC_CONFIG_FILENAME} must be a regular file: {rel}")
+            continue
+        try:
+            st = cfg_path.stat()
+            if getattr(st, "st_file_attributes", 0) & 0x400:
+                issues.append(
+                    f"packaged {PUBLIC_CONFIG_FILENAME} must not be a reparse point: {rel}"
+                )
+                continue
+            if st.st_size <= 0 or st.st_size > 4096:
+                issues.append(
+                    f"packaged {PUBLIC_CONFIG_FILENAME} has invalid size ({st.st_size} bytes): {rel}"
+                )
+                continue
+            raw = cfg_path.read_bytes()
+        except OSError as exc:
+            issues.append(f"unreadable {PUBLIC_CONFIG_FILENAME} ({rel}): {exc}")
+            continue
+        try:
+            validate_public_config_bytes(raw, development=False)
+        except PublicConfigError as exc:
+            issues.append(f"invalid packaged {PUBLIC_CONFIG_FILENAME} ({rel}): {exc}")
+            continue
+        if cfg_path == primary_path:
+            found_valid_primary = True
+
+    if require and not found_valid_primary:
+        issues.append(f"packaged {PUBLIC_CONFIG_FILENAME} is missing or invalid")
+
+
 def inspect_bundle(
     bundle_dir: Path,
     *,
     expected_version: str | None = None,
     strict_site_packages: bool = False,
+    require_diagnostics_config: bool = False,
 ) -> tuple[str, ...]:
     """Return every detected integrity issue without mutating the bundle."""
     root = bundle_dir.resolve()
@@ -363,6 +431,11 @@ def inspect_bundle(
             if not any((site_packages / "filelock").glob("__init__.py*")):
                 issues.append("packaged filelock module is missing")
 
+    _inspect_embedded_diagnostics_config(
+        root,
+        issues,
+        require=require_diagnostics_config,
+    )
     _inspect_debug_binaries_and_pe_imports(root, issues)
     return tuple(issues)
 
@@ -372,12 +445,14 @@ def verify_bundle(
     *,
     expected_version: str | None = None,
     strict_site_packages: bool = False,
+    require_diagnostics_config: bool = False,
 ) -> None:
     """Raise with a complete diagnostic when the bundle is incomplete or unsafe."""
     issues = inspect_bundle(
         bundle_dir,
         expected_version=expected_version,
         strict_site_packages=strict_site_packages,
+        require_diagnostics_config=require_diagnostics_config,
     )
     if issues:
         raise BundleVerificationError("; ".join(issues))
@@ -392,12 +467,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Verify all Windows runtime extensions (WebView2 WinRT, Foundation, win32gui/process, pypdfium2, lxml, filelock)",
     )
+    parser.add_argument(
+        "--require-diagnostics-config",
+        action="store_true",
+        help="Require a valid app/assets/diagnostics-config.json in the bundle",
+    )
     args = parser.parse_args(argv)
     try:
         verify_bundle(
             args.bundle_dir,
             expected_version=args.expected_version,
             strict_site_packages=args.strict_site_packages,
+            require_diagnostics_config=args.require_diagnostics_config,
         )
     except BundleVerificationError as exc:
         print(f"Windows bundle verification failed: {exc}", file=sys.stderr)

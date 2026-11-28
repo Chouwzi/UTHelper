@@ -2,6 +2,7 @@ import flet as ft
 import asyncio
 from config import settings, save_settings
 from core.demo_sandbox import is_demo_account, normalize_demo_username
+from gui.components.terms_dialog import show_terms_dialog
 from gui.core.theme import C
 
 async def show_login_dialog(
@@ -252,7 +253,7 @@ async def show_login_dialog(
 
                 ft.Container(height=8),
 
-                # Security note
+                # Security note & pre-login Terms / Privacy link
                 ft.Container(
                     content=ft.Row(
                         controls=[
@@ -262,6 +263,39 @@ async def show_login_dialog(
                         ],
                         spacing=6, alignment=ft.MainAxisAlignment.CENTER,
                     ),
+                ),
+                ft.Semantics(
+                    content=ft.GestureDetector(
+                        content=ft.Container(
+                            content=ft.Row(
+                                controls=[
+                                    ft.Icon(
+                                        ft.Icons.DESCRIPTION_OUTLINED,
+                                        size=12,
+                                        color=C.ACCENT,
+                                    ),
+                                    ft.Text(
+                                        "Điều khoản & Quyền riêng tư",
+                                        size=11,
+                                        weight=ft.FontWeight.W_500,
+                                        color=C.ACCENT,
+                                        text_align=ft.TextAlign.CENTER,
+                                    ),
+                                ],
+                                spacing=4,
+                                tight=True,
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                            alignment=ft.Alignment(0, 0),
+                        ),
+                        on_tap=lambda _event: show_terms_dialog(page),
+                        mouse_cursor=ft.MouseCursor.CLICK,
+                    ),
+                    button=True,
+                    label="Điều khoản & Quyền riêng tư",
+                    on_tap_hint_text="Mở Điều khoản sử dụng và quyền riêng tư",
                 ),
             ], tight=True, spacing=4, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             padding=ft.Padding.only(top=8, bottom=4),

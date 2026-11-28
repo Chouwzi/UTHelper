@@ -19,7 +19,8 @@ EXPECTED_FORM_FIELDS = {
     "color_assignment", "color_attendance", "color_open", "color_other",
     "uth_username", "uth_password", "always_on_top", "include_submitted",
     "include_graded", "start_with_windows", "start_minimized", "minimize_to_tray",
-    "auto_update_enabled", "crash_reporting_consent", "background_check_android",
+    "auto_update_enabled", "crash_reporting_consent", "analytics_consent",
+    "background_check_android",
     "enable_gmail", "gmail_address", "gmail_app_password", "enable_discord",
     "discord_webhook_url", "enable_telegram", "telegram_bot_token",
     "telegram_chat_id", "debug_mode", "check_interval_minutes", "fetch_months",
@@ -84,6 +85,52 @@ def test_invalid_consent_is_rejected_without_leaking_a_secret():
 
     assert "crash_reporting_consent" in str(exc_info.value)
     assert "private" not in str(exc_info.value)
+
+    with pytest.raises(SettingsFormValidationError) as analytics_exc:
+        SettingsFormSnapshot.from_form_values(
+            {"analytics_consent": "perhaps", "uth_password": "private"}
+        )
+
+    assert "analytics_consent" in str(analytics_exc.value)
+    assert "private" not in str(analytics_exc.value)
+
+
+@pytest.mark.parametrize("consent", ["not_asked", "enabled", "disabled"])
+def test_analytics_consent_defaults_to_enabled_and_round_trips(consent):
+    default_from_form = SettingsFormSnapshot.from_form_values({})
+    default_from_settings = SettingsFormSnapshot.from_settings(SimpleNamespace())
+    assert default_from_form.analytics_consent == "enabled"
+    assert default_from_settings.analytics_consent == "enabled"
+
+    snap = SettingsFormSnapshot.from_form_values({"analytics_consent": consent})
+    assert snap.analytics_consent == consent
+    assert snap.to_settings_values()["ANALYTICS_CONSENT"] == consent
+
+
+def test_config_schema_v6_analytics_consent_migration_inherits_disabled_crash_consent():
+    from config import Settings, migrate_settings_data
+
+    s = Settings()
+    assert s.SETTINGS_SCHEMA_VERSION == 6
+    assert s.ANALYTICS_CONSENT == "enabled"
+
+    migrated_default = migrate_settings_data({"SETTINGS_SCHEMA_VERSION": 5})
+    assert migrated_default["SETTINGS_SCHEMA_VERSION"] == 6
+    assert migrated_default["ANALYTICS_CONSENT"] == "enabled"
+
+    migrated_none = migrate_settings_data(
+        {"CRASH_REPORTING_CONSENT": "disabled", "ANALYTICS_CONSENT": None}
+    )
+    assert migrated_none["ANALYTICS_CONSENT"] == "disabled"
+    assert migrated_none["SETTINGS_SCHEMA_VERSION"] == 6
+
+    migrated_opted_out = migrate_settings_data({"CRASH_REPORTING_CONSENT": "disabled"})
+    assert migrated_opted_out["ANALYTICS_CONSENT"] == "disabled"
+
+    preserved_explicit = migrate_settings_data(
+        {"CRASH_REPORTING_CONSENT": "disabled", "ANALYTICS_CONSENT": "enabled"}
+    )
+    assert preserved_explicit["ANALYTICS_CONSENT"] == "enabled"
 
 
 def test_explicit_empty_notify_types_is_preserved_while_blank_uses_default():
@@ -159,6 +206,7 @@ SENTINEL_SETTINGS_VALUES = {
     "MINIMIZE_TO_TRAY": False,
     "AUTO_UPDATE_ENABLED": False,
     "CRASH_REPORTING_CONSENT": "disabled",
+    "ANALYTICS_CONSENT": "disabled",
     "BACKGROUND_CHECK_ANDROID": False,
     "ENABLE_GMAIL": True,
     "GMAIL_ADDRESS": "mail-01@example.com",
@@ -208,6 +256,7 @@ EXPECTED_SETTINGS_VALUES = {
     "MINIMIZE_TO_TRAY": False,
     "AUTO_UPDATE_ENABLED": False,
     "CRASH_REPORTING_CONSENT": "disabled",
+    "ANALYTICS_CONSENT": "disabled",
     "BACKGROUND_CHECK_ANDROID": False,
     "ENABLE_GMAIL": True,
     "GMAIL_ADDRESS": "mail-01@example.com",

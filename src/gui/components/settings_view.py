@@ -53,9 +53,9 @@ from gui.controllers.autostart_settings import (
 from gui.view_models.settings_form import ClassScheduleLeadHoursError, SettingsFormSnapshot
 
 class SettingsView(ft.Container):
-    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None, on_logout=None, on_account_login=None):
+    def __init__(self, page: ft.Page, orchestrator, on_close, on_saved=None, on_test_tray=None, on_test_mobile=None, on_test_tele=None, on_test_discord=None, on_test_mail=None, on_theme_preview=None, autostart_coordinator=None, on_check_update=None, on_update_action=None, on_cancel_update=None, distribution_profile: DistributionProfile | None = None, on_open_store_url=None, on_logout=None, on_account_login=None, controller=None, on_analytics_consent_changed=None, on_reset_analytics=None):
         super().__init__()
-        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url, on_logout, on_account_login)
+        self._init_variables(page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile, on_open_store_url, on_logout, on_account_login, controller=controller, on_analytics_consent_changed=on_analytics_consent_changed, on_reset_analytics=on_reset_analytics)
         self._init_controls()
         self._init_layout()
         self._rendered_palette = semantic_palette()
@@ -66,14 +66,19 @@ class SettingsView(ft.Container):
             return profile
         return resolve_distribution_channel()
 
-    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None, on_logout=None, on_account_login=None):
+    def _init_variables(self, page, orchestrator, on_close, on_saved, on_test_tray, on_test_mobile, on_test_tele, on_test_discord, on_test_mail, on_theme_preview, autostart_coordinator, on_check_update, on_update_action, on_cancel_update, distribution_profile=None, on_open_store_url=None, on_logout=None, on_account_login=None, controller=None, on_analytics_consent_changed=None, on_reset_analytics=None):
         self._page    = page
         self._orchestrator = orchestrator
+        self._controller = controller
         self._on_close_cb = on_close
         self._on_saved = on_saved
         self.on_save = on_saved
         self.on_logout = on_logout
         self.on_account_login = on_account_login
+        self._on_analytics_consent_changed = on_analytics_consent_changed
+        self.on_analytics_consent_changed = on_analytics_consent_changed
+        self._on_reset_analytics = on_reset_analytics
+        self.on_reset_analytics = on_reset_analytics
         self._on_test_tray = on_test_tray
         self._on_test_mobile = on_test_mobile
         self._on_test_tele = on_test_tele
@@ -380,7 +385,7 @@ class SettingsView(ft.Container):
             ("urgency", ft.Icons.ACCESS_TIME_ROUNDED, "Cảnh báo", "Mốc thời gian · Mức độ", "Ngưỡng thời gian phân loại khẩn cấp"),
             ("theme", ft.Icons.PALETTE_ROUNDED, "Giao diện", "Chủ đề · Màu sắc", "Giao diện màu sắc và chủ đề ứng dụng"),
             ("system", ft.Icons.SETTINGS_ROUNDED, "Hệ thống", system_subtitle, system_desc),
-            ("privacy", ft.Icons.SHIELD_ROUNDED, "Riêng tư", "Dữ liệu · Quyền riêng tư", "Chẩn đoán sự cố và chính sách dữ liệu"),
+            ("privacy", ft.Icons.SHIELD_ROUNDED, "Riêng tư", "Dữ liệu · Quyền riêng tư", "Chẩn đoán, phân tích ẩn danh và chính sách dữ liệu"),
             ("debug", ft.Icons.BUILD_ROUNDED, "Nâng cao", "Hiệu năng · Gỡ lỗi", "Hiệu năng tải và công cụ gỡ lỗi"),
         ]
 
@@ -1280,6 +1285,7 @@ class SettingsView(ft.Container):
         for dropdown_name in (
             '_mock_type_drp',
             '_dd_crash_reporting_consent',
+            '_dd_analytics_consent',
         ):
             dropdown = getattr(self, dropdown_name, None)
             if dropdown:
@@ -1678,6 +1684,9 @@ class SettingsView(ft.Container):
         self._sw_dnd_enable.value = False
         self._dnd_start_field.value = "22"
         self._dnd_end_field.value = "7"
+        dd_analytics = getattr(self, "_dd_analytics_consent", None)
+        if dd_analytics is not None:
+            dd_analytics.value = "enabled"
         self._update_profile_summary()
         self._update_dnd_summary()
         if hasattr(self, "_unsaved_dot"):
@@ -1688,6 +1697,52 @@ class SettingsView(ft.Container):
             self._update_save_button_state()
 
         self.update()
+
+    _reset_to_defaults = _handle_reset_defaults
+
+    async def _notify_analytics_consent_async(self, consent: str) -> None:
+        """Notify optional controller/callback seams when analytics consent is saved."""
+        callbacks = []
+        direct_cb = getattr(self, "on_analytics_consent_changed", None) or getattr(
+            self, "_on_analytics_consent_changed", None
+        )
+        if callable(direct_cb):
+            callbacks.append(direct_cb)
+        controller = getattr(self, "_controller", None)
+        ctrl_cb = getattr(controller, "apply_analytics_consent", None)
+        if callable(ctrl_cb) and ctrl_cb not in callbacks:
+            callbacks.append(ctrl_cb)
+        for callback in callbacks:
+            try:
+                res = callback(consent)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "settings_analytics_consent_callback_failed"
+                )
+
+    async def _notify_analytics_reset_async(self) -> None:
+        """Notify optional controller/callback seams to wipe local analytics state on reset."""
+        callbacks = []
+        direct_cb = getattr(self, "on_reset_analytics", None) or getattr(
+            self, "_on_reset_analytics", None
+        )
+        if callable(direct_cb):
+            callbacks.append(direct_cb)
+        controller = getattr(self, "_controller", None)
+        ctrl_cb = getattr(controller, "reset_analytics_state", None)
+        if callable(ctrl_cb) and ctrl_cb not in callbacks:
+            callbacks.append(ctrl_cb)
+        for callback in callbacks:
+            try:
+                res = callback()
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "settings_analytics_reset_callback_failed"
+                )
 
     async def _handle_test_login(self, e):
         raw_user = self._username_field.value or ""
@@ -2817,6 +2872,7 @@ class SettingsView(ft.Container):
                     sp = _USER_DATA_DIR / "settings.json"
                     if sp.exists():
                         os.remove(str(sp))
+                    await SettingsView._notify_analytics_reset_async(self)
                     self._debug_info_text.value = "Settings đã reset. Khởi động lại app để áp dụng."
                     self._debug_info_text.color = C.SAFE
                 except Exception as ex:
@@ -2927,6 +2983,11 @@ class SettingsView(ft.Container):
                 "minimize_to_tray": self._sw_minimize_to_tray.value,
                 "auto_update_enabled": self._sw_auto_update.value,
                 "crash_reporting_consent": self._dd_crash_reporting_consent.value,
+                "analytics_consent": (
+                    self._dd_analytics_consent.value
+                    if hasattr(self, "_dd_analytics_consent")
+                    else "enabled"
+                ),
                 "background_check_android": self._sw_bg_check.value,
                 "enable_gmail": self._sw_email.value,
                 "gmail_address": self._gmail_addr_field.value,
@@ -2991,6 +3052,19 @@ class SettingsView(ft.Container):
                     ft.dropdown.Option("not_asked", "Chưa chọn (đang tắt)"),
                 )
         self._dd_crash_reporting_consent.value = snapshot.crash_reporting_consent
+        dd_analytics = getattr(self, "_dd_analytics_consent", None)
+        if dd_analytics is not None:
+            if snapshot.analytics_consent == "not_asked":
+                dd_analytics_options = getattr(dd_analytics, "options", None)
+                if isinstance(dd_analytics_options, list) and not any(
+                    getattr(opt, "key", None) == "not_asked"
+                    for opt in dd_analytics_options
+                ):
+                    dd_analytics_options.insert(
+                        0,
+                        ft.dropdown.Option("not_asked", "Chưa chọn (đang tắt)"),
+                    )
+            dd_analytics.value = snapshot.analytics_consent
         self._sw_bg_check.value = snapshot.background_check_android
         self._sw_email.value = snapshot.enable_gmail
         self._gmail_addr_field.value = snapshot.gmail_address
@@ -3558,6 +3632,10 @@ class SettingsView(ft.Container):
                 self._page.window.always_on_top = persisted.always_on_top
             self.update()
 
+            if persisted.analytics_consent != baseline.analytics_consent:
+                await SettingsView._notify_analytics_consent_async(
+                    self, persisted.analytics_consent
+                )
             if self._on_saved:
                 self._on_saved()
             return autostart_ok

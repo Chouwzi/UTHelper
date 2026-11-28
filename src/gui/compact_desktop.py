@@ -15,6 +15,7 @@ def main(
     force_visible: bool = False,
     error_reporter=None,
     diagnostic_recorder=None,
+    analytics_runtime=None,
 ) -> AppController:
     options = {
         "activation_broker": activation_broker,
@@ -24,6 +25,8 @@ def main(
         options["error_reporter"] = error_reporter
     if diagnostic_recorder is not None:
         options["diagnostic_recorder"] = diagnostic_recorder
+    if analytics_runtime is not None:
+        options["analytics_runtime"] = analytics_runtime
     return AppController(page, **options)
 
 if __name__ == "__main__":
