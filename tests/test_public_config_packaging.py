@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
+import stat
 import struct
 import subprocess
 import sys
@@ -17,6 +19,16 @@ import pytest
 
 from diagnostics.release_config import generate_public_config
 from scripts.generate_msix_assets import MSIX_ASSET_SPECS
+from scripts.package_unsigned_ipa import (
+    IpaError,
+    _REQUIRED_OFFICE_VIEWER_ASSETS,
+    _REQUIRED_PDF_VIEWER_ASSETS,
+    inspect_device_app,
+    inspect_ipa,
+    main as package_ipa_main,
+    verify_ios_app_diagnostics_config,
+    write_verification_evidence as write_ipa_evidence,
+)
 from scripts.release_inventory import _EXPECTED as INVENTORY_EXPECTED
 from scripts.verify_android_release import (
     AndroidVerificationError,
@@ -148,6 +160,17 @@ def test_workflows_and_android_script_forward_posthog_public_vars_safely():
     for line in ps1_invocations:
         assert '--posthog-key "$env:POSTHOG_PROJECT_API_KEY"' in line
         assert '--posthog-host "$env:POSTHOG_HOST"' in line
+
+    ios_wf = _read(".github/workflows/build-ios.yml")
+    assert "scripts/package_unsigned_ipa.py" in ios_wf
+    assert "--require-diagnostics-config" in ios_wf
+
+    release_wf = _read(".github/workflows/release.yml")
+    ios_release_job = release_wf.split("\n  build-unsigned-ios:\n", 1)[1].split(
+        "\n  build-signed-windows:\n", 1
+    )[0]
+    assert "scripts/package_unsigned_ipa.py" in ios_release_job
+    assert "--require-diagnostics-config" in ios_release_job
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +545,306 @@ def test_android_verifier_validates_nested_diagnostics_config_and_preserves_inve
         )
 
 
+def test_android_verifier_rejects_duplicate_zip_entries_symlinks_and_non_primary_config(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(subprocess, "run", _fake_android_run)
+    sdk_dir = _sdk(tmp_path)
+
+    valid_v3 = {
+        "schema_version": 3,
+        "sentry_dsn": VALID_DSN,
+        "build_environment": "release",
+        "package_format": "apk",
+        "posthog_project_api_key": VALID_POSTHOG_KEY,
+        "posthog_host": VALID_POSTHOG_HOST,
+    }
+    leaked_v3 = dict(valid_v3, posthog_project_api_key="phx_" + "s" * 28)
+
+    # 1. Duplicate assets/diagnostics-config.json inside nested app.zip (first phx_SECRET, second clean)
+    dup_inner_buf = io.BytesIO()
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(dup_inner_buf, "w") as nested:
+            nested.writestr("assets/diagnostics-config.json", json.dumps(leaked_v3))
+            nested.writestr("assets/diagnostics-config.json", json.dumps(valid_v3))
+
+    dup_apk = tmp_path / "dup-inner" / f"UTHelper-{VERSION}.apk"
+    dup_apk.parent.mkdir()
+    with zipfile.ZipFile(dup_apk, "w") as zf:
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            zf.writestr(f"lib/{abi}/libapp.so", b"so")
+        zf.writestr("assets/app.zip", dup_inner_buf.getvalue())
+
+    for require_flag in (True, False):
+        with pytest.raises(
+            AndroidVerificationError,
+            match="duplicate ZIP entry|secret, personal, or management tokens",
+        ):
+            verify_android_release(
+                apk=dup_apk,
+                channel="apk_lts",
+                version=VERSION,
+                build_number=BUILD_NUMBER,
+                package_id=PACKAGE_ID,
+                certificate_sha256=FINGERPRINT,
+                commit_sha=COMMIT_SHA,
+                workflow_run_id="99",
+                output=tmp_path / f"dup-{require_flag}.json",
+                android_home=sdk_dir,
+                require_diagnostics_config=require_flag,
+            )
+
+    # 1b. Duplicate clean entries inside nested app.zip also rejected strictly as duplicate ZIP entry
+    dup_clean_buf = io.BytesIO()
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(dup_clean_buf, "w") as nested:
+            nested.writestr("assets/diagnostics-config.json", json.dumps(valid_v3))
+            nested.writestr("assets/diagnostics-config.json", json.dumps(valid_v3))
+
+    dup_clean_apk = tmp_path / "dup-clean" / f"UTHelper-{VERSION}.apk"
+    dup_clean_apk.parent.mkdir()
+    with zipfile.ZipFile(dup_clean_apk, "w") as zf:
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            zf.writestr(f"lib/{abi}/libapp.so", b"so")
+        zf.writestr("assets/app.zip", dup_clean_buf.getvalue())
+
+    with pytest.raises(AndroidVerificationError, match="duplicate ZIP entry"):
+        verify_android_release(
+            apk=dup_clean_apk,
+            channel="apk_lts",
+            version=VERSION,
+            build_number=BUILD_NUMBER,
+            package_id=PACKAGE_ID,
+            certificate_sha256=FINGERPRINT,
+            commit_sha=COMMIT_SHA,
+            workflow_run_id="99",
+            output=tmp_path / "dup-clean.json",
+            android_home=sdk_dir,
+            require_diagnostics_config=True,
+        )
+
+    # 2. Symlink entry inside nested app.zip -> rejected
+    sym_inner_buf = io.BytesIO()
+    with zipfile.ZipFile(sym_inner_buf, "w") as nested:
+        sym_info = zipfile.ZipInfo("assets/diagnostics-config.json")
+        sym_info.create_system = 3
+        sym_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        nested.writestr(sym_info, b"../../etc/passwd")
+
+    sym_apk = tmp_path / "sym-inner" / f"UTHelper-{VERSION}.apk"
+    sym_apk.parent.mkdir()
+    with zipfile.ZipFile(sym_apk, "w") as zf:
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            zf.writestr(f"lib/{abi}/libapp.so", b"so")
+        zf.writestr("assets/app.zip", sym_inner_buf.getvalue())
+
+    with pytest.raises(AndroidVerificationError, match="symlink"):
+        verify_android_release(
+            apk=sym_apk,
+            channel="apk_lts",
+            version=VERSION,
+            build_number=BUILD_NUMBER,
+            package_id=PACKAGE_ID,
+            certificate_sha256=FINGERPRINT,
+            commit_sha=COMMIT_SHA,
+            workflow_run_id="99",
+            output=tmp_path / "sym.json",
+            android_home=sdk_dir,
+            require_diagnostics_config=True,
+        )
+
+    # 3. Non-primary diagnostics-config.json inside nested app.zip (missing assets/diagnostics-config.json)
+    decoy_inner_buf = io.BytesIO()
+    with zipfile.ZipFile(decoy_inner_buf, "w") as nested:
+        nested.writestr("decoy/diagnostics-config.json", json.dumps(valid_v3))
+
+    decoy_apk = tmp_path / "decoy" / f"UTHelper-{VERSION}.apk"
+    decoy_apk.parent.mkdir()
+    with zipfile.ZipFile(decoy_apk, "w") as zf:
+        for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+            zf.writestr(f"lib/{abi}/libapp.so", b"so")
+        zf.writestr("assets/app.zip", decoy_inner_buf.getvalue())
+
+    with pytest.raises(AndroidVerificationError, match="primary assets/diagnostics-config.json"):
+        verify_android_release(
+            apk=decoy_apk,
+            channel="apk_lts",
+            version=VERSION,
+            build_number=BUILD_NUMBER,
+            package_id=PACKAGE_ID,
+            certificate_sha256=FINGERPRINT,
+            commit_sha=COMMIT_SHA,
+            workflow_run_id="99",
+            output=tmp_path / "decoy.json",
+            android_home=sdk_dir,
+            require_diagnostics_config=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# iOS App & Unsigned IPA Verifier (`scripts/package_unsigned_ipa.py`)
+# ---------------------------------------------------------------------------
+
+
+def _make_ios_app(
+    root: Path,
+    *,
+    platform: str = "iPhoneOS",
+    cpu_type: int = 0x0100000C,
+    include_viewers: bool = True,
+    diag_payload: dict[str, object] | None = None,
+) -> Path:
+    app = root / "UTHelper.app"
+    app.mkdir(parents=True, exist_ok=True)
+    info = {
+        "CFBundleIdentifier": PACKAGE_ID,
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": str(BUILD_NUMBER),
+        "CFBundleExecutable": "UTHelper",
+        "CFBundleSupportedPlatforms": [platform],
+    }
+    (app / "Info.plist").write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+    (app / "UTHelper").write_bytes(struct.pack("<Iii", 0xFEEDFACF, cpu_type, 0))
+    app_zip = app / "Frameworks" / "App.framework" / "flutter_assets" / "app" / "app.zip"
+    app_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(app_zip, "w") as nested:
+        if include_viewers:
+            for asset in _REQUIRED_OFFICE_VIEWER_ASSETS:
+                nested.writestr(f"assets/office_viewer/{asset}", b"ok")
+            for asset in _REQUIRED_PDF_VIEWER_ASSETS:
+                nested.writestr(f"assets/pdf_viewer/{asset}", b"ok")
+        if diag_payload is not None:
+            nested.writestr("assets/diagnostics-config.json", json.dumps(diag_payload))
+    return app
+
+
+def _write_ipa_from_app(ipa_path: Path, app: Path) -> Path:
+    with zipfile.ZipFile(ipa_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for item in sorted(app.rglob("*")):
+            rel = item.relative_to(app.parent).as_posix()
+            archive.write(item, f"Payload/{rel}")
+    return ipa_path
+
+
+def test_ios_verifier_enforces_diagnostics_config_and_preserves_inventory_checks(
+    tmp_path: Path,
+) -> None:
+    valid_ipa_v3 = {
+        "schema_version": 3,
+        "sentry_dsn": VALID_DSN,
+        "build_environment": "release",
+        "package_format": "ipa",
+        "posthog_project_api_key": VALID_POSTHOG_KEY,
+        "posthog_host": VALID_POSTHOG_HOST,
+    }
+    app = _make_ios_app(tmp_path / "valid", diag_payload=valid_ipa_v3)
+    assert verify_ios_app_diagnostics_config(app, require=True) is True
+
+    ipa_path = _write_ipa_from_app(tmp_path / f"UTHelper-{VERSION}.ipa", app)
+    meta = inspect_ipa(
+        ipa_path,
+        version=VERSION,
+        build_number=str(BUILD_NUMBER),
+        bundle_id=PACKAGE_ID,
+        require_office_viewer=True,
+        require_diagnostics_config=True,
+    )
+    ev_out = tmp_path / "ipa.verification.json"
+    write_ipa_evidence(
+        ipa_path,
+        meta,
+        commit_sha=COMMIT_SHA,
+        workflow_run_id="99",
+        output=ev_out,
+    )
+    ev = json.loads(ev_out.read_text(encoding="utf-8"))
+    assert frozenset(ev["checks"]) == INVENTORY_EXPECTED[".ipa"][3]
+
+    # Simulator diagnostic CLI mode (--verify-app ... --expected-build-environment develop)
+    sim_app = _make_ios_app(
+        tmp_path / "sim",
+        platform="iPhoneSimulator",
+        diag_payload={
+            "schema_version": 3,
+            "sentry_dsn": "",
+            "build_environment": "develop",
+            "package_format": "ios_app",
+            "posthog_project_api_key": "",
+            "posthog_host": "",
+        },
+    )
+    assert (
+        package_ipa_main(
+            [
+                "--verify-app",
+                str(sim_app),
+                "--require-office-viewer",
+                "--require-diagnostics-config",
+                "--expected-build-environment",
+                "develop",
+            ]
+        )
+        == 0
+    )
+    # Default require=True rejects build_environment="develop" for release IPA verification
+    with pytest.raises(IpaError, match="build_environment"):
+        verify_ios_app_diagnostics_config(sim_app, require=True)
+
+    # Missing diagnostics-config.json rejected when required
+    missing_app = _make_ios_app(tmp_path / "missing", diag_payload=None)
+    with pytest.raises(IpaError, match="diagnostics-config.json"):
+        inspect_device_app(
+            missing_app,
+            version=VERSION,
+            build_number=str(BUILD_NUMBER),
+            bundle_id=PACKAGE_ID,
+            require_diagnostics_config=True,
+        )
+
+    # Wrong package_format ("apk"), leaked phx_ key, or asymmetric PostHog fields rejected
+    for idx, bad_cfg in enumerate(
+        (
+            dict(valid_ipa_v3, package_format="apk"),
+            dict(valid_ipa_v3, posthog_project_api_key="phx_" + "k" * 28),
+            dict(valid_ipa_v3, posthog_host=""),
+        )
+    ):
+        bad_app = _make_ios_app(tmp_path / f"bad-ios-{idx}", diag_payload=bad_cfg)
+        with pytest.raises(IpaError, match="diagnostics-config.json"):
+            inspect_device_app(
+                bad_app,
+                version=VERSION,
+                build_number=str(BUILD_NUMBER),
+                bundle_id=PACKAGE_ID,
+                require_diagnostics_config=False,
+            )
+
+    # Duplicate ZIP entries inside iOS nested app.zip (first phx_SECRET, second clean) -> rejected
+    dup_app = _make_ios_app(tmp_path / "dup-ios", diag_payload=None)
+    app_zip = dup_app / "Frameworks" / "App.framework" / "flutter_assets" / "app" / "app.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(app_zip, "a") as nested:
+            nested.writestr(
+                "assets/diagnostics-config.json",
+                json.dumps(dict(valid_ipa_v3, posthog_project_api_key="phx_" + "x" * 28)),
+            )
+            nested.writestr("assets/diagnostics-config.json", json.dumps(valid_ipa_v3))
+    with pytest.raises(
+        IpaError,
+        match="duplicate member|secret, personal, or management tokens",
+    ):
+        verify_ios_app_diagnostics_config(dup_app, require=True)
+
+    dup_clean_app = _make_ios_app(tmp_path / "dup-clean-ios", diag_payload=valid_ipa_v3)
+    clean_app_zip = dup_clean_app / "Frameworks" / "App.framework" / "flutter_assets" / "app" / "app.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(clean_app_zip, "a") as nested:
+            nested.writestr("assets/diagnostics-config.json", json.dumps(valid_ipa_v3))
+    with pytest.raises(IpaError, match="duplicate member"):
+        verify_ios_app_diagnostics_config(dup_clean_app, require=True)
+
+
 # ---------------------------------------------------------------------------
 # Microsoft Store MSIX Verifier (`scripts/verify_msix_release.ps1`)
 # ---------------------------------------------------------------------------
@@ -667,7 +990,48 @@ def test_msix_verifier_validates_schema_v3_and_rejects_secrets_without_changing_
     assert missing_proc.returncode != 0
     assert "diagnostics-config.json" in (missing_proc.stdout + missing_proc.stderr)
 
-    # Leaked secrets / web UI host / private IP / boolean schema_version -> fail closed
+    # Valid public global IPv6 literal passes MSIX verification
+    v6_stage = _stage_msix_dir(
+        tmp_path / "valid-ipv6",
+        {
+            "schema_version": 3,
+            "sentry_dsn": VALID_DSN,
+            "build_environment": "release",
+            "package_format": "msix",
+            "posthog_project_api_key": VALID_POSTHOG_KEY,
+            "posthog_host": "https://[2606:4700:4700::1111]/ingest",
+        },
+    )
+    v6_ok = _run_ps51(
+        VERIFY_MSIX_PS1,
+        ["-MsixPath", str(v6_stage), "-Channel", "msstore", "-RequireDiagnosticsConfig"],
+    )
+    assert v6_ok.returncode == 0, f"stdout={v6_ok.stdout}\nstderr={v6_ok.stderr}"
+
+    # Decoy diagnostics-config.json outside app\assets\diagnostics-config.json -> fail closed
+    decoy_stage = _stage_msix_dir(tmp_path / "decoy-diag", None)
+    (decoy_stage / "other").mkdir()
+    (decoy_stage / "other" / "diagnostics-config.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": "",
+                "posthog_host": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    decoy_proc = _run_ps51(
+        VERIFY_MSIX_PS1,
+        ["-MsixPath", str(decoy_stage), "-Channel", "msstore", "-RequireDiagnosticsConfig"],
+    )
+    assert decoy_proc.returncode != 0
+    assert "app\\assets\\diagnostics-config.json" in (decoy_proc.stdout + decoy_proc.stderr)
+
+    # Leaked secrets / web UI host / private & transition IPv6 / bad ports / wrong package_format / asymmetric v3 -> fail closed
     for idx, bad_payload in enumerate(
         (
             {
@@ -695,12 +1059,129 @@ def test_msix_verifier_validates_schema_v3_and_rejects_secrets_without_changing_
                 "posthog_host": "https://127.0.0.1:8443",
             },
             {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "exe_msi",
+                "posthog_project_api_key": "",
+                "posthog_host": "",
+            },
+            {
+                "schema_version": 1,
+                "sentry_dsn": VALID_DSN,
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://us.i.posthog.com:0",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://us.i.posthog.com:",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[64:ff9b::127.0.0.1]",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[2002:7f00:1::1]",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[2001:2::1]",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[100::1]",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[::ffff:8.8.8.8]",
+            },
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "msix",
+                "posthog_project_api_key": VALID_POSTHOG_KEY,
+                "posthog_host": "https://[::ffff:0:127.0.0.1]",
+            },
+            {
                 "schema_version": True,
                 "sentry_dsn": VALID_DSN,
             },
         )
     ):
         bad_stage = _stage_msix_dir(tmp_path / f"bad-{idx}", bad_payload)
-        bad_proc = _run_ps51(VERIFY_MSIX_PS1, ["-MsixPath", str(bad_stage)])
+        bad_proc = _run_ps51(
+            VERIFY_MSIX_PS1,
+            ["-MsixPath", str(bad_stage), "-Channel", "msstore"],
+        )
         assert bad_proc.returncode != 0, f"Case {idx} unexpectedly passed"
         assert "diagnostics-config.json" in (bad_proc.stdout + bad_proc.stderr)
+
+
+def test_privacy_adr_and_store_docs_stay_aligned_with_runtime_and_packaging_contracts() -> None:
+    privacy = _read("docs/PRIVACY.md")
+    adr7 = _read("docs/adr/0007-privacy-preserving-posthog-analytics.md")
+    store_guide = _read("docs/guides/store-distribution-submission.md")
+    ref_log = _read("docs/architecture/refactoring-log.md")
+
+    assert "per-process rolling 24h" in privacy
+    assert "FLET_APP_STORAGE_DATA" in privacy and "FLET_APP_DATA" in privacy
+    assert "Reset Settings" in privacy
+
+    assert "ipa_lts" in adr7
+    assert "ios_sideload" not in adr7
+    assert "switching accounts, opting out, or exiting stamps `uth_session_ended`" not in adr7
+    assert "Reset Settings" in adr7
+
+    assert "--build-environment release --package-format msix" in store_guide
+    assert "configured together as a pair" in " ".join(store_guide.split())
+
+    assert 'and `privacy_section.py` (`apply_analytics_consent`, `reset_analytics_state`)' not in ref_log
+    assert "Reset Settings" in ref_log

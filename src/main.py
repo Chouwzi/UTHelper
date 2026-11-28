@@ -188,13 +188,38 @@ _boot_log(
 )
 
 # Platform-aware data directories
+def _resolve_appdata_dir(
+    *,
+    platform_name: str | None = None,
+    environ=None,
+    home_dir: Path | None = None,
+) -> Path:
+    resolved_platform = sys.platform if platform_name is None else platform_name
+    resolved_home = Path.home() if home_dir is None else home_dir
+    if environ is None:
+        if resolved_platform == "win32":
+            return Path(os.getenv("APPDATA") or resolved_home) / "UTHelper"
+        storage_data = (os.environ.get("FLET_APP_STORAGE_DATA") or "").strip()
+        if storage_data:
+            return Path(storage_data)
+        app_data = (os.environ.get("FLET_APP_DATA") or "").strip()
+        if app_data:
+            return Path(app_data)
+        return resolved_home / ".uthelper"
+
+    if resolved_platform == "win32":
+        return Path(environ.get("APPDATA") or resolved_home) / "UTHelper"
+    storage_data = (environ.get("FLET_APP_STORAGE_DATA") or "").strip()
+    if storage_data:
+        return Path(storage_data)
+    app_data = (environ.get("FLET_APP_DATA") or "").strip()
+    if app_data:
+        return Path(app_data)
+    return resolved_home / ".uthelper"
+
+
 try:
-    if sys.platform == 'win32':
-        _APPDATA_DIR = Path(os.getenv("APPDATA", Path.home())) / "UTHelper"
-    elif os.environ.get('FLET_APP_STORAGE_DATA'):
-        _APPDATA_DIR = Path(os.environ['FLET_APP_STORAGE_DATA'])
-    else:
-        _APPDATA_DIR = Path.home() / ".uthelper"
+    _APPDATA_DIR = _resolve_appdata_dir()
 
     _FLET_DATA_DIR = _APPDATA_DIR / "flet" / "data"
     _FLET_TEMP_DIR = _APPDATA_DIR / "flet" / "temp"

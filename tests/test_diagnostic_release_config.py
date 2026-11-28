@@ -252,6 +252,14 @@ def test_validate_public_posthog_key_rejects_non_string():
             "https://telemetry.example.edu.vn:8443/ph/v1.0/ingest/",
             "https://telemetry.example.edu.vn:8443/ph/v1.0/ingest",
         ),
+        (
+            "https://[2606:4700:4700::1111]/ingest/",
+            "https://[2606:4700:4700::1111]/ingest",
+        ),
+        (
+            "https://[2001:4860:4860::8888]:8443/",
+            "https://[2001:4860:4860::8888]:8443",
+        ),
     ),
 )
 def test_validate_public_posthog_host_normalizes_https_ingestion_hosts(
@@ -287,9 +295,30 @@ def test_validate_public_posthog_host_normalizes_https_ingestion_hosts(
         "https://proxy.example.com//ingest",
         "https://proxy.example.com/ingest;param=1",
         "https://proxy.example.com\\ingest",
+        "https://us.i.posthog.com:",
+        "https://us.i.posthog.com:/ingest",
+        "https://us.i.posthog.com:0",
+        "https://[2606:4700:4700::1111]:",
+        "https://[2606:4700:4700::1111]:0",
         "https://127.0.0.1:8000",
         "https://[::1]:8000",
+        "https://[::127.0.0.1]:8000",
         "https://[::ffff:127.0.0.1]:8000",
+        "https://[::ffff:8.8.8.8]:8000",
+        "https://[::ffff:0:127.0.0.1]:8000",
+        "https://[::ffff:0:8.8.8.8]:8000",
+        "https://[64:ff9b::127.0.0.1]",
+        "https://[64:ff9b::10.0.0.1]",
+        "https://[64:ff9b::8.8.8.8]",
+        "https://[64:ff9b:1::1]",
+        "https://[2002:7f00:1::1]",
+        "https://[2002:0808:0808::1]",
+        "https://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]",
+        "https://[2001:2::1]",
+        "https://[100::1]",
+        "https://[2001:db8::1]",
+        "https://[fc00::1]",
+        "https://[fe80::1]",
         "https://10.0.0.5",
         "https://172.16.0.1",
         "https://192.168.1.10",
@@ -339,17 +368,28 @@ def test_validate_public_posthog_host_private_dev_flag_allows_local_https_only()
         == "https://192.168.1.20:8443"
     )
 
-    # Even in dev, HTTP, web UI hosts, unspecified 0.0.0.0, and multicast stay forbidden
+    # Even in dev, HTTP, web UI hosts, empty/zero ports, unspecified 0.0.0.0, and multicast stay forbidden
     for still_forbidden in (
         "http://127.0.0.1:8443",
         "https://app.posthog.com",
         "https://us.posthog.com",
         "https://eu.posthog.com",
+        "https://localhost:",
+        "https://[::1]:",
+        "https://localhost:0",
         "https://0.0.0.0:8443",
         "https://224.0.0.1:8443",
+        "https://[::ffff:0.0.0.0]:8443",
+        "https://[64:ff9b::224.0.0.1]:8443",
     ):
         with pytest.raises(PublicConfigError):
             validate_public_posthog_host(still_forbidden, allow_private_dev=True)
+
+    with pytest.raises(PublicConfigError):
+        generate_public_config(
+            Path("unused.json"),
+            "https://0123456789abcdef@o123.ingest.sentry.io:/456",
+        )
 
 
 def test_schema_v3_roundtrip_and_v1_v2_backward_compatibility(tmp_path):
@@ -434,37 +474,91 @@ def test_schema_v3_roundtrip_and_v1_v2_backward_compatibility(tmp_path):
     assert v3_cfg.posthog_configured is True
 
 
-def test_schema_v3_partial_posthog_fields_build_cleanly_and_disable_at_runtime(tmp_path):
-    key_only = tmp_path / "key-only.json"
+def test_schema_v3_asymmetric_posthog_fields_rejected_and_empty_pair_builds_cleanly(
+    tmp_path,
+    capsys,
+):
+    # Symmetric unconfigured Schema v3 (both "") builds cleanly and disables PostHog at runtime
+    both_empty = tmp_path / "both-empty.json"
     generate_public_config(
-        key_only,
+        both_empty,
         VALID_DSN,
         build_environment="develop",
         package_format="apk",
-        posthog_project_api_key=VALID_POSTHOG_KEY,
+        posthog_project_api_key="",
         posthog_host="",
     )
-    assert json.loads(key_only.read_text(encoding="utf-8"))["schema_version"] == 3
-    loaded_key_only = load_public_config(key_only, development=False, environ={})
-    assert loaded_key_only.dsn == VALID_DSN
-    assert loaded_key_only.posthog_project_api_key is None
-    assert loaded_key_only.posthog_host is None
-    assert loaded_key_only.posthog_configured is False
-
-    host_only = tmp_path / "host-only.json"
-    generate_public_config(
-        host_only,
-        VALID_DSN,
+    assert validate_public_config_bytes(both_empty.read_bytes()) == PublicDiagnosticsConfig(
+        dsn=VALID_DSN,
         build_environment="develop",
-        package_format="msix",
-        posthog_project_api_key="",
-        posthog_host=VALID_POSTHOG_HOST,
+        package_format="apk",
+        posthog_project_api_key=None,
+        posthog_host=None,
     )
-    loaded_host_only = load_public_config(host_only, development=False, environ={})
-    assert loaded_host_only.dsn == VALID_DSN
-    assert loaded_host_only.posthog_project_api_key is None
-    assert loaded_host_only.posthog_host is None
-    assert loaded_host_only.posthog_configured is False
+    loaded_empty = load_public_config(both_empty, development=False, environ={})
+    assert loaded_empty.dsn == VALID_DSN
+    assert loaded_empty.posthog_project_api_key is None
+    assert loaded_empty.posthog_host is None
+    assert loaded_empty.posthog_configured is False
+
+    # Asymmetric Schema v3 configs (key without host or host without key) fail closed in generator & verifier
+    for idx, (asym_key, asym_host) in enumerate(
+        (
+            (VALID_POSTHOG_KEY, ""),
+            ("", VALID_POSTHOG_HOST),
+        )
+    ):
+        with pytest.raises(PublicConfigError):
+            generate_public_config(
+                tmp_path / f"asym-{idx}.json",
+                VALID_DSN,
+                build_environment="develop",
+                package_format="apk",
+                posthog_project_api_key=asym_key,
+                posthog_host=asym_host,
+            )
+
+        raw_asym = json.dumps(
+            {
+                "schema_version": 3,
+                "sentry_dsn": VALID_DSN,
+                "build_environment": "release",
+                "package_format": "apk",
+                "posthog_project_api_key": asym_key,
+                "posthog_host": asym_host,
+            }
+        ).encode("utf-8")
+        with pytest.raises(PublicConfigError):
+            validate_public_config_bytes(raw_asym)
+
+        # Runtime loader degrades tampered asymmetric PostHog fields to None while preserving valid Sentry DSN
+        disk_asym = tmp_path / f"disk-asym-{idx}.json"
+        disk_asym.write_bytes(raw_asym)
+        loaded_asym = load_public_config(disk_asym, development=False, environ={})
+        assert loaded_asym.dsn == VALID_DSN
+        assert loaded_asym.posthog_project_api_key is None
+        assert loaded_asym.posthog_host is None
+        assert loaded_asym.posthog_configured is False
+
+    with pytest.raises(SystemExit) as exc_info:
+        generate_config_main(
+            [
+                "--sentry-dsn",
+                VALID_DSN,
+                "--posthog-key",
+                VALID_POSTHOG_KEY,
+                "--posthog-host",
+                "",
+                "--build-environment",
+                "release",
+                "--package-format",
+                "apk",
+                "--output",
+                str(tmp_path / "cli-asym.json"),
+            ]
+        )
+    assert exc_info.value.code == 2
+    assert "posthog_project_api_key and posthog_host" in capsys.readouterr().err
 
     with pytest.raises(PublicConfigError):
         generate_public_config(
@@ -472,7 +566,7 @@ def test_schema_v3_partial_posthog_fields_build_cleanly_and_disable_at_runtime(t
             VALID_DSN,
             build_environment="release",
             package_format="apk",
-            posthog_project_api_key=VALID_POSTHOG_KEY,
+            posthog_project_api_key="",
             posthog_host="",
             require_posthog_configured=True,
         )
@@ -711,4 +805,54 @@ def test_posthog_generation_without_build_env_or_package_format_defaults_cleanly
         "schema_version": 3,
         "sentry_dsn": VALID_DSN,
     }
+
+
+def test_main_appdata_dir_falls_back_from_flet_storage_to_flet_app_data_then_home(
+    tmp_path,
+):
+    import src.main as application
+
+    home = tmp_path / "home"
+    win_appdata = tmp_path / "Roaming"
+    storage_dir = tmp_path / "flet_storage"
+    legacy_app_data = tmp_path / "flet_app_data"
+
+    assert (
+        application._resolve_appdata_dir(
+            platform_name="win32",
+            environ={"APPDATA": str(win_appdata)},
+            home_dir=home,
+        )
+        == win_appdata / "UTHelper"
+    )
+    assert (
+        application._resolve_appdata_dir(
+            platform_name="linux",
+            environ={
+                "FLET_APP_STORAGE_DATA": str(storage_dir),
+                "FLET_APP_DATA": str(legacy_app_data),
+            },
+            home_dir=home,
+        )
+        == storage_dir
+    )
+    assert (
+        application._resolve_appdata_dir(
+            platform_name="linux",
+            environ={
+                "FLET_APP_STORAGE_DATA": "   ",
+                "FLET_APP_DATA": str(legacy_app_data),
+            },
+            home_dir=home,
+        )
+        == legacy_app_data
+    )
+    assert (
+        application._resolve_appdata_dir(
+            platform_name="linux",
+            environ={},
+            home_dir=home,
+        )
+        == home / ".uthelper"
+    )
 

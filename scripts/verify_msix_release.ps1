@@ -117,8 +117,65 @@ function Format-WindowsArgument([string]$Value) {
 
 function Test-DisallowedPublicIpAddress([System.Net.IPAddress]$IpAddress) {
     $targetIps = @($IpAddress)
-    if ($IpAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 -and $IpAddress.IsIPv4MappedToIPv6) {
-        $targetIps += $IpAddress.MapToIPv4()
+    if ($IpAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        $v6Bytes = $IpAddress.GetAddressBytes()
+        # Reject ::ffff:0:0/96 (IPv4-mapped), ::ffff:0:0:0/96 (SIIT), 64:ff9b::/96 & 64:ff9b:1::/48 (NAT64),
+        # 2002::/16 (6to4), 2001:0000::/32 (Teredo), 2001:2::/48 (BMWG), 100::/64 (Discard-Only),
+        # ::/96, fc00::/7, 2001:db8::/32, 2001:10::/28, 2001:20::/28, 3fff::/20, and non-2000::/3 space.
+        $b0 = [int]$v6Bytes[0]
+        $b1 = [int]$v6Bytes[1]
+        $b2 = [int]$v6Bytes[2]
+        $b3 = [int]$v6Bytes[3]
+        $b4 = [int]$v6Bytes[4]
+        $b5 = [int]$v6Bytes[5]
+        $b6 = [int]$v6Bytes[6]
+        $b7 = [int]$v6Bytes[7]
+        $b8 = [int]$v6Bytes[8]
+        $b9 = [int]$v6Bytes[9]
+        $b10 = [int]$v6Bytes[10]
+        $b11 = [int]$v6Bytes[11]
+
+        $zero0To7 = ($b0 -eq 0 -and $b1 -eq 0 -and $b2 -eq 0 -and $b3 -eq 0 -and $b4 -eq 0 -and $b5 -eq 0 -and $b6 -eq 0 -and $b7 -eq 0)
+        $zero4To11 = ($b4 -eq 0 -and $b5 -eq 0 -and $b6 -eq 0 -and $b7 -eq 0 -and $b8 -eq 0 -and $b9 -eq 0 -and $b10 -eq 0 -and $b11 -eq 0)
+
+        # ::/96 (including :: and ::1) and ::ffff:0:0/96 (IPv4-mapped)
+        if ($zero0To7 -and $b8 -eq 0 -and $b9 -eq 0 -and (($b10 -eq 0 -and $b11 -eq 0) -or ($b10 -eq 0xFF -and $b11 -eq 0xFF))) {
+            return $true
+        }
+        # ::ffff:0:0:0/96 (SIIT IPv4-translated)
+        if ($zero0To7 -and $b8 -eq 0xFF -and $b9 -eq 0xFF -and $b10 -eq 0 -and $b11 -eq 0) {
+            return $true
+        }
+        # 64:ff9b::/96 (Well-Known NAT64) and 64:ff9b:1::/48 (Local-Use NAT64)
+        if ($b0 -eq 0x00 -and $b1 -eq 0x64 -and $b2 -eq 0xFF -and $b3 -eq 0x9B -and ($zero4To11 -or ($b4 -eq 0x00 -and $b5 -eq 0x01))) {
+            return $true
+        }
+        # 100::/64 (RFC 6666 Discard-Only)
+        if ($b0 -eq 0x01 -and $b1 -eq 0x00 -and $b2 -eq 0 -and $b3 -eq 0 -and $b4 -eq 0 -and $b5 -eq 0 -and $b6 -eq 0 -and $b7 -eq 0) {
+            return $true
+        }
+        # 2002::/16 (6to4)
+        if ($b0 -eq 0x20 -and $b1 -eq 0x02) {
+            return $true
+        }
+        # 2001:0000::/32 (Teredo), 2001:2::/48 (Benchmarking), 2001:10::/28 & 2001:20::/28 (ORCHID), 2001:db8::/32 (Docs)
+        if ($b0 -eq 0x20 -and $b1 -eq 0x01) {
+            if ($b2 -eq 0x00 -and $b3 -eq 0x00) { return $true }
+            if ($b2 -eq 0x00 -and $b3 -eq 0x02 -and $b4 -eq 0x00 -and $b5 -eq 0x00) { return $true }
+            if ($b2 -eq 0x00 -and (($b3 -band 0xF0) -eq 0x10 -or ($b3 -band 0xF0) -eq 0x20)) { return $true }
+            if ($b2 -eq 0x0D -and $b3 -eq 0xB8) { return $true }
+        }
+        # 3fff::/20 (RFC 9637 Documentation)
+        if ($b0 -eq 0x3F -and ($b1 -band 0xF0) -eq 0xF0) {
+            return $true
+        }
+        # Reject any IPv6 literal outside global unicast 2000::/3
+        if (($b0 -band 0xE0) -ne 0x20) {
+            return $true
+        }
+        if ($IpAddress.IsIPv4MappedToIPv6) {
+            $targetIps += $IpAddress.MapToIPv4()
+        }
     }
     foreach ($candidate in $targetIps) {
         if ([System.Net.IPAddress]::IsLoopback($candidate)) {
@@ -150,15 +207,38 @@ function Test-DisallowedPublicIpAddress([System.Net.IPAddress]$IpAddress) {
                 return $true
             }
             $firstByte = [int]$bytes[0]
-            $secondByte = [int]$bytes[1]
-            # fc00::/7 Unique Local, 2001:db8::/32 documentation
+            # fc00::/7 Unique Local
             if (($firstByte -band 0xFE) -eq 0xFC) { return $true }
-            if ($firstByte -eq 0x20 -and $secondByte -eq 0x01 -and [int]$bytes[2] -eq 0x0D -and [int]$bytes[3] -eq 0xB8) {
-                return $true
-            }
         }
     }
     return $false
+}
+
+function Assert-ValidAuthorityPort([string]$RawHostPort, [string]$FieldName) {
+    if ($RawHostPort.StartsWith("[")) {
+        $closeBracket = $RawHostPort.IndexOf("]")
+        if ($closeBracket -lt 0) {
+            throw "MSIX verification failed: diagnostics-config.json $FieldName has malformed IPv6 bracket authority"
+        }
+        $portPart = $RawHostPort.Substring($closeBracket + 1)
+    }
+    else {
+        $colonIdx = $RawHostPort.IndexOf(":")
+        $portPart = if ($colonIdx -ge 0) { $RawHostPort.Substring($colonIdx) } else { "" }
+    }
+    if ($portPart -ne "") {
+        if (-not $portPart.StartsWith(":")) {
+            throw "MSIX verification failed: diagnostics-config.json $FieldName authority '$RawHostPort' is invalid"
+        }
+        $portDigits = $portPart.Substring(1)
+        if ([string]::IsNullOrEmpty($portDigits) -or ($portDigits -cnotmatch '^[0-9]{1,5}$')) {
+            throw "MSIX verification failed: diagnostics-config.json $FieldName port '$portPart' is invalid"
+        }
+        $portNum = [int]$portDigits
+        if ($portNum -lt 1 -or $portNum -gt 65535) {
+            throw "MSIX verification failed: diagnostics-config.json $FieldName port '$portNum' is out of range (1..65535)"
+        }
+    }
 }
 
 function Assert-ValidSentryDsn([string]$DsnValue) {
@@ -203,6 +283,7 @@ function Assert-ValidSentryDsn([string]$DsnValue) {
     if ([string]::IsNullOrEmpty($uri.Host) -or $rawHostPort -cne $rawHostPort.ToLowerInvariant()) {
         throw "MSIX verification failed: diagnostics-config.json sentry_dsn host must be canonical lowercase"
     }
+    Assert-ValidAuthorityPort $rawHostPort "sentry_dsn"
     $pathParts = @(([Uri]::UnescapeDataString($uri.AbsolutePath)).Split("/") | Where-Object { $_ -ne "" })
     if ($pathParts.Count -eq 0 -or $pathParts[$pathParts.Count - 1] -cnotmatch '^[0-9]{1,20}$') {
         throw "MSIX verification failed: diagnostics-config.json sentry_dsn must end in a numeric project id"
@@ -271,6 +352,7 @@ function Assert-ValidPosthogHost([string]$HostValue) {
     if ([string]::IsNullOrEmpty($rawNetloc) -or $rawNetloc -cne $rawNetloc.ToLowerInvariant()) {
         throw "MSIX verification failed: diagnostics-config.json posthog_host authority must be canonical lowercase"
     }
+    Assert-ValidAuthorityPort $rawNetloc "posthog_host"
     $uri = $null
     if (-not [Uri]::TryCreate($HostValue, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -cne "https" -or -not [string]::IsNullOrEmpty($uri.UserInfo)) {
         throw "MSIX verification failed: diagnostics-config.json posthog_host is not a valid HTTPS URL"
@@ -312,7 +394,7 @@ function Assert-ValidPosthogHost([string]$HostValue) {
     }
 }
 
-function Assert-ValidDiagnosticsConfigFile([IO.FileInfo]$ConfigFile) {
+function Assert-ValidDiagnosticsConfigFile([IO.FileInfo]$ConfigFile, [string]$ExpectedChannel = "") {
     if (($ConfigFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "MSIX verification failed: diagnostics-config.json must not be a reparse point: $($ConfigFile.FullName)"
     }
@@ -395,6 +477,12 @@ function Assert-ValidDiagnosticsConfigFile([IO.FileInfo]$ConfigFile) {
         if ($pkgFmt -isnot [string] -or ($validPkgFormats -notcontains $pkgFmt)) {
             throw "MSIX verification failed: unsupported package_format '$pkgFmt' in diagnostics-config.json"
         }
+        if ($ExpectedChannel -eq "msstore" -and $pkgFmt -cne "msix") {
+            throw "MSIX verification failed: diagnostics-config.json package_format '$pkgFmt' must be 'msix' when Channel is 'msstore'"
+        }
+    }
+    elseif ($ExpectedChannel -eq "msstore") {
+        throw "MSIX verification failed: diagnostics-config.json must declare package_format='msix' (schema_version >= 2) when Channel is 'msstore'"
     }
 
     if ($schemaVer -eq 3) {
@@ -402,6 +490,9 @@ function Assert-ValidDiagnosticsConfigFile([IO.FileInfo]$ConfigFile) {
         $phHost = $propMap["posthog_host"]
         if ($phKey -isnot [string] -or $phHost -isnot [string]) {
             throw "MSIX verification failed: PostHog fields in diagnostics-config.json must be strings"
+        }
+        if (($phKey -ne "") -ne ($phHost -ne "")) {
+            throw "MSIX verification failed: diagnostics-config.json posthog_project_api_key and posthog_host must both be set or both be empty"
         }
         if ($phKey -ne "") {
             Assert-ValidPosthogKey $phKey
@@ -677,15 +768,18 @@ try {
         }
     }
 
-    $diagnosticsFiles = @(
-        Get-ChildItem -LiteralPath $inspectRoot -Recurse -Force -Filter "diagnostics-config.json" |
-            Where-Object { -not $_.PSIsContainer }
-    )
-    if ($RequireDiagnosticsConfig -and $diagnosticsFiles.Count -eq 0) {
-        throw "MSIX verification failed: diagnostics-config.json is missing from MSIX package"
+    $primaryDiagnosticsPath = Join-Path $inspectRoot "app\assets\diagnostics-config.json"
+    if ($RequireDiagnosticsConfig -and -not (Test-Path -LiteralPath $primaryDiagnosticsPath -PathType Leaf)) {
+        throw "MSIX verification failed: required app\assets\diagnostics-config.json is missing from MSIX package"
     }
-    foreach ($diagFile in $diagnosticsFiles) {
-        Assert-ValidDiagnosticsConfigFile $diagFile
+    $diagnosticsEntries = @(
+        Get-ChildItem -LiteralPath $inspectRoot -Recurse -Force -Filter "diagnostics-config.json"
+    )
+    foreach ($diagEntry in $diagnosticsEntries) {
+        if ($diagEntry.PSIsContainer) {
+            throw "MSIX verification failed: diagnostics-config.json must be a regular file: $($diagEntry.FullName)"
+        }
+        Assert-ValidDiagnosticsConfigFile $diagEntry -ExpectedChannel $Channel
     }
 
     $officeViewerDir = Join-Path $inspectRoot "app\assets\office_viewer"
